@@ -1,0 +1,21 @@
+{
+  "final_duration": {"min_exclusive": 45.0, "max_exclusive": 60.0, "assembly_target_min": 48.0, "assembly_target_max": 56.0},
+  "target_variants": 3,
+  "allow_fewer_variants": true,
+  "pipeline_version": "2.1",
+  "rule_version": "v2.1",
+  "variant_statuses": ["PASS", "REPAIRABLE", "EXHAUSTED"],
+  "repair_max_attempts": 5,
+  "candidate_duration": {"min": null, "max": null},
+  "cross_variant": {"source_overlap_seconds_max": 0.0, "semantic_duplicate_allowed": false},
+  "banned_categories": [
+    "price", "discount", "coupon", "subsidy", "promotion", "red_packet", "lottery",
+    "link_talk", "greeting", "casual_chat", "backend_process", "camera_setup",
+    "unrelated_product", "empty_filler"
+  ],
+  "semantic_closure": [
+    "enumeration", "cause_effect", "condition_result", "contrast", "reference", "promise", "independent_opening", "complete_ending"
+  ],
+  "connector_policy": "dependency_check_only",
+  "physical_clip_merge_tolerance_frames": 2
+}

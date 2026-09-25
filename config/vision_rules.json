@@ -1,0 +1,8 @@
+{
+  "host_ratio_min_exclusive": 0.70,
+  "sample_interval_seconds": 0.5,
+  "labels": ["host_visible", "clothes_closeup", "no_person", "uncertain"],
+  "count_as_host": ["host_visible"],
+  "do_not_count_as_host": ["clothes_closeup", "no_person", "uncertain"],
+  "cascade": ["apple_vision", "qwen_4b_vision", "qwen_8b_vision"]
+}

@@ -1,0 +1,46 @@
+# Local runtime data and outputs
+/.cache/
+/PROJECT_STATE.json
+/reports/
+/plans/
+/exports/
+/TIMELINE_DIFFERENCE_REPORT.md
+/.artifact_runtime/
+/node_modules
+
+# Secrets and local environments
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# Generated language and OS files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+*.log
+
+# Source media, subtitles, title workbooks, and Resolve projects/backups
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.srt
+*.vtt
+*.ass
+*.xlsx
+*.xls
+*.drp
+*.dra
+*.drb
+
+# Explicit test fixtures may contain small, synthetic media.
+!tests/fixtures/**
