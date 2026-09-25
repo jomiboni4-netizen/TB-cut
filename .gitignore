@@ -8,6 +8,12 @@
 /.artifact_runtime/
 /node_modules
 
+# Only the fixed sanitized review summary may be tracked under tmp.
+/tmp/*
+!/tmp/review_reports/
+/tmp/review_reports/*
+!/tmp/review_reports/LATEST_CODEX_REPORT.md
+
 # Secrets and local environments
 .env
 .env.*

@@ -1,5 +1,8 @@
 # Change Log
 
+## 2026-09-26 — temporary public review report
+- Require one fixed, sanitized task summary in `tmp/review_reports/LATEST_CODEX_REPORT.md`, with validation and Git state; keep actual runtime data ignored and clean the summary only on explicit user request.
+
 ## 2026-09-25 — public Git workflow
 - Require reviewable public-file diffs, task branches, pre-commit privacy checks, PR-based review, and stage-end Git status reports; keep runtime and business data local.
 
