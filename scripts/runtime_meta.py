@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from runtime_paths import RuntimePaths, resolve_runtime_paths
@@ -12,6 +13,59 @@ from runtime_paths import RuntimePaths, resolve_runtime_paths
 
 META_SCHEMA_VERSION = 1
 META_SUFFIX = ".meta.json"
+
+# Only these top-level sections are non-runtime policy. Unknown sections stay
+# in the digest so adding a new hard rule fails closed by default.
+NON_RUNTIME_RULE_SECTIONS = frozenset({
+    "Working communication",
+    "Git and public repository workflow",
+    "Temporary public review report",
+})
+
+
+def runtime_rules_content(content: bytes) -> bytes:
+    """Exclude named H2 workflow sections; preserve all other bytes."""
+    lines = content.splitlines(keepends=True)
+    retained = []
+    paragraph = []
+    excluded = False
+    fence = None
+    for index, line in enumerate(lines):
+        text = line.decode("utf-8").rstrip("\r\n")
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", text)
+        if fence is not None:
+            paragraph = []
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                fence = None
+        elif marker:
+            paragraph = []
+            fence = marker[1]
+        else:
+            heading = re.match(r"^ {0,3}(#{1,2})[ \t]+(.+?)\s*$", text)
+            if heading:
+                excluded = heading[1] == "##" and heading[2] in NON_RUNTIME_RULE_SECTIONS
+                paragraph = []
+            elif paragraph and re.fullmatch(r" {0,3}(=+|-+)[ \t]*", text):
+                # Only an unambiguous single-line H2 may start exclusion.
+                # Unknown/multiline Setext headings retain the whole paragraph.
+                title = lines[paragraph[0]].decode("utf-8").rstrip("\r\n")
+                excluded = (
+                    text.lstrip().startswith("-")
+                    and len(paragraph) == 1
+                    and re.fullmatch(r" {0,3}[^ \t].*", title) is not None
+                    and title.strip() in NON_RUNTIME_RULE_SECTIONS
+                )
+                for previous in paragraph:
+                    retained[previous] = not excluded
+                paragraph = []
+            elif text.strip():
+                paragraph.append(index)
+            else:
+                paragraph = []
+        retained.append(not excluded)
+    if fence is not None:
+        raise CacheIdentityError("rules_markdown_unclosed_fence")
+    return b"".join(line for line, keep in zip(lines, retained) if keep)
 
 
 class CacheIdentityError(ValueError):
@@ -82,10 +136,13 @@ def rules_fingerprint(root: Path | RuntimePaths) -> str:
     paths = [root / "PROJECT_RULES.md", *sorted((root / "config").glob("*.json"))]
     if not paths or any(not path.is_file() for path in paths):
         raise CacheIdentityError("rules_input_missing: PROJECT_RULES.md or config JSON")
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(b"runtime-rules-v2\0")
     for path in paths:
         digest.update(str(path.relative_to(root)).encode())
-        digest.update(_sha256(path).encode())
+        content = path.read_bytes()
+        if path.name == "PROJECT_RULES.md":
+            content = runtime_rules_content(content)
+        digest.update(hashlib.sha256(content).hexdigest().encode())
     return digest.hexdigest()
 
 

@@ -20,6 +20,8 @@ from runtime_meta import (  # noqa: E402
     expected_identity,
     load_checked_json,
     metadata_path,
+    rules_fingerprint,
+    runtime_rules_content,
     validate_cache,
     write_metadata,
 )
@@ -58,6 +60,133 @@ class RuntimeMetaTests(unittest.TestCase):
         write_metadata(self.root, self.artifact, "test")
         self.assertEqual(validate_cache(self.root, self.artifact)["batch_id"], "batch-a")
         self.assertEqual(load_checked_json(self.root, self.artifact, artifact_schema_version=1)["products"], [])
+
+    def check_workflow_edit(self, heading: str) -> None:
+        rules = self.root / "PROJECT_RULES.md"
+        before = f"# Rules\n\n## {heading}\nOld workflow.\n\n## Final deliverables\nDuration >45 and <60.\n"
+        rules.write_text(before)
+        write_metadata(self.root, self.artifact, "test")
+        fingerprint = rules_fingerprint(self.root)
+        metadata = metadata_path(self.artifact).read_bytes()
+        rules.write_text(before.replace("Old workflow.", "New workflow with different reporting instructions."))
+        self.assertEqual(rules_fingerprint(self.root), fingerprint)
+        validate_cache(self.root, self.artifact)
+        self.assertEqual(metadata_path(self.artifact).read_bytes(), metadata)
+
+    def test_git_workflow_does_not_invalidate_cache(self) -> None:
+        self.check_workflow_edit("Git and public repository workflow")
+
+    def test_review_report_does_not_invalidate_cache(self) -> None:
+        self.check_workflow_edit("Temporary public review report")
+
+    def test_communication_does_not_invalidate_cache(self) -> None:
+        self.check_workflow_edit("Working communication")
+
+    def test_all_hard_rule_sections_invalidate_cache(self) -> None:
+        for heading in (
+            "Final deliverables", "Candidate pool definition", "Allowed content",
+            "Banned content", "Semantic closure", "Cross-variant uniqueness",
+            "Visual/person rule", "Audio/cut-point rule", "Repair and exhaustion",
+            "Physical clip normalization", "Resolve", "New unknown hard rule",
+        ):
+            with self.subTest(heading=heading):
+                path = self.root / "PROJECT_RULES.md"
+                text = f"# Rules\n## Git and public repository workflow\nWorkflow.\n## {heading}\nOriginal constraint.\n"
+                path.write_text(text)
+                write_metadata(self.root, self.artifact, "test")
+                fingerprint = rules_fingerprint(self.root)
+                path.write_text(text.replace("Original constraint.", "Changed constraint."))
+                self.assertNotEqual(rules_fingerprint(self.root), fingerprint)
+                with self.assertRaisesRegex(CacheIdentityError, "rules_fingerprint_mismatch"):
+                    validate_cache(self.root, self.artifact)
+
+    def test_config_edit_add_and_remove_invalidate_cache(self) -> None:
+        for operation in ("edit", "add", "remove"):
+            with self.subTest(operation=operation):
+                path = self.root / "config/content_rules.json"
+                path.write_text('{}')
+                write_metadata(self.root, self.artifact, "test")
+                fingerprint = rules_fingerprint(self.root)
+                if operation == "edit":
+                    path.write_text('{"duration": 50}')
+                elif operation == "add":
+                    (self.root / "config/extra.json").write_text('{}')
+                else:
+                    path.unlink()
+                self.assertNotEqual(rules_fingerprint(self.root), fingerprint)
+                with self.assertRaisesRegex(CacheIdentityError, "rules_fingerprint_mismatch"):
+                    validate_cache(self.root, self.artifact)
+
+    def test_fenced_heading_is_not_a_workflow_section(self) -> None:
+        for fence in (b"```", b"~~~~"):
+            text = b"# Rules\n" + fence + b"\n## Working communication\nHard rule example\n" + fence + b"\n"
+            self.assertEqual(runtime_rules_content(text), text)
+        with self.assertRaisesRegex(CacheIdentityError, "rules_markdown_unclosed_fence"):
+            runtime_rules_content(b"# Rules\n```\nunfinished")
+
+    def test_unknown_heading_ends_workflow_exclusion(self) -> None:
+        text = b"# Rules\n## Working communication\nWorkflow\n# Extra rules\nHard rule\n"
+        self.assertEqual(runtime_rules_content(text), b"# Rules\n# Extra rules\nHard rule\n")
+
+    def test_setext_heading_ends_exclusion(self) -> None:
+        for underline in (b"===", b"---", b"=", b"-", b"   ---\t"):
+            with self.subTest(underline=underline):
+                section = b"Extra rules\n" + underline + b"\nHard rule\n"
+                text = b"# Rules\n## Working communication\nWorkflow\n\n" + section
+                self.assertEqual(runtime_rules_content(text), b"# Rules\n" + section)
+
+    def test_setext_hard_and_unknown_rules_invalidate_cache(self) -> None:
+        for underline in ("===", "---"):
+            for heading in ("Final deliverables", "New unknown hard rule"):
+                with self.subTest(underline=underline, heading=heading):
+                    path = self.root / "PROJECT_RULES.md"
+                    text = f"# Rules\n## Working communication\nWorkflow\n\n{heading}\n{underline}\nOriginal constraint.\n"
+                    path.write_text(text)
+                    write_metadata(self.root, self.artifact, "test")
+                    fingerprint = rules_fingerprint(self.root)
+                    path.write_text(text.replace("Original constraint.", "Changed constraint."))
+                    self.assertNotEqual(rules_fingerprint(self.root), fingerprint)
+                    with self.assertRaisesRegex(CacheIdentityError, "rules_fingerprint_mismatch"):
+                        validate_cache(self.root, self.artifact)
+
+    def test_setext_workflow_h2_is_excluded_but_h1_is_retained(self) -> None:
+        for heading in ("Working communication", "Git and public repository workflow", "Temporary public review report"):
+            for underline in ("---", "==="):
+                with self.subTest(heading=heading, underline=underline):
+                    text = f"# Rules\n\n{heading}\n{underline}\nOld workflow.\n\n## Final deliverables\nHard rule\n".encode()
+                    changed = text.replace(b"Old workflow.", b"New workflow.")
+                    if underline == "---":
+                        self.assertEqual(runtime_rules_content(text), runtime_rules_content(changed))
+                    else:
+                        self.assertNotEqual(runtime_rules_content(text), runtime_rules_content(changed))
+
+    def test_multiline_setext_unknown_heading_is_retained(self) -> None:
+        for underline in (b"===", b"---"):
+            section = b"Unknown hard rules\nWorking communication\n" + underline + b"\nHard rule\n"
+            text = b"# Rules\n## Working communication\nWorkflow\n\n" + section
+            self.assertEqual(runtime_rules_content(text), b"# Rules\n" + section)
+            self.assertNotEqual(runtime_rules_content(text), runtime_rules_content(text.replace(b"Unknown hard rules", b"Changed hard rules")))
+
+    def test_setext_inside_fences_does_not_change_exclusion(self) -> None:
+        for fence in (b"```", b"~~~~"):
+            for underline in (b"===", b"---"):
+                block = fence + b"\nWorking communication\n" + underline + b"\nExample\n" + fence + b"\n"
+                self.assertEqual(runtime_rules_content(b"# Rules\n" + block), b"# Rules\n" + block)
+                text = b"# Rules\n## Working communication\n" + block + b"Workflow\n## Hard rules\nKeep\n"
+                self.assertEqual(runtime_rules_content(text), b"# Rules\n## Hard rules\nKeep\n")
+
+    def test_legacy_fingerprint_is_not_silently_accepted(self) -> None:
+        legacy = hashlib.sha256()
+        for path in [self.root / "PROJECT_RULES.md", *sorted((self.root / "config").glob("*.json"))]:
+            legacy.update(str(path.relative_to(self.root)).encode())
+            legacy.update(hashlib.sha256(path.read_bytes()).hexdigest().encode())
+        write_metadata(self.root, self.artifact, "test")
+        sidecar = metadata_path(self.artifact)
+        document = json.loads(sidecar.read_text())
+        document["rules_fingerprint"] = legacy.hexdigest()
+        sidecar.write_text(json.dumps(document))
+        with self.assertRaisesRegex(CacheIdentityError, "rules_fingerprint_mismatch"):
+            validate_cache(self.root, self.artifact)
 
     def test_other_batch_fails(self) -> None:
         write_metadata(self.root, self.artifact, "test")
