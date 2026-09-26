@@ -4,20 +4,17 @@ from __future__ import annotations
 
 import argparse
 from decimal import Decimal, InvalidOperation
-import fcntl
-import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
-from runtime_meta import expected_identity, metadata_path, validate_cache, write_metadata
+from runtime_meta import validate_cache, write_metadata
 from runtime_paths import resolve_runtime_paths
+from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
@@ -131,7 +128,7 @@ def build_model(source: Path, parsed: dict, numeric_evidence: dict) -> dict:
         products.append({"product_index": len(products)+1, "encoding_id": encoding, "title": title})
     if not products:
         raise TitlesError("titles_has_no_products")
-    return {"source": str(source), "sheet": parsed["sheet"], "products": products}
+    return {"schema_version": 2, "generator": "index_titles.py:v2", "source": str(source), "sheet": parsed["sheet"], "products": products}
 
 
 def parse_workbook(source: Path, repo: Path, node: str) -> dict:
@@ -141,55 +138,26 @@ def parse_workbook(source: Path, repo: Path, node: str) -> dict:
 
 
 def generate(paths, node="node") -> Path:
-    state_bytes = paths.state_path.read_bytes()
-    state = json.loads(state_bytes)
-    raw_source = state.get("title_path")
+    with generator_lock(paths):
+        return _generate_locked(paths, node)
+
+
+def _generate_locked(paths, node):
+    snapshot = BuildSnapshot(paths)
+    raw_source = snapshot.state.get("title_path")
     if not isinstance(raw_source, str) or not raw_source:
         raise TitlesError("title_path_missing")
     source = Path(raw_source).expanduser().resolve()
-    identity = expected_identity(paths)
-    source_digest = hashlib.sha256(source.read_bytes()).digest()
     parsed = parse_workbook(source, paths.repo_root, node)
     model = build_model(source, parsed, workbook_guards(source, parsed.get("sheet")))
     content = (json.dumps(model, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    paths.cache_dir.mkdir(parents=True, exist_ok=True)
     output = paths.cache_dir / "titles.json"
-    sidecar = metadata_path(output)
-    # Lock the directory inode: no persistent lock file and no old-cache input.
-    descriptor = os.open(paths.cache_dir, os.O_RDONLY)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with tempfile.TemporaryDirectory(prefix=".titles-", dir=paths.cache_dir) as temporary:
-            directory = Path(temporary)
-            staged = directory / "titles.json"
-            staged.write_bytes(content)
-            staged_meta = write_metadata(paths, staged, "index_titles.py", identity=identity)
-            validate_cache(paths, staged, expected=identity)
-            if (paths.state_path.read_bytes() != state_bytes or expected_identity(paths) != identity
-                    or hashlib.sha256(source.read_bytes()).digest() != source_digest):
-                raise TitlesError("inputs_changed_during_generation")
-            backups = {}
-            for target in (output, sidecar):
-                if target.is_symlink() or target.exists() and not target.is_file():
-                    raise TitlesError("titles_output_must_be_regular_file")
-                if target.exists():
-                    backup = directory / (target.name + ".previous")
-                    shutil.copyfile(target, backup)
-                    backups[target] = backup
-            replaced = []
-            try:
-                for staged_file, target in ((staged, output), (staged_meta, sidecar)):
-                    os.replace(staged_file, target)
-                    replaced.append(target)
-            except BaseException:
-                for target in reversed(replaced):
-                    if target in backups:
-                        os.replace(backups[target], target)
-                    else:
-                        target.unlink()
-                raise
-    finally:
-        os.close(descriptor)
+    with tempfile.TemporaryDirectory(prefix=".titles-", dir=paths.cache_dir) as temporary:
+        staged = Path(temporary) / "titles.json"
+        staged.write_bytes(content)
+        staged_meta = write_metadata(paths, staged, "index_titles.py", identity=snapshot.identity)
+        validate_cache(paths, staged, expected=snapshot.identity)
+        publish_pair(staged, staged_meta, output, before_commit=snapshot.check)
     return output
 
 

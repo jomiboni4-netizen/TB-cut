@@ -57,7 +57,7 @@ def inspect(paths: RuntimePaths) -> list[str]:
                     continue
                 try:
                     validate_cache(paths, artifact, expected=expected)
-                except (CacheIdentityError, OSError) as exc:
+                except (CacheIdentityError, OSError, ValueError, TypeError) as exc:
                     reasons.append(f"cache_identity_invalid: {artifact.relative_to(paths.workspace_root)}: {exc}")
     for name in MAIN_SCRIPTS:
         script = paths.repo_root / "scripts" / name

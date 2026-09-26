@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "distribution": "Codex primary runtime 26.909.12148",
+  "platform": "darwin",
+  "arch": "arm64",
+  "node": "24.19.0",
+  "artifactTool": "2.8.59",
+  "fileCount": 208,
+  "treeSha256": "4d1d28c7619fb06a7f56ec083aa5f4e1363e68ee386d130ad1e1c065f27c48e0",
+  "treeAlgorithm": "SHA256 of sorted UTF-8 relative-path + NUL + file SHA256 hex + newline; all files including bundled transitive dependencies"
+}

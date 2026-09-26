@@ -211,9 +211,9 @@ def migration(paths: RuntimePaths, *, apply: bool = False, baseline_preflight: P
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, ArtifactPathError) as exc:
                 record(path, "STALE", f"resolve_report_source_unproven: {exc}")
             continue
-        if path.name in {"titles.json", "mimo_request.json"}:
+        if path.name == "mimo_request.json":
             record(path, "STALE", "requires_explicit_human_attestation")
-        elif path.name in {"subtitle_index.json", "product_ranges.json"}:
+        elif path.name in {"titles.json", "subtitle_index.json", "product_ranges.json"}:
             record(path, "STALE", "regenerate_from_validated_inputs_when_prerequisites_pass")
         elif path.name == "prior_state_20260909.json" or "before_" in path.name:
             record(path, "STALE", "historical_snapshot")

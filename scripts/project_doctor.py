@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, json, shutil
+import argparse, json, shutil, subprocess
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
@@ -9,6 +9,7 @@ def main():
     ap = argparse.ArgumentParser(description="Check TB Cut V2 project health")
     ap.add_argument("--root", default=".")
     ap.add_argument("--workspace")
+    ap.add_argument("--node", default="node")
     args = ap.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
@@ -30,7 +31,17 @@ def main():
             errors.append(f"invalid PROJECT_STATE.json: {e}")
     for cmd in ("python3", "ffmpeg", "ffprobe"):
         if shutil.which(cmd) is None: warnings.append(f"command not found: {cmd}")
+    try:
+        result = subprocess.run([args.node, str(root / "scripts/check_workbook_dependencies.mjs")],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            errors.append("workbook dependency check failed: " + result.stderr.strip())
+        else:
+            print("OK   : pinned Node, complete artifact-tool distribution digest, workbook API import")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        errors.append("workbook dependency check unavailable: " + type(exc).__name__)
     print("TB Cut V2 doctor")
+    print("Scope: required paths, state JSON/configured fields, command availability, workbook dependencies; no runtime cache/media/Resolve validation")
     for x in errors: print("ERROR:", x)
     for x in warnings: print("WARN :", x)
     if not errors: print("OK   : project structure is valid")

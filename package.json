@@ -1,0 +1,9 @@
+{
+  "name": "tb-cut-workbook-parser",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.19.0" },
+  "dependencies": { "@oai/artifact-tool": "2.8.59" },
+  "scripts": { "check:workbook": "node scripts/check_workbook_dependencies.mjs" }
+}

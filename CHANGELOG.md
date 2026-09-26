@@ -1,5 +1,12 @@
 # Change Log
 
+## 2026-09-26 — cache generation safety v2
+- Remove legacy titles attestation; enforce title generator/schema provenance in readers and preflight.
+- Freeze subtitle inputs, lock generators, stage outputs, recheck identities, and fail closed on publication/rollback faults without hiding the first error.
+- Parse the same bytes authenticated by metadata SHA; add synthetic mutation, concurrency and fault tests.
+- Pin the private Node workbook distribution and add read-only dependency checks without changing the XLSX parser.
+- Record stale generator artifacts and separate recovery authorization in docs/CACHE_SAFETY_UPGRADE.json; no real runtime changes.
+
 ## 2026-09-26 — deterministic title index generation
 - Define effective workbook row order as product/link numbering; reject partial rows and duplicate IDs, preserve string IDs and actual sheet names.
 - Add Node machine-readable workbook inspection and Python title validation/publication with current identity metadata, synthetic regression tests, and rollback on publication errors.

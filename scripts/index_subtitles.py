@@ -8,10 +8,12 @@ import hashlib
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import CacheIdentityError, validate_cache, write_metadata
+from runtime_meta import CacheIdentityError, input_fingerprint, validate_cache, write_metadata
+from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 
 
 TIME_RE = re.compile(
@@ -61,8 +63,8 @@ def media_duration(path: Path) -> float:
     return float(subprocess.check_output(command, text=True).strip())
 
 
-def parse_srt(path: Path, global_offset: float) -> list[dict]:
-    text = path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+def parse_srt(path: Path, global_offset: float, content: bytes | None = None) -> list[dict]:
+    text = (path.read_bytes() if content is None else content).decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     cues: list[dict] = []
     for block in re.split(r"\n\s*\n", text.strip()):
         lines = [line.strip() for line in block.splitlines() if line.strip()]
@@ -86,15 +88,14 @@ def parse_srt(path: Path, global_offset: float) -> list[dict]:
     return cues
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--workspace")
-    args = parser.parse_args()
-    root = Path(args.root).resolve()
-    paths = resolve_runtime_paths(root, args.workspace)
-    state_path = paths.state_path
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+def generate(paths):
+    with generator_lock(paths):
+        return _generate_locked(paths)
+
+
+def _generate_locked(paths):
+    snapshot = BuildSnapshot(paths)
+    state = snapshot.state
     subtitles = expand(state.get("subtitle_paths") or [], ".srt")
     videos = expand(state.get("video_paths") or [], ".mp4")
     if not subtitles:
@@ -104,16 +105,25 @@ def main() -> None:
     if missing_video:
         raise SystemExit("字幕缺少同名视频：" + ",".join(missing_video))
 
-    fingerprint = digest_files(subtitles)
+    subtitle_bytes = {p: p.read_bytes() for p in subtitles}
+    digest = hashlib.sha256()
+    for path, content in subtitle_bytes.items():
+        digest.update(str(path).encode())
+        digest.update(content)
+    fingerprint = digest.hexdigest()
+    buffered = {p.resolve(): content for p, content in subtitle_bytes.items()}
+    if input_fingerprint(paths, state, subtitle_contents=buffered) != snapshot.identity['input_fingerprint']:
+        raise CacheIdentityError('inputs_changed_during_generation')
+    snapshot.check()
     output = paths.cache_dir / "subtitle_index.json"
     if output.exists() and state.get("runtime", {}).get("subtitle_index_fingerprint") == fingerprint:
         try:
-            validate_cache(paths, output)
+            validate_cache(paths, output, expected=snapshot.identity)
         except CacheIdentityError as exc:
             print(f"字幕索引身份无效，将从原始输入重建：{exc}")
         else:
-            print(f"字幕索引命中缓存：{len(subtitles)} 个文件")
-            return
+            snapshot.check()
+            return output
 
     cues: list[dict] = []
     sources: list[dict] = []
@@ -121,7 +131,7 @@ def main() -> None:
     for subtitle in subtitles:
         video = video_by_stem[subtitle.stem]
         duration = media_duration(video)
-        local_cues = parse_srt(subtitle, global_offset)
+        local_cues = parse_srt(subtitle, global_offset, subtitle_bytes[subtitle])
         cues.extend(local_cues)
         sources.append({
             "source_stem": subtitle.stem,
@@ -134,18 +144,33 @@ def main() -> None:
         })
         global_offset += duration
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({
-        "schema_version": 1,
-        "fingerprint": fingerprint,
-        "sources": sources,
-        "cues": cues,
-    }, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
-    write_metadata(paths, output, "index_subtitles.py")
-    state.setdefault("runtime", {})["subtitle_index_fingerprint"] = fingerprint
-    state["runtime"]["last_successful_stage"] = "subtitle_indexed"
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"字幕索引完成：{len(subtitles)} 个文件，{len(cues)} 条字幕")
+    with tempfile.TemporaryDirectory(prefix=".subtitles-", dir=paths.cache_dir) as temporary:
+        staged = Path(temporary) / output.name
+        staged.write_text(json.dumps({
+            "schema_version": 1, "generator": "index_subtitles.py:v2", "fingerprint": fingerprint,
+            "sources": sources, "cues": cues,
+        }, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+        staged_meta = write_metadata(paths, staged, "index_subtitles.py", identity=snapshot.identity)
+        validate_cache(paths, staged, expected=snapshot.identity)
+        # The state rename is separate too; never advance it before both files.
+        updated_state = json.loads(snapshot.state_bytes)
+        updated_state.setdefault("runtime", {})["subtitle_index_fingerprint"] = fingerprint
+        updated_state["runtime"]["last_successful_stage"] = "subtitle_indexed"
+        with tempfile.TemporaryDirectory(prefix=".subtitle-state-", dir=paths.state_path.parent) as state_temp:
+            staged_state = Path(state_temp) / "state.json"
+            staged_state.write_text(json.dumps(updated_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            publish_pair(staged, staged_meta, output, before_commit=snapshot.check,
+                         state_update=(staged_state, paths.state_path))
+    return output
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--workspace")
+    args = parser.parse_args()
+    generate(resolve_runtime_paths(Path(args.root).resolve(), args.workspace))
+    print("subtitle index generated or validated")
 
 
 if __name__ == "__main__":

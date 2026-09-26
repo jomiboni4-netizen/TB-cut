@@ -25,6 +25,9 @@ from runtime_meta import (  # noqa: E402
     validate_cache,
     write_metadata,
 )
+import runtime_meta
+from workspace_preflight import inspect
+from runtime_paths import resolve_runtime_paths
 from attest_runtime_cache import main as attest_cache_main  # noqa: E402
 from resolve_write_v2 import load_products  # noqa: E402
 
@@ -235,6 +238,44 @@ class RuntimeMetaTests(unittest.TestCase):
         titles.write_text('{"products": []}\n', encoding="utf-8")
         with self.assertRaisesRegex(CacheIdentityError, "legacy_cache_missing_metadata"):
             load_products(self.root, [1])
+
+    def test_legacy_titles_cannot_be_attested_even_with_valid_rows(self):
+        titles = self.root / '.cache/titles.json'
+        titles.write_text(json.dumps({'source': 'synthetic.xlsx', 'sheet': 'Sheet1',
+                                     'products': [{'product_index': 1, 'encoding_id': '001', 'title': 'Synthetic'}]}))
+        identity = expected_identity(self.root)
+        argv = ['attest_runtime_cache.py', '--root', str(self.root), 'attest-input',
+                '--artifact', str(titles), '--artifact-sha256', hashlib.sha256(titles.read_bytes()).hexdigest(),
+                '--batch-id', identity['batch_id'], '--input-fingerprint', identity['input_fingerprint']]
+        with patch.object(sys, 'argv', argv), self.assertRaisesRegex(CacheIdentityError, 'attestation_not_allowed'):
+            attest_cache_main()
+        self.assertFalse(metadata_path(titles).exists())
+
+    def test_titles_generic_identity_does_not_bypass_provenance_or_schema(self):
+        titles = self.root / '.cache/titles.json'
+        titles.write_text(json.dumps({'source': 'synthetic.xlsx', 'sheet': 'Sheet1',
+                                     'products': [{'product_index': 1, 'encoding_id': '001', 'title': 'Synthetic'}]}))
+        for producer in ('explicit_human_attestation', 'index_titles.py'):
+            write_metadata(self.root, titles, producer)
+            with self.assertRaisesRegex(CacheIdentityError, 'titles_'):
+                load_checked_json(self.root, titles)
+            with self.assertRaisesRegex(CacheIdentityError, 'titles_'):
+                load_products(self.root, [1])
+            self.assertTrue(any('titles_' in reason for reason in inspect(resolve_runtime_paths(self.root))))
+
+    def test_parse_uses_exact_authenticated_bytes_after_path_replacement(self):
+        write_metadata(self.root, self.artifact, 'test')
+        checked = runtime_meta._checked_bytes
+        def replace_after_check(*args, **kwargs):
+            result = checked(*args, **kwargs)
+            replacement = self.artifact.with_suffix('.replacement')
+            replacement.write_text('{"products": ["unauthenticated"]}')
+            replacement.replace(self.artifact)
+            return result
+        with patch.object(runtime_meta, '_checked_bytes', side_effect=replace_after_check):
+            self.assertEqual(load_checked_json(self.root, self.artifact)['products'], [])
+        with self.assertRaisesRegex(CacheIdentityError, 'artifact_sha256_mismatch'):
+            load_checked_json(self.root, self.artifact)
 
     def test_response_attestation_requires_matching_request_digest(self) -> None:
         product_dir = self.root / ".cache/product_01_rough"

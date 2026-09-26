@@ -72,14 +72,14 @@ def main() -> None:
         return
 
     override_artifact = artifact.parent == paths.cache_dir and artifact.name.endswith("range_overrides.json")
-    if artifact != paths.cache_dir / "titles.json" and not override_artifact and not (
+    if not override_artifact and not (
         artifact.parent.parent == paths.cache_dir
         and re.fullmatch(r"product_\d+_rough", artifact.parent.name)
         and artifact.name == "mimo_request.json"
     ):
-        raise CacheIdentityError("attestation_not_allowed: only titles.json, range overrides, or base mimo_request.json")
+        raise CacheIdentityError("attestation_not_allowed: only range overrides or base mimo_request.json")
     document = json.loads(artifact.read_text(encoding="utf-8"))
-    if artifact.name == "titles.json" or override_artifact:
+    if override_artifact:
         if args.product_id is not None or not isinstance(document.get("products"), list):
             raise CacheIdentityError("products_attestation_invalid")
     else:

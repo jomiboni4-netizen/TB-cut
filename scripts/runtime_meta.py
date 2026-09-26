@@ -111,7 +111,7 @@ def _state(root: Path | RuntimePaths) -> dict:
     return state
 
 
-def input_fingerprint(root: Path | RuntimePaths, state: dict | None = None) -> str:
+def input_fingerprint(root: Path | RuntimePaths, state: dict | None = None, *, subtitle_contents: dict | None = None) -> str:
     """Hash title/SRT content and video identity without reading large video bytes."""
     state = state or _state(root)
     title_raw = state.get("title_path")
@@ -122,9 +122,11 @@ def input_fingerprint(root: Path | RuntimePaths, state: dict | None = None) -> s
         raise CacheIdentityError(f"title_input_missing: {title}")
     subtitles = _files(state.get("subtitle_paths") or [], ".srt")
     videos = _files(state.get("video_paths") or [], ".mp4")
+    if subtitle_contents is not None and set(subtitle_contents) != set(subtitles):
+        raise CacheIdentityError("subtitle_snapshot_file_set_changed")
     payload = {
         "title": [str(title), _sha256(title)],
-        "subtitles": [[str(path), _sha256(path)] for path in subtitles],
+        "subtitles": [[str(path), _sha256(path) if subtitle_contents is None else hashlib.sha256(subtitle_contents[path]).hexdigest()] for path in subtitles],
         "videos": [[str(path), path.stat().st_size, path.stat().st_mtime_ns] for path in videos],
         "resolve": state.get("resolve") or {},
     }
@@ -146,9 +148,9 @@ def rules_fingerprint(root: Path | RuntimePaths) -> str:
     return digest.hexdigest()
 
 
-def expected_identity(root: Path | RuntimePaths) -> dict:
+def expected_identity(root: Path | RuntimePaths, state: dict | None = None) -> dict:
     paths = _paths(root)
-    state = _state(paths)
+    state = _state(paths) if state is None else state
     return {
         "schema_version": META_SCHEMA_VERSION,
         "pipeline_version": str(state["runtime"]["pipeline_version"]),
@@ -219,15 +221,58 @@ def find_root(artifact: Path) -> Path:
     raise CacheIdentityError(f"runtime_root_missing_for: {artifact}")
 
 
-def validate_cache(root: Path, artifact: Path, *, product_id: int | None = None, expected: dict | None = None) -> dict:
+def invalidation_path(artifact: Path) -> Path:
+    return Path(str(artifact) + ".invalid")
+
+
+def _checked_bytes(root, artifact, *, product_id=None, expected=None):
     artifact = Path(artifact)
+    if invalidation_path(artifact).exists():
+        raise CacheIdentityError(f"publication_incomplete: {artifact}")
     if not artifact.is_file():
         raise CacheIdentityError(f"artifact_missing: {artifact}")
     meta = read_metadata(artifact)
     validate_metadata(meta, expected or expected_identity(root), product_id=product_id)
-    if meta["artifact_sha256"] != _sha256(artifact):
+    content = artifact.read_bytes()
+    if meta["artifact_sha256"] != hashlib.sha256(content).hexdigest():
         raise CacheIdentityError(f"artifact_sha256_mismatch: {artifact}")
-    return meta
+    if invalidation_path(artifact).exists():
+        raise CacheIdentityError(f"publication_incomplete: {artifact}")
+    if artifact.name == "titles.json":
+        validate_titles(json.loads(content), meta)
+    if artifact.name == "subtitle_index.json":
+        value = json.loads(content)
+        if (meta.get('producer') != 'index_subtitles.py' or not isinstance(value, dict)
+                or value.get('generator') != 'index_subtitles.py:v2' or value.get('schema_version') != 1):
+            raise CacheIdentityError('subtitle_generator_provenance_invalid')
+    return meta, content
+
+
+def validate_titles(value, meta):
+    """Generator provenance/schema gate; not a signature against malicious edits."""
+    if meta.get("producer") != "index_titles.py":
+        raise CacheIdentityError("titles_producer_invalid")
+    if not isinstance(value, dict) or value.get("schema_version") != 2 or value.get("generator") != "index_titles.py:v2":
+        raise CacheIdentityError("titles_schema_or_provenance_invalid")
+    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in ("source", "sheet")):
+        raise CacheIdentityError("titles_source_or_sheet_invalid")
+    products = value.get("products")
+    if not isinstance(products, list) or not products:
+        raise CacheIdentityError("titles_products_invalid")
+    seen = set()
+    for index, row in enumerate(products, 1):
+        if not isinstance(row, dict) or type(row.get("product_index")) is not int or row["product_index"] != index:
+            raise CacheIdentityError("titles_product_index_invalid")
+        encoding, title = row.get("encoding_id"), row.get("title")
+        if not isinstance(encoding, str) or not encoding or encoding.strip() != encoding or encoding in seen:
+            raise CacheIdentityError("titles_encoding_id_invalid")
+        if not isinstance(title, str) or not title.strip():
+            raise CacheIdentityError("titles_title_invalid")
+        seen.add(encoding)
+
+
+def validate_cache(root: Path, artifact: Path, *, product_id: int | None = None, expected: dict | None = None) -> dict:
+    return _checked_bytes(root, artifact, product_id=product_id, expected=expected)[0]
 
 
 def load_checked_json(
@@ -239,8 +284,8 @@ def load_checked_json(
     artifact_schema_version: int | None = None,
 ) -> dict:
     expected = expected or expected_identity(root)
-    validate_cache(root, artifact, product_id=product_id, expected=expected)
-    value = json.loads(Path(artifact).read_text(encoding="utf-8"))
+    _, content = _checked_bytes(root, artifact, product_id=product_id, expected=expected)
+    value = json.loads(content)
     if not isinstance(value, dict):
         raise CacheIdentityError(f"artifact_invalid_type: {artifact}")
     if value.get("pipeline_version") is not None and str(value["pipeline_version"]) != expected["pipeline_version"]:

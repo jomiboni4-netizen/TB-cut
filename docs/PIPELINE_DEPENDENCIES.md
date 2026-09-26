@@ -24,7 +24,7 @@
 | export | `export_marked_variants.py` | `PROJECT_STATE.json` Resolve 项目/目标时间线及商品标记；CLI 输出目录 | `.cache/export_manifest.json` + meta；仅 `--render` 时产生 MP4 | 当前项目名/时间线；按连续片段和音频终点设导出范围；每次更新 manifest 后刷新 meta | export verification |
 | export verification | `verify_exports.py` | 已验证的 `.cache/export_manifest.json`、manifest 指向的 MP4、FFmpeg/ffprobe | `.cache/export_verification.json` + meta | 身份、文件数量/时长差、尾部黑帧 | 交付 |
 
-`enforce_v2_request_rules.py` 可对已认证请求原位更新规则并刷新 meta，但它不能从零生成基础请求。`inspect_timeline_for_export.py`、`compare_timeline_versions.py`、`update_title_counts.mjs`、`update_batch_state.py` 是辅助/历史或交付后步骤，不是上述主链的自动前置步骤。时间线快照和历史对比仍未接入统一身份校验，勿当成当前批次依据。`project_doctor.py` 只查结构及配置存在性，不代替缓存身份或 Resolve 预检。
+`enforce_v2_request_rules.py` 可对已认证请求原位更新规则并刷新 meta，但它不能从零生成基础请求。`inspect_timeline_for_export.py`、`compare_timeline_versions.py`、`update_title_counts.mjs`、`update_batch_state.py` 是辅助/历史或交付后步骤，不是上述主链的自动前置步骤。时间线快照和历史对比仍未接入统一身份校验，勿当成当前批次依据。`project_doctor.py` 检查必需路径、state JSON 和配置字段、命令可用性，以及固定 Node/module 版本、分发包摘要和 workbook API 导入；不读取素材、不验证 runtime 缓存、不连接 Resolve。
 
 前置顺序：`init → subtitle index + title index → product ranges → expanded candidates → MiMo review → semantic audit →（必要时 repair）→ rough approval → windowed ASR → window quality → refine plans → person coverage + final approval → Resolve write → Resolve validation → export → export verification`。`fingerprint_inputs.py` 可在 init 后运行，但它的输出目前不是后续脚本的强制输入；统一身份 helper 会直接计算当前输入指纹。
 
@@ -42,14 +42,14 @@
 
 `input_fingerprint` 对标题与 SRT 文件内容取 SHA-256；视频用路径、大小和纳秒修改时间，避免重复读取大视频；还包含 Resolve 项目/时间线配置。它不包含 `project_root`，便于将 runtime workspace 物理分离。`rules_fingerprint` 使用 `runtime-rules-v2` 算法标识，覆盖 `PROJECT_RULES.md` 中影响 runtime 的内容及全部 `config/*.json` 的文件名和内容。仅排除三个明确的二级章节：`Working communication`、`Git and public repository workflow`、`Temporary public review report`。其余内容（包括未知章节）默认参与指纹；代码块内的标题不作为章节边界，未闭合代码块会拒绝处理。剪辑硬规则不得放入这些纯流程章节。这能识别常见输入/规则变化，但视频若在大小和修改时间完全不变的情况下被替换，单靠该指纹无法识别；若未来需要抵御这种情况，再引入视频内容摘要。
 
-此前 `runtime-rules-v2` 修复仅改变身份计算范围，不改剪辑规则、pipeline 版本或 metadata schema。新算法不兼容旧全文件指纹：旧 metadata 仍会 fail closed，不自动认证、改写或接受旧摘要。此次新增标题编号规则会再次改变规则摘要；真实 runtime 须在后续单独授权的恢复阶段重建。现有 attest 工具的白名单、摘要检查及拒绝覆盖已有 metadata 的行为保持不变。
+此前 `runtime-rules-v2` 修复仅改变身份计算范围，不改剪辑规则、pipeline 版本或 metadata schema。新算法不兼容旧全文件指纹：旧 metadata 仍会 fail closed，不自动认证、改写或接受旧摘要。此前新增标题编号规则也改变了规则摘要；本轮不改 PROJECT_RULES.md/config，真实 runtime 仍须在后续单独授权的恢复阶段重建。titles 已从 attest 白名单移除；摘要检查及拒绝覆盖已有 metadata 的行为保留。
 
 代码本身未纳入指纹。剪辑语义发生变化时仍须按 `AGENTS.md` 升级 `pipeline_version` 并使旧派生产物失效；metadata 不代替这一步。
 
 ## Legacy and refresh path
 
 - 旧 V2.1 JSON **保留原处，不自动删除、不自动补身份**。缺少 sidecar 就是 legacy；读取关键缓存的脚本会在外部调用或 Resolve 连接前失败。旧 MiMo 响应即使有历史 `_meta.json` 请求摘要，也不能单靠它证明批次身份，脚本不会自动重发。
-- `index_subtitles.py` 可从原 SRT/MP4 重建；`index_titles.py` 可从当前工作簿重建。基础 `mimo_request.json` 仍没有完整生成器；请求及人工覆盖记录须先复核来源，再通过 `python3 scripts/attest_runtime_cache.py --root . identity` 取得当前身份，并使用 `attest-input` 加上**当前文件 SHA-256、批次 ID、输入指纹、商品编号（如适用）**显式认证。命令只允许 `.cache/titles.json`、`.cache/*range_overrides.json` 和 `R/mimo_request.json`；不接受其他 legacy 文件，也不覆盖已有 meta。
+- `index_subtitles.py` 可从原 SRT/MP4 重建；`index_titles.py` 可从当前工作簿重建。基础 `mimo_request.json` 仍没有完整生成器；请求及人工覆盖记录须先复核来源，再通过 `python3 scripts/attest_runtime_cache.py --root . identity` 取得当前身份，并使用 `attest-input` 加上**当前文件 SHA-256、批次 ID、输入指纹、商品编号（如适用）**显式认证。命令只允许 `.cache/*range_overrides.json` 和 `R/mimo_request.json`；titles 必须由当前工作簿生成器重建，即使旧文件结构看似合法，也不得认证。其他 legacy 文件被拒绝，已有 meta 不覆盖。
 - 认证命令形态如下，所有尖括号值均须来自本机重新计算与人工复核，不能从旧缓存猜测：
 
   ```bash
@@ -79,10 +79,22 @@
 
 ## Deterministic title index
 
-正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。Node 必须能解析仓库现有的 `@oai/artifact-tool`；没有新增第三方 XLSX 依赖，也没有在 JavaScript 复制 identity 算法。缺失 Node/依赖时直接失败，不使用旧缓存兜底。
+正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。Node 和 `@oai/artifact-tool` 必须符合下述固定分发约定；缺失或版本/摘要不符直接失败，不更换 XLSX parser，不使用旧缓存兜底。
 
-Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。输出保留 `source`、`sheet`、`products` 三个顶层字段，采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
+Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。输出保留 `source`、`sheet`、`products`，新增 `schema_version=2` 和 `generator=index_titles.py:v2`；采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
 
-全部验证完成后，在 cache 同文件系统的临时目录写 artifact，调用现有 `write_metadata()`，验证临时对的摘要与身份，并重新检查输入/state/规则是否变化。使用目录锁串行化本生成器的发布；备份旧字节仅用于失败回滚，不用于生成数据。每个文件通过原子 rename 发布；可捕获的发布异常回滚已替换文件，临时目录清理。两个独立文件无法靠两次 rename 获得跨文件、断电级事务原子性：强制终止在切换窗口内时，既有摘要校验必须 fail closed，不得人工补签；须重新运行受控生成。无普通失败会留下半写文件。
+两个生成器从开始到完成持有同一 cache 目录锁；并发调用立即失败。开始时固定 state bytes、expected identity 和完整 rules/config 摘要。subtitle 解析使用固定的 SRT bytes，并确认这些 bytes 与固定 input identity 一致；视频身份仍为路径、大小、纳秒修改时间，不是视频内容摘要。artifact/meta 在临时目录生成。发布前及发布各步骤之间重查 state、SRT、标题、视频身份和规则，变化则失败，发布前变化不写 artifact/meta/state。
 
-本规则更新使此前的 rules fingerprint 失效；不修改 runtime state 或批量迁移 metadata。下一轮仅在获授权后按 `subtitle_index → titles → preflight → product_ranges` 恢复，preflight 的其他 blocker 仍须单独处理，不能据本步骤宣称 READY。
+发布是两个独立 rename，subtitle state 是第三个独立 rename，**不是跨文件事务，也不保证断电持久性**。先写 `<artifact>.invalid`；读者遇到标记即拒绝。发生发布错误时尽力恢复旧文件（包括 subtitle state），始终保留失效标记；rollback 自身失败也不能覆盖原始 publication error。即使残留 artifact 字节恰好匹配旧 SHA，标记仍阻止认证。只有完整受控重建成功才清除标记，禁止手工删标记或补签 metadata。锁约束协作生成器，不阻止外部编辑器；外部输入在最后检查后仍可改变，此后消费者重新计算 identity 时拒绝不匹配缓存，不能将文件系统描述为输入/输出跨文件事务。
+
+`runtime_meta.load_checked_json()` 解析与 SHA 校验使用同一份 bytes，不再校验后重开文件。标题的两个消费者（范围生成、Resolve 写入）和 workspace preflight 均通过统一验证，要求 producer、titles schema/generator、连续商品编号、唯一字符串 ID、有效标题和 source/sheet。这些是来源约定，不是抵御恶意伪造的数字签名。subtitle 新增 generator 标记，旧生成器产物不能仅凭通用 identity 复用。升级记录见 `docs/CACHE_SAFETY_UPGRADE.json`；真实 state/cache 未改写。
+
+## Pinned workbook dependencies
+
+`package.json` 固定 Node **24.19.0**、`@oai/artifact-tool` **2.8.59**。该 module 是私有、带 bundled dependencies 的分发包，不能声称公开 `npm ci` 可安装。`workbook-dependencies.lock.json` 锁定 Codex primary runtime **26.909.12148 / darwin arm64** 的完整 artifact-tool 文件树摘要（包含全部传递依赖）；它是分发锁，不是 npm package-lock。取得授权的同版 bundle，将其中 `node_modules` 链接到仓库，使用其中 Node；不得用其他 XLSX parser 替代，也不要复制真实业务工作簿到审核环境。其他平台或拿不到相同私有 bundle 的审核环境仍有依赖 blocker，必须如实报告。
+
+只读依赖检查：`<node-executable> scripts/check_workbook_dependencies.mjs`。检查 Node/平台/module 版本、完整文件树摘要及 workbook API 可导入性，不加载工作簿；正式 parser 同样强制检查。`project_doctor.py --root . --node <node-executable>` 执行相同检查，失败返回非零。完整 synthetic suite：`TB_CUT_TEST_NODE=<node-executable> python3 -B -m unittest discover -s tests -v`。单独真实 Node→Python synthetic integration：`TB_CUT_TEST_NODE=<node-executable> PYTHONPATH=tests python3 -B -m unittest test_index_titles.IndexTitlesTests.test_node_machine_parser_and_real_generator_on_synthetic_workbook -v`。不能通过跳过 integration 来宣称依赖通过。
+
+## Recovery authorization boundary
+
+本轮仅代码修复，不执行真实恢复或 workspace preflight。代码重新审核通过并另获授权后，顺序为 `subtitle_index → titles → 只读 workspace preflight → 停止并报告`。该任务须记录每阶段执行前后的 identity/fingerprint/文件摘要、语义差异和剩余 blocker。preflight 只检查 state 配置、仓库依赖路径、已存在的关键缓存 identity（含标题 schema/provenance）及 runtime 路径引用；它会跳过部分缺失缓存，不证明完整上游齐备或剪辑硬规则通过。即使输出 READY，也不得称完整 runtime READY。`product_ranges` 始终需要再后面的单独授权，绝不自动继续。

@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
 
+import { checkDependencies } from "./check_workbook_dependencies.mjs";
+
+await checkDependencies();
 const inputPath = process.argv[2];
 const previewPath = process.argv[3];
 const input = await FileBlob.load(inputPath);

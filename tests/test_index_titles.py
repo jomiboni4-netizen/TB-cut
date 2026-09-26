@@ -13,8 +13,9 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import index_titles as titles
+import runtime_publication as publication
 from locate_link_intros import chinese_number, link_pattern
-from runtime_meta import metadata_path, validate_cache
+from runtime_meta import CacheIdentityError, invalidation_path, metadata_path, validate_cache
 from runtime_paths import resolve_runtime_paths
 
 
@@ -150,13 +151,41 @@ class IndexTitlesTests(unittest.TestCase):
                     if Path(target) == metadata_path(self.output):
                         raise OSError('injected publication failure')
                     return replace(source, target)
-                with patch.object(titles.os, 'replace', side_effect=fault), self.assertRaises(OSError):
+                with patch.object(publication.os, 'replace', side_effect=fault), self.assertRaises(OSError):
                     self.generate([self.rows[0], ['changed', 'Changed']])
                 if existing:
                     self.assertEqual(before, (self.output.read_bytes(), metadata_path(self.output).read_bytes()))
                 else:
                     self.assertFalse(self.output.exists())
                     self.assertFalse(metadata_path(self.output).exists())
+
+    def test_publication_and_rollback_failures_preserve_original_error_and_block_reads(self):
+        for existing in (False, True):
+            for identical in (False, True):
+                with self.subTest(existing=existing, identical=identical):
+                    self.generate()
+                    if not existing:
+                        self.output.unlink()
+                        metadata_path(self.output).unlink()
+                    replace, unlink = os.replace, Path.unlink
+                    def fail_replace(source, target):
+                        if Path(target) == metadata_path(self.output):
+                            raise OSError('original publication error')
+                        if str(source).endswith('.previous'):
+                            raise OSError('rollback error')
+                        return replace(source, target)
+                    def fail_unlink(path, *args, **kwargs):
+                        if path == self.output:
+                            raise OSError('rollback unlink error')
+                        return unlink(path, *args, **kwargs)
+                    with patch.object(publication.os, 'replace', side_effect=fail_replace), patch.object(Path, 'unlink', fail_unlink):
+                        with self.assertRaisesRegex(OSError, '^original publication error$'):
+                            self.generate(None if identical else [self.rows[0], ['different', 'Changed']])
+                    self.assertTrue(invalidation_path(self.output).exists())
+                    with self.assertRaisesRegex(CacheIdentityError, 'publication_incomplete'):
+                        validate_cache(self.paths, self.output)
+                    self.generate()
+                    validate_cache(self.paths, self.output)
 
     def test_30_rows_ignore_physical_row_and_match_link_numbers(self):
         rows = [self.rows[0]]
@@ -205,7 +234,7 @@ class IndexTitlesTests(unittest.TestCase):
             state['batch']['batch_id'] = 'other-batch'
             self.paths.state_path.write_text(json.dumps(state))
             return self.parsed()
-        with patch.object(titles, 'parse_workbook', side_effect=changed), self.assertRaisesRegex(titles.TitlesError, 'inputs_changed'):
+        with patch.object(titles, 'parse_workbook', side_effect=changed), self.assertRaisesRegex(CacheIdentityError, 'inputs_changed'):
             titles.generate(self.paths)
         self.assertEqual(before, (self.output.read_bytes(), metadata_path(self.output).read_bytes()))
 
