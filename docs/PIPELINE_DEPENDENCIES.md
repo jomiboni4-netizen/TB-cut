@@ -7,7 +7,7 @@
 | init | `init_project.py` / `tbcut.py init` | `PROJECT_STATE.template.json`；CLI 指定标题、字幕、视频、Resolve 名称 | `PROJECT_STATE.json` | 默认拒绝覆盖现有状态；未检查输入文件真实性 | fingerprint、subtitle index |
 | fingerprint | `fingerprint_inputs.py` | `PROJECT_STATE.json` 的标题/字幕/视频路径 | `.cache/input_fingerprints.json` | 仅单文件计算 SHA-256；目录记录存在但 `sha256=null`，无人将此文件作为强制门槛 | subtitle index；身份 helper 另从配置输入直接计算指纹 |
 | subtitle index | `index_subtitles.py` | `PROJECT_STATE.json`，SRT，与 SRT 同名的 MP4，`ffprobe` | `.cache/subtitle_index.json` + meta；更新本地状态中的字幕指纹/阶段 | SRT 内容指纹；新增批次、输入、规则、pipeline、meta schema、文件摘要检查；旧索引在再次运行本 stage 时从原始输入重建 | product ranges、expanded candidates |
-| title inspect | `inspect_title_workbook.mjs` | CLI 传入标题工作簿及预览路径，`@oai/artifact-tool` | stdout 的工作簿摘要、指定 PNG 预览；**不产生** `.cache/titles.json` | 仅工具自身解析；无身份信息 | 人工/外部生成 `.cache/titles.json`；明确复核后 `attest_runtime_cache.py attest-input` |
+| title index | `index_titles.py` → `inspect_title_workbook.mjs --json` | 当前 state 的 `title_path`；已有 Node 与 `@oai/artifact-tool`；Python 标准库 | `.cache/titles.json` + meta | 唯一可见 sheet、第一行表头、无损 ID、空行/缺字段/重复检查；当前 identity | product ranges、Resolve write |
 | product ranges | `locate_link_intros.py`；可选 `apply_range_overrides_v2.py` | 已验证的 `.cache/subtitle_index.json`、`.cache/titles.json`；覆盖时还需已认证的覆盖 JSON | `.cache/link_intros.json`、`.cache/product_ranges.json` + meta；覆盖会改后者及 meta | 输入身份；标题/链接只作锚点；覆盖检查终点晚于起点。范围阶段为 `link_intros.json` 和 `product_ranges.json` 生成 metadata | expanded candidates、windowed ASR |
 | expanded candidates | `build_expanded_codex_request.py` | 已验证的 `product_ranges.json`、`subtitle_index.json`、**已有 `R/mimo_request.json`** | `R/codex_expanded_request.json` + meta | 输入身份、商品 ID、范围/索引 schema；候选按禁用词过滤，无时长上限 | MiMo review |
 | MiMo review | `mimo_review_v2.py` | 已验证的 request JSON，环境变量 `MIMO_API_KEY`；远端 MiMo | 指定响应 JSON + meta，另有旧式 `_meta.json` 请求摘要/状态和临时 lock | 请求身份；已有响应必须有有效 meta 且请求摘要相同才命中，遗留响应不自动重发或覆盖 | semantic audit |
@@ -26,11 +26,11 @@
 
 `enforce_v2_request_rules.py` 可对已认证请求原位更新规则并刷新 meta，但它不能从零生成基础请求。`inspect_timeline_for_export.py`、`compare_timeline_versions.py`、`update_title_counts.mjs`、`update_batch_state.py` 是辅助/历史或交付后步骤，不是上述主链的自动前置步骤。时间线快照和历史对比仍未接入统一身份校验，勿当成当前批次依据。`project_doctor.py` 只查结构及配置存在性，不代替缓存身份或 Resolve 预检。
 
-前置顺序：`init → subtitle index + title inspect/标题索引复核 → product ranges → expanded candidates → MiMo review → semantic audit →（必要时 repair）→ rough approval → windowed ASR → window quality → refine plans → person coverage + final approval → Resolve write → Resolve validation → export → export verification`。`fingerprint_inputs.py` 可在 init 后运行，但它的输出目前不是后续脚本的强制输入；统一身份 helper 会直接计算当前输入指纹。
+前置顺序：`init → subtitle index + title index → product ranges → expanded candidates → MiMo review → semantic audit →（必要时 repair）→ rough approval → windowed ASR → window quality → refine plans → person coverage + final approval → Resolve write → Resolve validation → export → export verification`。`fingerprint_inputs.py` 可在 init 后运行，但它的输出目前不是后续脚本的强制输入；统一身份 helper 会直接计算当前输入指纹。
 
 ## Hidden prerequisites confirmed
 
-1. **标题检查 ≠ 标题索引生成。** `inspect_title_workbook.mjs` 只输出摘要和预览，不生成 `.cache/titles.json`。`locate_link_intros.py` 和 Resolve 写入却直接要求后者。它需要人工/外部生成、复核并显式认证；不能从文件存在推断属于当前批次。
+1. **标题检查与正式生成分离。** `inspect_title_workbook.mjs <workbook> <preview>` 保留摘要/预览行为；`<workbook> --json` 只向 stdout 返回结构化 sheet/cell values。`index_titles.py` 从当前 state 获取输入，独立校验后生成 titles 与 metadata，不读取旧 titles 作为数据来源。
 2. **扩展候选不是独立建池器。** `build_expanded_codex_request.py` 先加载既有 `R/mimo_request.json`，再保留其 `rules` 和其余结构，替换候选并写 `codex_expanded_request.json`。因此它依赖旧请求底稿的先前生成过程；当前仓库没有从零生成这份底稿的主流程脚本。读取处要求输入身份有效。
 3. **粗选和方案有固定文件名。** `windowed_asr_v2.py`、`refine_plans_v2.py`、人物审核和批准脚本按商品编号读写；不按批次分目录。身份检验用于防止误用其他批次数据。
 4. **人物审核默认可能读旧批准清单。** 若 `approved_plans.json` 已存在，不加 `--generated` 就不会审查刚生成的方案；现在旧清单缺 meta 会被拒绝，不会悄然复用。
@@ -40,24 +40,27 @@
 
 元数据放在 `<artifact>.meta.json`，不改原 JSON 的业务内容。核心字段：`schema_version=1`（**metadata 格式版本**）、`pipeline_version`、`batch_id`、`input_fingerprint`、`rules_fingerprint`、`created_at`、`producer`、`artifact_sha256`；商品级文件另有 `product_id`。调用方若知道原 JSON 的 schema，另检查原文件 `schema_version`。错误包含 `legacy_cache_missing_metadata`、`batch_id_mismatch`、`input_fingerprint_mismatch`、`pipeline_version_mismatch`、`schema_version_mismatch`、`rules_fingerprint_mismatch` 和 `artifact_sha256_mismatch`。
 
-`input_fingerprint` 对标题与 SRT 文件内容取 SHA-256；视频用路径、大小和纳秒修改时间，避免重复读取大视频；还包含 Resolve 项目/时间线配置。它不包含 `project_root`，便于将 runtime workspace 物理分离。`rules_fingerprint` 覆盖 `PROJECT_RULES.md` 与 `config/*.json`。这能识别常见输入/规则变化，但视频若在大小和修改时间完全不变的情况下被替换，单靠该指纹无法识别；若未来需要抵御这种情况，再引入视频内容摘要。
+`input_fingerprint` 对标题与 SRT 文件内容取 SHA-256；视频用路径、大小和纳秒修改时间，避免重复读取大视频；还包含 Resolve 项目/时间线配置。它不包含 `project_root`，便于将 runtime workspace 物理分离。`rules_fingerprint` 使用 `runtime-rules-v2` 算法标识，覆盖 `PROJECT_RULES.md` 中影响 runtime 的内容及全部 `config/*.json` 的文件名和内容。仅排除三个明确的二级章节：`Working communication`、`Git and public repository workflow`、`Temporary public review report`。其余内容（包括未知章节）默认参与指纹；代码块内的标题不作为章节边界，未闭合代码块会拒绝处理。剪辑硬规则不得放入这些纯流程章节。这能识别常见输入/规则变化，但视频若在大小和修改时间完全不变的情况下被替换，单靠该指纹无法识别；若未来需要抵御这种情况，再引入视频内容摘要。
+
+此前 `runtime-rules-v2` 修复仅改变身份计算范围，不改剪辑规则、pipeline 版本或 metadata schema。新算法不兼容旧全文件指纹：旧 metadata 仍会 fail closed，不自动认证、改写或接受旧摘要。此次新增标题编号规则会再次改变规则摘要；真实 runtime 须在后续单独授权的恢复阶段重建。现有 attest 工具的白名单、摘要检查及拒绝覆盖已有 metadata 的行为保持不变。
 
 代码本身未纳入指纹。剪辑语义发生变化时仍须按 `AGENTS.md` 升级 `pipeline_version` 并使旧派生产物失效；metadata 不代替这一步。
 
 ## Legacy and refresh path
 
 - 旧 V2.1 JSON **保留原处，不自动删除、不自动补身份**。缺少 sidecar 就是 legacy；读取关键缓存的脚本会在外部调用或 Resolve 连接前失败。旧 MiMo 响应即使有历史 `_meta.json` 请求摘要，也不能单靠它证明批次身份，脚本不会自动重发。
-- `index_subtitles.py` 可从原 SRT/MP4 重建索引并写新 meta。标题索引和基础 `mimo_request.json` 没有仓库内的完整生成器：先对照当前标题工作簿、字幕、商品和请求内容人工复核，再通过 `python3 scripts/attest_runtime_cache.py --root . identity` 取得当前身份，并使用 `attest-input` 加上**当前文件 SHA-256、批次 ID、输入指纹、商品编号（如适用）**显式认证。命令只允许 `.cache/titles.json`、`.cache/*range_overrides.json` 和 `R/mimo_request.json`；不接受其他 legacy 文件，也不覆盖已有 meta。
+- `index_subtitles.py` 可从原 SRT/MP4 重建；`index_titles.py` 可从当前工作簿重建。基础 `mimo_request.json` 仍没有完整生成器；请求及人工覆盖记录须先复核来源，再通过 `python3 scripts/attest_runtime_cache.py --root . identity` 取得当前身份，并使用 `attest-input` 加上**当前文件 SHA-256、批次 ID、输入指纹、商品编号（如适用）**显式认证。命令只允许 `.cache/titles.json`、`.cache/*range_overrides.json` 和 `R/mimo_request.json`；不接受其他 legacy 文件，也不覆盖已有 meta。
 - 认证命令形态如下，所有尖括号值均须来自本机重新计算与人工复核，不能从旧缓存猜测：
 
   ```bash
   python3 scripts/attest_runtime_cache.py --root . identity
-  shasum -a 256 .cache/titles.json
+  shasum -a 256 .cache/product_01_rough/mimo_request.json
   python3 scripts/attest_runtime_cache.py --root . attest-input \
-    --artifact .cache/titles.json \
+    --artifact .cache/product_01_rough/mimo_request.json \
     --artifact-sha256 '<reviewed-file-sha256>' \
     --batch-id '<current-batch-id>' \
-    --input-fingerprint '<current-input-fingerprint>'
+    --input-fingerprint '<current-input-fingerprint>' \
+    --product-id 1
   ```
 
 - 已认证请求对应的旧 MiMo 响应可走 `attest-response`：人工复核响应内容，并提供响应文件 SHA-256、当前批次/输入指纹、商品编号及**已认证的请求路径**。工具还会检查既有 `_meta.json` 的 `status=completed` 和 `request_digest` 是否等于该请求文件的 SHA-256；不匹配就拒绝。它不重发 MiMo，也不自动认证任何响应。
@@ -70,6 +73,16 @@
 
 `migrate_runtime_layout.py` 默认 dry-run，`--apply` 才改写。它只对当前批次能由状态、源视频文件名、方案版本、批准清单包含关系和人物审计中的方案摘要交叉核验的引用做路径表示迁移；迁移前字节备份放在本地 `reports/runtime_migration_backups/`。旧方案内容、时间码、variant 和审核结果不变。带有效 metadata 的文件改写后才重建 sidecar；无 metadata 的文件绝不因路径迁移自动认证。工具再次运行不会继续改变已转换的文件。报告保存在本地 `reports/runtime_migration_report.json`，不进入 Git。
 
-迁移工具扫描 runtime 目录中的业务 JSON，排除自己的报告及迁移前备份。无法证明来源的历史缓存保留为 stale，不自动认证。标题索引和基础 MiMo 请求须核对来源后通过 `attest_runtime_cache.py` 显式认证；商品范围从有效输入重新生成。终审、人物审计和批准方案必须从可信上游重新生成，不能靠路径迁移补 metadata。
+迁移工具扫描 runtime 目录中的业务 JSON，排除自己的报告及迁移前备份。无法证明来源的历史缓存保留为 stale，不自动认证。标题索引使用正式生成器从工作簿重建；基础 MiMo 请求仍须独立核对来源和恢复路径，已有 metadata 的文件不能直接 attest；商品范围从有效输入重新生成。终审、人物审计和批准方案必须从可信上游重新生成，不能靠路径迁移补 metadata。
 
 `workspace_preflight.py` 以 `PROJECT_STATE.json` 配置的商品及全局关键缓存为检查范围，按字段语义验证 runtime 引用。状态中的 `project_root` 和外部素材绝对路径不视为 runtime 路径错误。遗留文件缺少 metadata 或身份不匹配时会阻塞预检；物理移动前须重新运行预检并处理所有阻塞。实际检查结果仅保存在本地报告中。
+
+## Deterministic title index
+
+正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。Node 必须能解析仓库现有的 `@oai/artifact-tool`；没有新增第三方 XLSX 依赖，也没有在 JavaScript 复制 identity 算法。缺失 Node/依赖时直接失败，不使用旧缓存兜底。
+
+Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。输出保留 `source`、`sheet`、`products` 三个顶层字段，采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
+
+全部验证完成后，在 cache 同文件系统的临时目录写 artifact，调用现有 `write_metadata()`，验证临时对的摘要与身份，并重新检查输入/state/规则是否变化。使用目录锁串行化本生成器的发布；备份旧字节仅用于失败回滚，不用于生成数据。每个文件通过原子 rename 发布；可捕获的发布异常回滚已替换文件，临时目录清理。两个独立文件无法靠两次 rename 获得跨文件、断电级事务原子性：强制终止在切换窗口内时，既有摘要校验必须 fail closed，不得人工补签；须重新运行受控生成。无普通失败会留下半写文件。
+
+本规则更新使此前的 rules fingerprint 失效；不修改 runtime state 或批量迁移 metadata。下一轮仅在获授权后按 `subtitle_index → titles → preflight → product_ranges` 恢复，preflight 的其他 blocker 仍须单独处理，不能据本步骤宣称 READY。

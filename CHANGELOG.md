@@ -1,5 +1,13 @@
 # Change Log
 
+## 2026-09-26 — deterministic title index generation
+- Define effective workbook row order as product/link numbering; reject partial rows and duplicate IDs, preserve string IDs and actual sheet names.
+- Add Node machine-readable workbook inspection and Python title validation/publication with current identity metadata, synthetic regression tests, and rollback on publication errors.
+- This runtime-effective rule addition changes the rules fingerprint. Existing derived identities are stale until explicitly rebuilt; no real runtime generation or metadata refresh is part of this code update.
+
+## 2026-09-26 — runtime-only rules fingerprint
+- Exclude explicitly named communication, Git and review-report sections from cache rules identity; retain all other rules and config files by default, with a versioned digest and no automatic legacy acceptance.
+
 ## 2026-09-26 — temporary public review report
 - Require one fixed, sanitized task summary in `tmp/review_reports/LATEST_CODEX_REPORT.md`, with validation and Git state; keep actual runtime data ignored and clean the summary only on explicit user request.
 

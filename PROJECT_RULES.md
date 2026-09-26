@@ -25,6 +25,16 @@
 - Do not delete or clear the report automatically. Only when the user explicitly says the report has been reviewed and may be cleaned may this single report be deleted or cleared; keep that cleanup in the Git diff. This explicit report-cleanup request is an exception to the default cleanup script rule and to recreating the report during the same cleanup task.
 - End task replies with only these sections: `Report updated`, `Branch`, `HEAD`, `PR`, `Tests`, and `Runtime not committed`. Put detailed results and Git file status in the report.
 
+## 标题数据与商品编号
+
+- 标题来源仅为当前 `PROJECT_STATE.json.title_path` 指定的工作簿；正式生成器不以旧 `titles.json` 为输入。
+- 当前生成路径要求工作簿恰有一个可见工作表；第一行必须各有一个精确命名的“编码 ID”和“标题”表头。`sheet` 保存实际读取的工作表名，不使用历史缓存名称。
+- 工作簿中第一个有效商品数据行定义为 `product_index=1`，对应 1号链接；其后按有效商品行顺序连续递增，不使用 Excel 物理行号。
+- 仅完全空白行跳过且不占编号。非空行缺少编码 ID 或标题时，整个生成过程失败，不允许静默跳过或跳号。编码 ID 必须唯一，标题必须为非空文本。
+- `encoding_id` 保持字符串语义。文本编码原样保留，前导零不得丢失；拒绝编码前后空白。数字编码仅接受可无损表示的非负整数（少于 16 位），允许 General、文本格式或纯零填充格式；按零填充宽度保留前导零。精度、格式或类型不明确时拒绝生成，不猜测业务 ID。
+- 为避免隐式取值，当前生成器拒绝合并单元格、公式及隐藏行列，不自动展开或忽略这些结构。
+- 标题工作簿顺序定义商品编号，但不定义直播中的商品时间边界；范围定位仍以真实链接锚点和时间轴规则为准。
+
 ## Final deliverables
 
 - Target: up to 3 finished variants per product.
