@@ -1,0 +1,39 @@
+{
+  "upgrade": "cache-generation-safety-v2",
+  "runtime_applied": false,
+  "titles": {
+    "schema_version": 2,
+    "generator": "index_titles.py:v2",
+    "legacy_status": "STALE; regenerate from configured workbook; attestation forbidden"
+  },
+  "subtitle_index": {
+    "schema_version": 1,
+    "generator": "index_subtitles.py:v2",
+    "legacy_status": "STALE without generator marker; rebuild under fixed input snapshot"
+  },
+  "publication": "Independent renames, cooperative directory lock, incomplete marker blocks validation; no cross-file or power-loss transaction",
+  "rules_changed": false,
+  "downstream_status": "Not revalidated; no runtime readiness claim; no automatic recovery",
+  "next_authorized_task_only": [
+    "subtitle_index",
+    "titles",
+    "read-only workspace preflight",
+    "STOP"
+  ],
+  "product_ranges": "Requires a later separate authorization",
+  "range_override_safety": {
+    "runtime_applied": false,
+    "identity_source": "Current authenticated titles, not override-supplied identity fields",
+    "publication": "Fixed BuildSnapshot and cache input digests; shared lock; staged pair; independent fail-closed renames",
+    "schema_version": 1,
+    "downstream_status": "No runtime change now; after authorized boundary application dependent candidates/plans are stale and require invalidation/regeneration before reuse",
+    "authorization": "Code review and separate real-application authorization required",
+    "global_overlap_gate": {
+      "order": "Actual global_start, not product_index",
+      "absolute_tolerance_seconds": 1e-09,
+      "behavior": "Reject cross-product overlap before staging; no automatic boundary repair",
+      "prior_output_status": "Not certified by this gate; revalidation required before reuse, with no runtime edits in this code-only task",
+      "semantic_scope": "Non-overlap does not certify complete coverage or semantic boundary correctness"
+    }
+  }
+}

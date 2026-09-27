@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "project_root": null,
+  "title_path": null,
+  "subtitle_paths": [],
+  "video_paths": [],
+  "resolve": {
+    "project_name": null,
+    "source_timeline": null,
+    "target_timeline": null
+  },
+  "batch": {
+    "batch_id": null,
+    "product_ids": [],
+    "completed_product_ids": [],
+    "failed_product_ids": []
+  },
+  "runtime": {
+    "pipeline_version": "2.1",
+    "rule_version": "v2.1",
+    "subtitle_index_fingerprint": null,
+    "last_successful_stage": null,
+    "resolve_write_enabled": true,
+    "derived_cache_status": "current",
+    "cache_invalidated_for": [],
+    "cache_preserved": [
+      "subtitle_index",
+      "subtitle_fingerprint",
+      "video_fingerprints",
+      "base_media_metadata",
+      "local_model_weights"
+    ]
+  },
+  "batch_overrides": {}
+}

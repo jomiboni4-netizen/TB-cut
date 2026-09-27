@@ -1,0 +1,11 @@
+{
+  "vision": {
+    "primary": "apple_vision",
+    "fallback_1": "qwen_4b_vision",
+    "fallback_2": "qwen_8b_vision",
+    "policy": "Only escalate uncertain/low-confidence samples. Keep all inference local."
+  },
+  "asr": {
+    "policy": "Windowed local ASR/VAD around selected semantic ranges only; no full-media retranscription by default."
+  }
+}
