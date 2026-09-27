@@ -27,6 +27,13 @@
     "publication": "Fixed BuildSnapshot and cache input digests; shared lock; staged pair; independent fail-closed renames",
     "schema_version": 1,
     "downstream_status": "No runtime change now; after authorized boundary application dependent candidates/plans are stale and require invalidation/regeneration before reuse",
-    "authorization": "Code review and separate real-application authorization required"
+    "authorization": "Code review and separate real-application authorization required",
+    "global_overlap_gate": {
+      "order": "Actual global_start, not product_index",
+      "absolute_tolerance_seconds": 1e-09,
+      "behavior": "Reject cross-product overlap before staging; no automatic boundary repair",
+      "prior_output_status": "Not certified by this gate; revalidation required before reuse, with no runtime edits in this code-only task",
+      "semantic_scope": "Non-overlap does not certify complete coverage or semantic boundary correctness"
+    }
   }
 }

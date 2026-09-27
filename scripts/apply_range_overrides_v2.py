@@ -19,6 +19,11 @@ class RangeOverrideError(ValueError):
     pass
 
 
+# Absolute seconds: tolerate binary noise in millisecond timestamps, not a
+# millisecond of overlap. Never scale this tolerance with timestamp magnitude.
+OVERLAP_TOLERANCE_SECONDS = 1e-9
+
+
 def number(value):
     if type(value) not in (int, float) or not math.isfinite(value):
         raise RangeOverrideError('range_time_must_be_finite_number')
@@ -98,6 +103,21 @@ def validate_range(row, sources):
             raise RangeOverrideError('source_ranges_inconsistent')
 
 
+def validate_global_ranges(products):
+    """Check all individually validated ranges in live order without editing them."""
+    ordered = sorted(products, key=lambda row: (row['global_start'], row['product_index']))
+    furthest = None
+    for current in ordered:
+        if furthest is not None:
+            if current['global_start'] < furthest['global_end'] - OVERLAP_TOLERANCE_SECONDS:
+                raise RangeOverrideError(
+                    f"cross_product_range_overlap: product_index={furthest['product_index']},"
+                    f"{current['product_index']}")
+        # Keep the furthest end so a contained range cannot hide a later overlap.
+        if furthest is None or current['global_end'] > furthest['global_end']:
+            furthest = current
+
+
 def build_model(document, index, titles, override_document):
     sources = source_map(index)
     title_by_id = {row['product_index']: row for row in titles['products']}
@@ -144,6 +164,7 @@ def build_model(document, index, titles, override_document):
         # Business identity always comes from authenticated titles, including additions.
         product.update({key: title_by_id[pid][key] for key in ('product_index', 'encoding_id', 'title')})
         validate_range(product, sources)
+    validate_global_ranges(products.values())
     result = copy.deepcopy(document)
     result['products'] = [products[pid] for pid in sorted(products)]
     return result

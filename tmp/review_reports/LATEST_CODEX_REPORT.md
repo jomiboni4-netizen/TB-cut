@@ -1,49 +1,45 @@
 ## Task
 
-Review and publish the completed override safety fix to existing PR #1 for independent review. This task reruns validation and updates this sanitized report; no additional source changes or real overrides.
+Review and publish only the completed overlap hard gate, related synthetic tests and required documentation to existing PR #1. No real override application; this is a precommit validation snapshot.
 
 ## Repo changes
 
-- `scripts/apply_range_overrides_v2.py`: authenticate current titles, subtitle index, ranges and overrides under one BuildSnapshot; update or add known products using identity fields from titles; reject duplicate/unknown products, forged identity fields and invalid source/time ranges; sort and validate the complete output.
-- Shared generator lock, temporary artifact and metadata, staged-pair verification, and input/cache rechecks feed the existing fail-closed publisher. Two independent renames are not a transaction. Publication/rollback errors retain the invalid marker and original publication error; prepublication failures preserve the old pair.
-- `tests/test_range_overrides.py`: 19 synthetic tests for additions, updates, complete 30-product output, identity/shape rejection, source splitting, input/state/rules/cache mutation, concurrent generation and publication/rollback faults.
-- `docs/PIPELINE_DEPENDENCIES.md`, `docs/CACHE_SAFETY_UPGRADE.json`, `CHANGELOG.md`: document the upgrade, publication limits and separate application/downstream authorization.
-- This fixed sanitized report updated. No rules or configuration changes.
+- `scripts/apply_range_overrides_v2.py`: `build_model()` now validates the entire final product set after individual source coverage checks and before staging/publication. Sort by actual global_start, track the furthest preceding end, and reject cross-product overlap. Product-index ordering is only the output serialization order.
+- Fixed absolute tolerance: 1e-9 seconds for floating-point noise in millisecond timestamps. Millisecond overlaps are rejected; exactly touching boundaries pass. No timestamp-dependent relative tolerance. No truncation, start movement or automatic boundary repair. Error text contains only the overlap type and product indexes.
+- `tests/test_range_overrides.py`: seven new synthetic tests cover existing overlap, missing-product addition overlap, update-created overlap, non-index live order, exact touching, rounding tolerance, containment and equal starts. Failure checks assert the original artifact/meta remain byte-identical and readable, no invalid marker appears, and the publisher is not called. The existing complete-30 test additionally asserts non-overlap.
+- `docs/PIPELINE_DEPENDENCIES.md` and `docs/CACHE_SAFETY_UPGRADE.json`: document the gate, tolerance, prior-output revalidation requirement and semantic limits. Individual source coverage does not establish cross-product validity; non-overlap does not prove complete coverage or semantic correctness.
+- This fixed sanitized report updated. Rules/config and shared publication code unchanged.
 
 ## Runtime changes
 
-- Prior private diagnostics remain under ignored `reports/`; not added to Git, reanalyzed or applied in this publication task.
-- Prior diagnosis reviewed all candidates for 10 unresolved products with minimal derived-index context and temporal neighbor checks. Diagnostic recommendations: resolved 10, still_ambiguous 0, no_evidence 0. Confidence: high 8, medium 2. These are recommendations pending review, not restored runtime ranges.
-- Prior read-only checks found one adjacent confirmed-anchor anomaly and 10 overlap pairs involving five existing ranges whose ends need review before additions can produce reliable coverage. No existing range was corrected.
-- All 846 snapshotted state/cache JSON and invalid-marker entries remain byte-identical, with no additions or removals. Real product_ranges, link_intros, subtitle_index, titles, metadata and state are unchanged. No attestation or marker manipulation.
+None. All 846 snapshotted state/cache JSON and invalid-marker entries plus two private diagnostic files remain byte-identical, with no additions or removals. No real ranges, metadata, markers, state or boundary suggestions modified. Tests ran only in temporary synthetic workspaces.
+
+The prior 10 boundary recommendations remain unapplied. Previously reported adjacent-anchor anomaly and 10 overlap pairs await independent boundary review; this task neither reanalyzed nor corrected them. Private reports remain ignored and excluded from Git.
 
 ## Validation
 
-- Project doctor rerun in this task: PASS. Checked required repository paths, state JSON/configured fields, command availability, pinned Node 24.19.0 / artifact-tool 2.8.59, complete distribution digest and workbook API import. It does not certify runtime cache validity or semantic readiness.
-- Input cache identity validation from the prior diagnostic task is historical evidence; this publication task does not execute real recovery or preflight.
-- Fresh local precommit validation: full synthetic suite 92/92 PASS, no skips; separate override suite 19/19 PASS; separate real Node-to-Python synthetic workbook integration 1/1 PASS. Prior results were not substituted for these runs.
-- Rules fingerprint recomputed: `b7f8f8b8aecc`, exactly equal to the authorized digest. Rules/config unchanged.
-- Complete unstaged diff and new synthetic test file reviewed; only six authorized public files. Final staged whitespace/private-data/credential checks: PASS. Private diagnostics remain ignored and excluded from Git.
-- Workspace preflight: NOT RUN in this task. Prior reported NOT_READY remains historical evidence, not a fresh result. No complete Runtime READY claim.
-- GitHub CI: none configured (Actions workflow count 0; PR status-check rollup empty at pre-push check). All PASS results above are local tests, not GitHub CI.
+- Project doctor rerun in this task: PASS. Checks required repository paths, state JSON/configured fields, command availability, pinned Node 24.19.0 / artifact-tool 2.8.59 distribution and workbook API import. Does not certify runtime or semantic readiness.
+- Full local suite rerun in this task: 99/99 PASS, no skips.
+- Separate override suite rerun in this task: 26/26 PASS, including seven new overlap tests.
+- Separate real Node-to-Python synthetic workbook integration rerun in this task: 1/1 PASS.
+- Rules fingerprint recomputed: `b7f8f8b8aecc`, exactly matches the authorized digest. No rules/config changes.
+- Full public diff review, whitespace check and private-data/credential scan: PASS. Only five authorized public files changed; private diagnostics remain ignored; final staged diff/private-data/credential scan PASS.
+- Real workspace preflight: NOT RUN. No complete Runtime READY claim.
+- GitHub CI: no configured Actions workflows (current API count 0). All PASS results above are fresh local results, not GitHub CI. PR checks will be confirmed after push.
 
 ## External actions
 
 - MiMo called: no.
 - Resolve connected: no.
 - export performed: no.
-- No expanded candidates, semantic audit, repair, ASR/window stages, final plans, real overrides, merge or auto-merge. Normal commit and push are authorized only after final staged checks. PR #1 is OPEN, base main unchanged, auto-merge disabled.
+- No real overrides, expanded candidates, boundary repair, downstream stages, merge or auto-merge. One ordinary new commit and normal push are authorized after final staged checks; no amend, rebase, squash, force push or history rewrite.
 
 ## Blockers
 
-- Code implementation and synthetic safety checks are ready for independent review; actual application still requires that review and new explicit authorization.
-- Two medium-confidence recommendations, the adjacent confirmed-anchor anomaly and affected existing range ends require review before real application. Merely obtaining 30 ranges would not prove valid semantic boundaries or complete coverage.
-- Previously reported downstream stale caches were neither restored nor rechecked. After any future authorized range change, dependent artifacts must be invalidated/regenerated before reuse; identity metadata alone does not certify downstream freshness after boundary edits.
+The overlap gate and synthetic checks are ready for another independent code review. Actual application still requires separate authorization and real boundary review, including the known adjacent-anchor anomaly and overlaps. Prior artifacts are not automatically certified by this code change; complete coverage and semantic boundary correctness remain unverified.
 
 ## Git state
 
-Snapshot before any subsequent commit: branch `codex/repository-baseline`, HEAD `846cac21dd1b`. Existing PR #1 is OPEN at the same head before publication.
+Snapshot before any subsequent commit: branch `codex/repository-baseline`, HEAD `be2e4d776ad1`, unchanged. PR #1 is OPEN at this same head before publication. A post-push receipt will remain local without amending the commit.
 
-Changed public files: `scripts/apply_range_overrides_v2.py`, `tests/test_range_overrides.py`, `docs/PIPELINE_DEPENDENCIES.md`, `docs/CACHE_SAFETY_UPGRADE.json`, `CHANGELOG.md`, `tmp/review_reports/LATEST_CODEX_REPORT.md`.
-
-Precommit snapshot: six reviewed public files staged; no unrelated unstaged changes. One ordinary commit and normal push follow the passed final checks. Private diagnostics and all actual runtime data are excluded. After push, this report will receive a local status update without amending the code commit.
+Five reviewed public files staged: `scripts/apply_range_overrides_v2.py`, `tests/test_range_overrides.py`, `docs/PIPELINE_DEPENDENCIES.md`, `docs/CACHE_SAFETY_UPGRADE.json`, `tmp/review_reports/LATEST_CODEX_REPORT.md`. Precommit snapshot: staging contains only these five files, with no unrelated unstaged changes. The five public files will form one ordinary commit after passed final checks; no runtime/private data is included.

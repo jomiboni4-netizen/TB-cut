@@ -78,6 +78,73 @@ class RangeOverridesTests(unittest.TestCase):
         for row in result['products']:
             self.assertEqual(row['encoding_id'],self.titles['products'][row['product_index']-1]['encoding_id'])
             overrides.validate_range(row,overrides.source_map(self.index))
+        temporal = sorted(result['products'], key=lambda row: row['global_start'])
+        self.assertTrue(all(left['global_end'] <= right['global_start']
+                            for left, right in zip(temporal, temporal[1:])))
+
+    def reject_overlap(self, changes, pair):
+        self.save_overrides(changes)
+        before = self.pair()
+        self.checked()
+        with patch.object(overrides, 'publish_pair') as publish:
+            with self.assertRaises(overrides.RangeOverrideError) as caught:
+                self.run_override()
+            publish.assert_not_called()
+        self.assertEqual(str(caught.exception),
+                         f'cross_product_range_overlap: product_index={pair[0]},{pair[1]}')
+        self.assertEqual(before, self.pair())
+        self.assertFalse(invalidation_path(self.output).exists())
+        self.checked()
+
+    def test_existing_ranges_overlap_rejected_even_when_not_overridden(self):
+        doc = copy.deepcopy(self.document)
+        row = doc['products'][4]
+        row.update(global_start=35, ranges=overrides.split_range(35, 50, self.index['sources']))
+        self.save(self.output.name, doc)
+        self.reject_overlap([self.change(1, 1, 9)], (4, 5))
+
+    def test_missing_product_addition_overlap_rejected(self):
+        self.reject_overlap([self.change(21, 195, 205)], (20, 21))
+
+    def test_updated_range_overlap_rejected_without_publication(self):
+        self.reject_overlap([self.change(1, 1, 11)], (1, 2))
+
+    def test_live_order_may_differ_from_product_index_order(self):
+        self.save_overrides([self.change(1, 10, 20), self.change(2, 0, 10)])
+        self.run_override()
+        rows = self.checked()['products']
+        self.assertEqual([r['product_index'] for r in rows], list(range(1, 21)))
+        self.assertEqual([(r['global_start'], r['global_end']) for r in rows[:2]],
+                         [(10, 20), (0, 10)])
+
+    def test_exactly_touching_boundaries_allowed_without_adjustment(self):
+        self.save_overrides([self.change(1, 0, 10)])
+        self.run_override()
+        rows = self.checked()['products']
+        self.assertEqual((rows[0]['global_end'], rows[1]['global_start']), (10, 10))
+        self.assertEqual(rows[1:], self.document['products'][1:])
+
+    def test_rounding_noise_only_not_millisecond_overlap(self):
+        # Existing authenticated bounds may carry binary noise beyond three decimals.
+        for overlap, accepted in [(1e-10, True), (2e-9, False), (0.0005, False), (0.001, False)]:
+            with self.subTest(overlap=overlap):
+                doc = copy.deepcopy(self.document)
+                row = doc['products'][1]
+                row.update(global_start=10-overlap,
+                           ranges=overrides.split_range(10-overlap, 20, self.index['sources']))
+                self.save(self.output.name, doc)
+                changes = [self.change(1, 0, 10)]
+                if accepted:
+                    self.save_overrides(changes)
+                    self.run_override()
+                    self.assertEqual(self.checked()['products'][1]['global_start'], 10-overlap)
+                else:
+                    self.reject_overlap(changes, (1, 2))
+
+    def test_contained_and_same_start_ranges_rejected(self):
+        for start, end in [(2, 8), (0, 10)]:
+            with self.subTest(start=start, end=end):
+                self.reject_overlap([self.change(2, start, end)], (1, 2))
 
     def test_unknown_rejected(self): self.rejected([self.change(31,1,9)],'unknown_product_index')
     def test_duplicate_override_rejected(self): self.rejected([self.change(1,1,9)]*2,'duplicate_override')
