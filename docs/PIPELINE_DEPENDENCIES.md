@@ -98,3 +98,11 @@ Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作
 ## Recovery authorization boundary
 
 本轮仅代码修复，不执行真实恢复或 workspace preflight。代码重新审核通过并另获授权后，顺序为 `subtitle_index → titles → 只读 workspace preflight → 停止并报告`。该任务须记录每阶段执行前后的 identity/fingerprint/文件摘要、语义差异和剩余 blocker。preflight 只检查 state 配置、仓库依赖路径、已存在的关键缓存 identity（含标题 schema/provenance）及 runtime 路径引用；它会跳过部分缺失缓存，不证明完整上游齐备或剪辑硬规则通过。即使输出 READY，也不得称完整 runtime READY。`product_ranges` 始终需要再后面的单独授权，绝不自动继续。
+
+## Authenticated range overrides
+
+`apply_range_overrides_v2.py` validates current titles, subtitle index, existing ranges and the override input. Overrides may update an existing product or add a product missing from the ranges, but only if that product exists in current titles. Product identity fields always come from titles; override-supplied titles or encoding IDs are rejected. Duplicate overrides and unknown products are rejected. The sorted, unique result validates every range against current subtitle sources, including unchanged rows; partial overrides do not imply complete product coverage or reliable semantic boundaries.
+
+The shared generator lock protects a fixed `BuildSnapshot`. Artifact, sidecar and invalid-marker snapshots of the consumed caches are rechecked before publication; source inputs, state and rules are also rechecked. Metadata authenticates a temporary artifact, and the staged pair is validated before `runtime_publication.publish_pair` publishes it. Publication uses two independent renames, not a cross-file transaction. Caught publication/rollback failures retain an invalid marker, preserve the original publication error and attempt to restore the previous bytes. Even restored bytes remain blocked by the marker. Prepublication validation failures leave the previous output pair untouched. No state update, automatic override attestation or marker bypass is performed.
+
+This upgrade is code-only. Real boundary suggestions need independent review and separate application authorization; existing downstream artifacts are not certified by this change. After any authorized range change, dependent candidate/plan artifacts must be invalidated or regenerated before reuse.

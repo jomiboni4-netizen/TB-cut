@@ -1,5 +1,10 @@
 # Change Log
 
+## 2026-09-26 — authenticated range override safety
+- Allow missing ranges to be added only for authenticated current titles; reject duplicate, unknown and invalid source/time overrides.
+- Stage and validate outputs under a fixed input snapshot and shared generator lock; publish with fail-closed rollback handling.
+- Add synthetic input-mutation and publication-fault tests. No real overrides applied; downstream reuse requires separate recovery review.
+
 ## 2026-09-26 — cache generation safety v2
 - Remove legacy titles attestation; enforce title generator/schema provenance in readers and preflight.
 - Freeze subtitle inputs, lock generators, stage outputs, recheck identities, and fail closed on publication/rollback faults without hiding the first error.
