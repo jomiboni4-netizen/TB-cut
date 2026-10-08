@@ -278,6 +278,7 @@ class RuntimeMetaTests(unittest.TestCase):
             load_checked_json(self.root, self.artifact)
 
     def test_response_attestation_requires_matching_request_digest(self) -> None:
+        write_metadata(self.root, self.artifact, "test")
         product_dir = self.root / ".cache/product_01_rough"
         product_dir.mkdir()
         request = product_dir / "mimo_request.json"

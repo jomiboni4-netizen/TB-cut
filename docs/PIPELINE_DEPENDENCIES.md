@@ -8,7 +8,7 @@
 | fingerprint | `fingerprint_inputs.py` | `PROJECT_STATE.json` 的标题/字幕/视频路径 | `.cache/input_fingerprints.json` | 仅单文件计算 SHA-256；目录记录存在但 `sha256=null`，无人将此文件作为强制门槛 | subtitle index；身份 helper 另从配置输入直接计算指纹 |
 | subtitle index | `index_subtitles.py` | `PROJECT_STATE.json`，SRT，与 SRT 同名的 MP4，`ffprobe` | `.cache/subtitle_index.json` + meta；更新本地状态中的字幕指纹/阶段 | SRT 内容指纹；新增批次、输入、规则、pipeline、meta schema、文件摘要检查；旧索引在再次运行本 stage 时从原始输入重建 | product ranges、expanded candidates |
 | title index | `index_titles.py` → `inspect_title_workbook.mjs --json` | 当前 state 的 `title_path`；已有 Node 与 `@oai/artifact-tool`；Python 标准库 | `.cache/titles.json` + meta | 唯一可见 sheet、第一行表头、无损 ID、空行/缺字段/重复检查；当前 identity | product ranges、Resolve write |
-| product ranges | `locate_link_intros.py`；可选 `apply_range_overrides_v2.py` | 已验证的 `.cache/subtitle_index.json`、`.cache/titles.json`；覆盖时还需已认证的覆盖 JSON | `.cache/link_intros.json`、`.cache/product_ranges.json` + meta；覆盖会改后者及 meta | 输入身份；标题/链接只作锚点；覆盖检查终点晚于起点。范围阶段为 `link_intros.json` 和 `product_ranges.json` 生成 metadata | expanded candidates、windowed ASR |
+| boundary suggestions / accepted ranges | `locate_link_intros.py`, `publish_confirmed_ranges.py`, `apply_range_overrides_v2.py` | authenticated subtitle index/titles; complete source-local human manifest or authenticated override | locator: `boundary_suggestions.json`; publisher or explicit override: `product_ranges.json` | unresolved anchors block suggestions; human publisher validates all rows and overlap before explicit publish; locator never writes accepted ranges | expanded requests and windowed ASR |
 | expanded candidates | `build_expanded_codex_request.py` | 已验证的 `product_ranges.json`、`subtitle_index.json`、**已有 `R/mimo_request.json`** | `R/codex_expanded_request.json` + meta | 输入身份、商品 ID、范围/索引 schema；候选按禁用词过滤，无时长上限 | MiMo review |
 | MiMo review | `mimo_review_v2.py` | 已验证的 request JSON，环境变量 `MIMO_API_KEY`；远端 MiMo | 指定响应 JSON + meta，另有旧式 `_meta.json` 请求摘要/状态和临时 lock | 请求身份；已有响应必须有有效 meta 且请求摘要相同才命中，遗留响应不自动重发或覆盖 | semantic audit |
 | semantic audit | `audit_mimo_v2.py` | 已验证的 request 与 MiMo 响应 | 指定 selection/audit JSON + meta | 输入身份；检查候选边界、禁用内容、语义闭合、时长、重叠、语义重复；不通过仍写审核供返修 | repair 或粗选批准 |
@@ -49,19 +49,7 @@
 ## Legacy and refresh path
 
 - 旧 V2.1 JSON **保留原处，不自动删除、不自动补身份**。缺少 sidecar 就是 legacy；读取关键缓存的脚本会在外部调用或 Resolve 连接前失败。旧 MiMo 响应即使有历史 `_meta.json` 请求摘要，也不能单靠它证明批次身份，脚本不会自动重发。
-- `index_subtitles.py` 可从原 SRT/MP4 重建；`index_titles.py` 可从当前工作簿重建。基础 `mimo_request.json` 仍没有完整生成器；请求及人工覆盖记录须先复核来源，再通过 `python3 scripts/attest_runtime_cache.py --root . identity` 取得当前身份，并使用 `attest-input` 加上**当前文件 SHA-256、批次 ID、输入指纹、商品编号（如适用）**显式认证。命令只允许 `.cache/*range_overrides.json` 和 `R/mimo_request.json`；titles 必须由当前工作簿生成器重建，即使旧文件结构看似合法，也不得认证。其他 legacy 文件被拒绝，已有 meta 不覆盖。
-- 认证命令形态如下，所有尖括号值均须来自本机重新计算与人工复核，不能从旧缓存猜测：
-
-  ```bash
-  python3 scripts/attest_runtime_cache.py --root . identity
-  shasum -a 256 .cache/product_01_rough/mimo_request.json
-  python3 scripts/attest_runtime_cache.py --root . attest-input \
-    --artifact .cache/product_01_rough/mimo_request.json \
-    --artifact-sha256 '<reviewed-file-sha256>' \
-    --batch-id '<current-batch-id>' \
-    --input-fingerprint '<current-input-fingerprint>' \
-    --product-id 1
-  ```
+- `index_subtitles.py` 可从原 SRT/MP4 重建；`index_titles.py` 可从当前工作簿重建。基础 `mimo_request.json` 仍没有完整生成器。缺少范围依赖记录的旧请求必须阻塞，不能通过 `attest-input` 重新盖章；重建入口需单独处理。人工覆盖记录仍可在独立授权、核对来源和文件摘要后走 `attest-input`，仅允许 `.cache/*range_overrides.json`。titles 必须由工作簿生成器重建，已有 metadata 不覆盖。
 
 - 已认证请求对应的旧 MiMo 响应可走 `attest-response`：人工复核响应内容，并提供响应文件 SHA-256、当前批次/输入指纹、商品编号及**已认证的请求路径**。工具还会检查既有 `_meta.json` 的 `status=completed` 和 `request_digest` 是否等于该请求文件的 SHA-256；不匹配就拒绝。它不重发 MiMo，也不自动认证任何响应。
 - 从已认证的输入重新运行商品范围、扩展候选、审核、ASR、方案和终审阶段，生成新 sidecar。**不要为旧终审/批准方案批量盖章**。若必须复用既有最终方案，需要另做逐文件来源核验与专门迁移；现有工具不提供绕过路径。
@@ -73,7 +61,7 @@
 
 `migrate_runtime_layout.py` 默认 dry-run，`--apply` 才改写。它只对当前批次能由状态、源视频文件名、方案版本、批准清单包含关系和人物审计中的方案摘要交叉核验的引用做路径表示迁移；迁移前字节备份放在本地 `reports/runtime_migration_backups/`。旧方案内容、时间码、variant 和审核结果不变。带有效 metadata 的文件改写后才重建 sidecar；无 metadata 的文件绝不因路径迁移自动认证。工具再次运行不会继续改变已转换的文件。报告保存在本地 `reports/runtime_migration_report.json`，不进入 Git。
 
-迁移工具扫描 runtime 目录中的业务 JSON，排除自己的报告及迁移前备份。无法证明来源的历史缓存保留为 stale，不自动认证。标题索引使用正式生成器从工作簿重建；基础 MiMo 请求仍须独立核对来源和恢复路径，已有 metadata 的文件不能直接 attest；商品范围从有效输入重新生成。终审、人物审计和批准方案必须从可信上游重新生成，不能靠路径迁移补 metadata。
+迁移工具扫描 runtime 目录中的业务 JSON，排除自己的报告及迁移前备份。无法证明来源的历史缓存保留为 stale，不自动认证。标题索引使用正式生成器从工作簿重建；基础 MiMo 请求缺少范围依赖时须重新生成，已有 metadata 的文件不能直接 attest；商品范围须显式确认与授权更新。终审、人物审计和批准方案必须从可信上游重新生成，不能靠路径迁移补 metadata。
 
 `workspace_preflight.py` 以 `PROJECT_STATE.json` 配置的商品及全局关键缓存为检查范围，按字段语义验证 runtime 引用。状态中的 `project_root` 和外部素材绝对路径不视为 runtime 路径错误。遗留文件缺少 metadata 或身份不匹配时会阻塞预检；物理移动前须重新运行预检并处理所有阻塞。实际检查结果仅保存在本地报告中。
 
@@ -108,3 +96,72 @@ Per-product source coverage does not establish cross-product boundary validity. 
 The shared generator lock protects a fixed `BuildSnapshot`. Artifact, sidecar and invalid-marker snapshots of the consumed caches are rechecked before publication; source inputs, state and rules are also rechecked. Metadata authenticates a temporary artifact, and the staged pair is validated before `runtime_publication.publish_pair` publishes it. Publication uses two independent renames, not a cross-file transaction. Caught publication/rollback failures retain an invalid marker, preserve the original publication error and attempt to restore the previous bytes. Even restored bytes remain blocked by the marker. Prepublication validation failures leave the previous output pair untouched. No state update, automatic override attestation or marker bypass is performed.
 
 This upgrade is code-only. Real boundary suggestions need independent review and separate application authorization; existing downstream artifacts are not certified by this change. After any authorized range change, dependent candidate/plan artifacts must be invalidated or regenerated before reuse.
+
+## Boundary safety v1 (code-only)
+
+The locator classifies every product as `confirmed`, `ambiguous`, or
+`missing_or_low_confidence`. Here `confirmed` describes only an automatic anchor,
+not a human-confirmed product boundary. Any unresolved product blocks the whole
+automatic range set; its possible live position cannot safely be inferred from
+product numbering. Diagnostics retain all anchor candidates. Confirmed anchors
+are sorted by actual live time, never title-sheet order.
+
+`complete_product_range()` remains a next-anchor/stream-end inference helper.
+Its output is a suggestion requiring confirmation, not proof that the product
+continues until that time. The locator now writes only `boundary_suggestions.json`
+and exits 2 to stop automatic chaining. It never changes `link_intros.json`,
+`product_ranges.json`, their metadata or invalid markers, regardless of confidence,
+provenance, or missing old files. No existing downstream script consumes the new
+suggestion file. Callers previously expecting locator-generated accepted ranges
+must stop for separate confirmation instead. Removing accepted files cannot
+promote a suggestion. `publish_confirmed_ranges.py` now accepts a complete
+source-local manual manifest. It authenticates current titles/index, requires
+one decision per title, validates every source and range, and runs the full
+live-order overlap gate. Its default is read-only preflight. `--publish` is
+required for first publication; an existing manually marked range set also
+requires `--replace-confirmed`. Unknown-provenance ranges and incomplete markers
+block replacement. Publication uses the existing lock, staged metadata and
+fail-closed pair publisher. The per-decision SHA-256 links the reviewer, time,
+source-local points and decision ID; it is a verifiable record checksum, not a
+cryptographic user signature. No time is clamped or silently moved.
+
+Explicit override application remains an alternative for a fully specified
+source-local start/end update.
+It records per-endpoint `explicit_override` provenance, without claiming human
+review based on a confidence string. Invoking this writer requires separate
+application authorization. It preserves actual gaps, checks every unchanged
+range too, and never shifts a business start to a useful-selling-content start.
+No current-batch coordinates are embedded in code or tests.
+
+Coverage checks now inspect unrounded source topology before split rounding:
+any real hole blocks a spanning product. Local override times must be inside
+both source coverage and recorded duration when available; no clamping is used.
+Split coordinates remain milliseconds. `SOURCE_REPRESENTATION_TOLERANCE_SECONDS`
+is solely a representation check, never an allowance to bridge source gaps.
+The cross-product `1e-9` absolute tolerance and furthest-end sweep are unchanged.
+
+Downstream metadata binds candidate requests, reviews, ASR, plans and aggregate
+outputs to the SHA-256 of authenticated `product_ranges.json`. A changed range
+file, missing dependency metadata, or upstream invalid marker rejects reuse.
+This conservatively invalidates all downstream products, even if just one range
+changed. Base media/title/subtitle identity remains separate. Generators capture
+`range_snapshot` before loading inputs and retain it when creating metadata;
+a range change during generation cannot be silently rebound at completion.
+The producer registry plus product IDs and known output paths identify legacy
+dependents even when their sidecars have no dependency field. New producers
+must be registered or provide a product ID. Do not bypass checked loaders.
+
+The upstream generators' `BuildSnapshot` deliberately excludes the optional
+range snapshot: the range writer changes that very output and separately checks
+all consumed cache signatures. Cooperative locks, staged validation, rollback
+and incomplete markers remain in force. Downstream stages that write directly
+still fail validation on mismatched metadata; this change does not turn every
+stage into an atomic publication transaction.
+
+Legacy candidate attestation is refused: matching batch/input identity alone
+does not prove which boundaries produced those candidates. Response attestation
+still requires a matching authenticated current request. No stale artifact is
+deleted, rebound or migrated by this upgrade. The expanded-request builder still
+requires a current base request; legacy bootstrapping/regeneration needs a
+separate authorized workflow, not automatic certification. This code-only change
+does not assert Runtime READY or revalidate any real human boundary decisions.

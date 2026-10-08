@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 def main() -> None:
@@ -22,8 +22,9 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
-    final_audit = load_checked_json(paths, paths.runtime_argument(args.final_audit), product_id=args.product)
-    visual_audit = load_checked_json(paths, paths.runtime_argument(args.visual_audit))
+    identity = expected_identity(paths)
+    final_audit = load_checked_json(paths, paths.runtime_argument(args.final_audit), product_id=args.product, expected=identity)
+    visual_audit = load_checked_json(paths, paths.runtime_argument(args.visual_audit), expected=identity)
     errors = [
         error for error in final_audit.get("errors", [])
         if error.get("variant_id")
@@ -46,7 +47,7 @@ def main() -> None:
         }, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    write_metadata(paths, paths.runtime_argument(args.output), "collect_post_audit_failures.py", product_id=args.product)
+    write_metadata(paths, paths.runtime_argument(args.output), "collect_post_audit_failures.py", product_id=args.product, identity=identity)
     print(f"商品{args.product} 终检返修错误={len(errors)}")
 
 

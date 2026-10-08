@@ -32,13 +32,13 @@ class BuildSnapshot:
         self.state_bytes = paths.state_path.read_bytes()
         self.state = json.loads(self.state_bytes)
         self.policy = policy_snapshot(paths)
-        self.identity = expected_identity(paths, self.state)
+        self.identity = expected_identity(paths, self.state, include_ranges=False)
         self.check()
 
     def check(self):
         if (self.paths.state_path.read_bytes() != self.state_bytes
                 or policy_snapshot(self.paths) != self.policy
-                or expected_identity(self.paths) != self.identity):
+                or expected_identity(self.paths, include_ranges=False) != self.identity):
             raise CacheIdentityError('inputs_changed_during_generation')
 
 

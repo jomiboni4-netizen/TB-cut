@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 def main() -> None:
@@ -21,8 +21,9 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
-    selection = load_checked_json(paths, paths.runtime_argument(args.selection))
-    audit = load_checked_json(paths, paths.runtime_argument(args.audit))
+    identity = expected_identity(paths)
+    selection = load_checked_json(paths, paths.runtime_argument(args.selection), expected=identity)
+    audit = load_checked_json(paths, paths.runtime_argument(args.audit), expected=identity)
     if audit.get("status") != "EXHAUSTED":
         raise SystemExit("只有EXHAUSTED审计才允许减少variant数量")
     exhaustion = audit.get("exhaustion") or {}
@@ -48,7 +49,7 @@ def main() -> None:
         raise SystemExit("没有可保留的合格方案")
     payload = {"selected_variants": kept, "duplicate_remove": [], "status": "EXHAUSTED", "insufficient_reason": "完整范围与候选池已穷尽，失败方案达到返修上限后删除"}
     paths.runtime_argument(args.output).write_text(json.dumps({"output_text": json.dumps(payload, ensure_ascii=False)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    write_metadata(paths, paths.runtime_argument(args.output), "drop_failed_variants_v2.py", product_id=selection.get("product_index"))
+    write_metadata(paths, paths.runtime_argument(args.output), "drop_failed_variants_v2.py", product_id=selection.get("product_index"), identity=identity)
     print(f"删除失败方案={len(failed)} 保留方案={len(kept)}")
 
 

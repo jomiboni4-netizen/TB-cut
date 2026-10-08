@@ -11,7 +11,7 @@ from itertools import combinations
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 REQUIRED_CLOSURE = (
@@ -103,8 +103,9 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
-    request = load_checked_json(paths, paths.runtime_argument(args.request))
-    response = extract_response(load_checked_json(paths, paths.runtime_argument(args.result)))
+    identity = expected_identity(paths)
+    request = load_checked_json(paths, paths.runtime_argument(args.request), expected=identity)
+    response = extract_response(load_checked_json(paths, paths.runtime_argument(args.result), expected=identity))
     variants = response.get("selected_variants")
     errors: list[dict] = []
     if not isinstance(variants, list) or not 1 <= len(variants) <= 3:
@@ -193,7 +194,7 @@ def main() -> None:
         "variants": normalized_variants,
     }
     paths.runtime_argument(args.selection).write_text(json.dumps(selection, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    write_metadata(paths, paths.runtime_argument(args.selection), "audit_mimo_v2.py", product_id=request.get("product_index"))
+    write_metadata(paths, paths.runtime_argument(args.selection), "audit_mimo_v2.py", product_id=request.get("product_index"), identity=identity)
     audit = {
         "schema_version": 2,
         "pipeline_version": "2.1",
@@ -206,7 +207,7 @@ def main() -> None:
         "errors": errors,
     }
     paths.runtime_argument(args.audit).write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    write_metadata(paths, paths.runtime_argument(args.audit), "audit_mimo_v2.py", product_id=request.get("product_index"))
+    write_metadata(paths, paths.runtime_argument(args.audit), "audit_mimo_v2.py", product_id=request.get("product_index"), identity=identity)
     print(f"商品{request.get('product_index')} 粗审={'通过' if not errors else '失败'} 方案={len(normalized_variants)} 错误={len(errors)}")
     if errors:
         raise SystemExit(2)

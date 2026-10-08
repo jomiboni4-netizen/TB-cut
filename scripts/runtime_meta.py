@@ -148,16 +148,20 @@ def rules_fingerprint(root: Path | RuntimePaths) -> str:
     return digest.hexdigest()
 
 
-def expected_identity(root: Path | RuntimePaths, state: dict | None = None) -> dict:
+def expected_identity(root: Path | RuntimePaths, state: dict | None = None, *, include_ranges: bool = True) -> dict:
     paths = _paths(root)
     state = _state(paths) if state is None else state
-    return {
+    identity = {
         "schema_version": META_SCHEMA_VERSION,
         "pipeline_version": str(state["runtime"]["pipeline_version"]),
         "batch_id": str(state["batch"]["batch_id"]),
         "input_fingerprint": input_fingerprint(paths, state),
         "rules_fingerprint": rules_fingerprint(paths),
     }
+    if include_ranges:
+        ranges = paths.cache_dir / "product_ranges.json"
+        identity["range_snapshot"] = _sha256(ranges) if ranges.is_file() else None
+    return identity
 
 
 def metadata_path(path: Path) -> Path:
@@ -170,14 +174,20 @@ def make_metadata(root: Path, artifact: Path, producer: str, *, product_id: int 
         raise CacheIdentityError(f"artifact_missing: {artifact}")
     if not producer:
         raise CacheIdentityError("producer_missing")
+    captured = identity or expected_identity(root)
     meta = {
-        **(identity or expected_identity(root)),
+        **{key: value for key, value in captured.items() if key != "range_snapshot"},
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "producer": producer,
         "artifact_sha256": _sha256(artifact),
     }
     if product_id is not None:
         meta["product_id"] = int(product_id)
+    if range_dependent(artifact, meta):
+        digest = checked_range_digest(root, captured)
+        if captured.get("range_snapshot") != digest:
+            raise CacheIdentityError("ranges_changed_during_generation")
+        meta["range_dependency"] = {"version": 1, "sha256": digest}
     return meta
 
 
@@ -225,6 +235,39 @@ def invalidation_path(artifact: Path) -> Path:
     return Path(str(artifact) + ".invalid")
 
 
+# All current semantic/ASR/plan/export consumers are range dependent. Path and
+# product identity checks also cover legacy producers and renamed generated files.
+RANGE_DEPENDENT_PRODUCERS = frozenset({
+    "build_expanded_codex_request.py", "mimo_review_v2.py", "audit_mimo_v2.py",
+    "build_repair_request_v2.py", "merge_repair_result_v2.py", "drop_failed_variants_v2.py",
+    "enforce_v2_request_rules.py", "promote_rough_selection.py", "windowed_asr_v2.py",
+    "window_quality_v2.py", "refine_plans_v2.py", "approve_final_plans.py",
+    "person_coverage_audit_v2.py", "collect_post_audit_failures.py", "resolve_write_v2.py",
+    "validate_resolve_write_v2.py", "export_marked_variants.py", "verify_exports.py",
+    "explicit_response_attestation",
+})
+RANGE_DEPENDENT_NAMES = frozenset({
+    "person_coverage_audit.json", "resolve_write_report.json", "resolve_write_validation.json",
+    "export_manifest.json", "export_verification.json",
+})
+
+
+def range_dependent(artifact, meta):
+    artifact = Path(artifact)
+    return ("range_dependency" in meta or meta.get("product_id") is not None
+            or meta.get("producer") in RANGE_DEPENDENT_PRODUCERS
+            or artifact.name in RANGE_DEPENDENT_NAMES
+            or any(re.fullmatch(r"product_\d+_.+", part) for part in artifact.parts)
+            or "plans" in artifact.parts or "asr_windows" in artifact.parts)
+
+
+def checked_range_digest(root, expected):
+    path = _paths(root).cache_dir / "product_ranges.json"
+    # This is an upstream artifact, so checking it does not recurse downstream.
+    _, content = _checked_bytes(root, path, expected=expected)
+    return hashlib.sha256(content).hexdigest()
+
+
 def _checked_bytes(root, artifact, *, product_id=None, expected=None):
     artifact = Path(artifact)
     if invalidation_path(artifact).exists():
@@ -232,12 +275,24 @@ def _checked_bytes(root, artifact, *, product_id=None, expected=None):
     if not artifact.is_file():
         raise CacheIdentityError(f"artifact_missing: {artifact}")
     meta = read_metadata(artifact)
-    validate_metadata(meta, expected or expected_identity(root), product_id=product_id)
+    expected = expected or expected_identity(root)
+    validate_metadata(meta, expected, product_id=product_id)
     content = artifact.read_bytes()
     if meta["artifact_sha256"] != hashlib.sha256(content).hexdigest():
         raise CacheIdentityError(f"artifact_sha256_mismatch: {artifact}")
     if invalidation_path(artifact).exists():
         raise CacheIdentityError(f"publication_incomplete: {artifact}")
+    if artifact.resolve() == (_paths(root).cache_dir / "product_ranges.json").resolve() and range_dependent(artifact, meta):
+        raise CacheIdentityError("range_dependency_cycle")
+    if range_dependent(artifact, meta):
+        dependency = meta.get("range_dependency")
+        if not isinstance(dependency, dict) or dependency.get("version") != 1:
+            raise CacheIdentityError("range_dependency_missing: regenerate from verified ranges")
+        digest = checked_range_digest(root, expected)
+        if dependency.get("sha256") != digest:
+            raise CacheIdentityError("range_dependency_mismatch: regenerate from verified ranges")
+        if "range_snapshot" in expected and expected["range_snapshot"] != digest:
+            raise CacheIdentityError("ranges_changed_during_generation")
     if artifact.name == "titles.json":
         validate_titles(json.loads(content), meta)
     if artifact.name == "subtitle_index.json":

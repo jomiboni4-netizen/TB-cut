@@ -22,6 +22,8 @@ class RangeOverrideError(ValueError):
 # Absolute seconds: tolerate binary noise in millisecond timestamps, not a
 # millisecond of overlap. Never scale this tolerance with timestamp magnitude.
 OVERLAP_TOLERANCE_SECONDS = 1e-9
+# Representation checks only; never a budget for filling source coverage gaps.
+SOURCE_REPRESENTATION_TOLERANCE_SECONDS = 0.001
 
 
 def number(value):
@@ -51,6 +53,8 @@ def source_map(index):
         start, end = number(row.get('global_start')), number(row.get('global_end'))
         if start < 0 or end <= start or previous_end is not None and start < previous_end:
             raise RangeOverrideError('source_bounds_invalid_or_overlapping')
+        if "duration" in row and number(row["duration"]) <= 0:
+            raise RangeOverrideError("source_duration_invalid")
         sources[stem] = row
         previous_end = end
     return sources
@@ -75,9 +79,11 @@ def global_time(point: dict, sources: dict[str, dict]) -> float:
     source = sources[point['source_stem']]
     local = number(point.get('time'))
     duration = number(source['global_end']) - number(source['global_start'])
-    if local < 0 or local > duration + 0.001:
+    if 'duration' in source:
+        duration = min(duration, number(source['duration']))
+    if local < 0 or local > duration:
         raise RangeOverrideError('override_time_outside_source')
-    return round(float(source['global_start']) + min(local, duration), 3)
+    return round(float(source['global_start']) + local, 3)
 
 
 def validate_range(row, sources):
@@ -87,8 +93,19 @@ def validate_range(row, sources):
     expected = split_range(start, end, list(sources.values()))
     if not expected or any(item['end'] <= item['start'] for item in expected):
         raise RangeOverrideError('empty_or_subprecision_range')
-    covered = sum(item['end'] - item['start'] for item in expected)
-    if abs(covered - (end - start)) > 0.002 * len(expected):
+    # Check topology before rounding. A real hole cannot be excused by an
+    # accumulating per-source millisecond error allowance.
+    cursor = start
+    for source in sources.values():
+        left = max(start, number(source['global_start']))
+        right = min(end, number(source['global_end']))
+        if right > left:
+            if left > cursor:
+                raise RangeOverrideError('range_outside_sources_or_crosses_gap')
+            if 'duration' in source and right - number(source['global_start']) > number(source['duration']) + SOURCE_REPRESENTATION_TOLERANCE_SECONDS:
+                raise RangeOverrideError('range_outside_source_duration')
+            cursor = right
+    if cursor < end:
         raise RangeOverrideError('range_outside_sources_or_crosses_gap')
     actual = row.get('ranges')
     if not isinstance(actual, list) or len(actual) != len(expected):
@@ -98,8 +115,15 @@ def validate_range(row, sources):
                 or item['media_stem'] not in sources):
             raise RangeOverrideError('range_source_unknown')
         left, right = number(item.get('start')), number(item.get('end'))
+        source = sources[item['media_stem']]
+        local_limit = number(source['global_end']) - number(source['global_start'])
+        if 'duration' in source:
+            local_limit = min(local_limit, number(source['duration']))
+        if left < 0 or right > round(local_limit, 3):
+            raise RangeOverrideError('range_local_time_outside_source')
         if (right <= left or item['media_stem'] != wanted['media_stem']
-                or abs(left - wanted['start']) > 0.001 or abs(right - wanted['end']) > 0.001):
+                or abs(left - wanted['start']) > SOURCE_REPRESENTATION_TOLERANCE_SECONDS
+                or abs(right - wanted['end']) > SOURCE_REPRESENTATION_TOLERANCE_SECONDS):
             raise RangeOverrideError('source_ranges_inconsistent')
 
 
@@ -159,7 +183,8 @@ def build_model(document, index, titles, override_document):
         product.update(global_start=start, global_end=end, product_range_duration=round(end-start, 3),
                        product_start_anchor=start, range_basis='explicit_local_source_time_override',
                        ranges=split_range(start, end, list(sources.values())),
-                       confidence='locally_verified_override', override_reason=reason)
+                       confidence='locally_verified_override', override_reason=reason,
+                       boundary_provenance={'start': 'explicit_override', 'end': 'explicit_override'})
     for pid, product in products.items():
         # Business identity always comes from authenticated titles, including additions.
         product.update({key: title_by_id[pid][key] for key in ('product_index', 'encoding_id', 'title')})

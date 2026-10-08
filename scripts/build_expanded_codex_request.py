@@ -9,7 +9,14 @@ import re
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import expected_identity, load_checked_json, write_metadata
+import hashlib
+import tempfile
+from runtime_meta import (CacheIdentityError, expected_identity, load_checked_json,
+                          read_metadata, write_metadata, validate_cache)
+from runtime_publication import BuildSnapshot, generator_lock, publish_pair
+from runtime_meta import metadata_path
+from apply_range_overrides_v2 import signature, source_map, validate_global_ranges, validate_range
+from publish_confirmed_ranges import validate_confirmed_document
 
 
 FORBIDDEN = re.compile(
@@ -60,67 +67,114 @@ def build_wide_candidates(cues: list[dict], stem: str, title: str) -> tuple[list
     return candidates, removed
 
 
+def validate_accepted_ranges(document, meta, titles, index):
+    producer=meta.get("producer")
+    if producer=="publish_confirmed_ranges.py":
+        validate_confirmed_document(document,titles,index)
+    elif producer=="apply_range_overrides_v2.py":
+        rows=document.get("products")
+        if not isinstance(rows,list) or {r.get("product_index") for r in rows}!={r["product_index"] for r in titles}:
+            raise CacheIdentityError("range_authority_unverified")
+        sources=source_map(index)
+        for row in rows:
+            provenance=row.get("boundary_provenance") or {}
+            if all(provenance.get(side)=={"kind":"explicit_override"} for side in ("start","end")):
+                validate_range(row,sources)
+                continue
+            # Mixed provenance is not produced by the range writer and cannot
+            # be inferred from its confidence label.
+            if not all(provenance.get(side,{}).get("kind")=="human_confirmed" for side in ("start","end")):
+                raise CacheIdentityError("range_authority_unverified")
+            validate_confirmed_document({"products":[row]},[next(t for t in titles if t["product_index"]==row["product_index"])],index)
+        validate_global_ranges(rows)
+    else:
+        raise CacheIdentityError("range_authority_unverified: publish confirmed ranges first")
+    return document
+
+
+def expanded_request(product, candidates, removed, range_digest):
+    duration=round(float(product["global_end"])-float(product["global_start"]),3)
+    rules={"product_title":product["title"],"product_index":product["product_index"],
+           "encoding_id":product["encoding_id"],"phase":"完整商品范围宽候选池语义选择",
+           "requirements":[
+             "仅在已验证的当前商品区间内选择","每条成片严格大于45秒且小于60秒",
+             "候选不限长度，允许从长语义块内部选择完整句群，不可截断依赖","每条开头独立、结尾完整",
+             "禁止价格、优惠、抽奖、链接号和直播流程话术","不同版本源时间零重叠且口播语义不重复",
+             "仅 MiMo 负责语义选择；不得修改商品范围、决定物理切点或控制 Resolve"]}
+    pool_duration=round(sum(float(r["time_range"]["end"])-float(r["time_range"]["start"]) for r in candidates),3)
+    return {"schema_version":1,"pipeline_version":"2.1","product_index":product["product_index"],
+            "rules":rules,"model":"mimo-v2.5-pro","product_range":{"start":product["global_start"],
+            "end":product["global_end"],"duration":duration,"basis":product.get("range_basis")},
+            "product_range_sha256":range_digest,"candidates":candidates,"local_forbidden_cues":removed,
+            "candidate_pool_summary":{"segment_count":len(candidates),"duration":pool_duration,
+            "product_range_duration":duration,"coverage":round(pool_duration/duration,6) if duration else 0.0}}
+
+
+def build_requests(paths, product_ids):
+    requested={int(value) for value in product_ids}
+    if not requested or any(pid<1 for pid in requested): raise ValueError("products_must_be_nonempty_positive_ids")
+    outputs=[]
+    with generator_lock(paths):
+        snapshot=BuildSnapshot(paths);identity=expected_identity(paths)
+        range_path=paths.cache_dir/"product_ranges.json"
+        index_path=paths.cache_dir/"subtitle_index.json";titles_path=paths.cache_dir/"titles.json"
+        ranges_doc=load_checked_json(paths,range_path,expected=identity,artifact_schema_version=1)
+        range_meta=read_metadata(range_path)
+        titles_doc=load_checked_json(paths,titles_path,expected=identity)
+        index=load_checked_json(paths,index_path,expected=identity,artifact_schema_version=1)
+        validate_accepted_ranges(ranges_doc,range_meta,titles_doc["products"],index)
+        ranges={int(r["product_index"]):r for r in ranges_doc["products"]}
+        title_by_id={int(r["product_index"]):r for r in titles_doc["products"]}
+        if set(ranges)!=set(title_by_id):raise CacheIdentityError("accepted_range_product_set_incomplete")
+        if not requested.issubset(ranges):raise ValueError("unknown_or_missing_product_range")
+        if len(ranges)!=len(title_by_id):raise CacheIdentityError("accepted_range_product_set_incomplete")
+        source_rows={r["source_stem"]:r for r in index["sources"]}
+
+        cues=index["cues"];by_source={}
+        for cue in cues:by_source.setdefault(str(cue["source_stem"]),[]).append(cue)
+        range_digest=hashlib.sha256(range_path.read_bytes()).hexdigest()
+        source_stamp=signature(range_path);index_stamp=signature(index_path);titles_stamp=signature(titles_path)
+        staged=[]
+        with tempfile.TemporaryDirectory(prefix=".expanded-requests-",dir=paths.cache_dir) as temporary:
+            temp=Path(temporary)
+            for pid in sorted(requested):
+                product=ranges[pid];title=title_by_id[pid]
+                candidates=[];removed=[]
+                for source_range in product["ranges"]:
+                    stem=str(source_range["media_stem"])
+                    if stem not in source_rows:raise CacheIdentityError("accepted_range_source_unknown")
+                    source_cues=[cue for cue in by_source.get(stem,[])
+                        if float(cue["start"])>=float(source_range["start"])
+                        and float(cue["end"])<=float(source_range["end"])]
+                    kept,rejected=build_wide_candidates(source_cues,stem,title["title"])
+                    candidates.extend(kept);removed.extend(rejected)
+                request=expanded_request(product,candidates,removed,range_digest)
+                output=paths.cache_dir/f"product_{pid:02d}_rough"/"codex_expanded_request.json"
+                output.parent.mkdir(parents=True,exist_ok=True)
+                target=temp/f"product_{pid:02d}_codex_expanded_request.json"
+                target.write_text(json.dumps(request,ensure_ascii=False,indent=2,allow_nan=False)+"\n",encoding="utf-8")
+                meta=write_metadata(paths,target,"build_expanded_codex_request.py",product_id=pid,identity=identity)
+                validate_cache(paths,target,product_id=pid,expected=identity)
+                staged.append((target,metadata_path(target),output))
+            def check_inputs():
+                snapshot.check()
+                if signature(range_path)!=source_stamp or signature(index_path)!=index_stamp or signature(titles_path)!=titles_stamp:
+                    raise CacheIdentityError("artifact_changed_during_generation")
+                if hashlib.sha256(range_path.read_bytes()).hexdigest()!=range_digest:
+                    raise CacheIdentityError("range_dependency_mismatch")
+            for data,meta,output in staged:
+                publish_pair(data,meta,output,before_commit=check_inputs)
+                outputs.append(output)
+    return outputs
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--workspace")
-    parser.add_argument("--products", required=True)
-    parser.add_argument("--max-block", type=float, help="已弃用；V2.1 candidate pool 不限长度")
-    args = parser.parse_args()
-    root = Path(args.root).resolve()
-    paths = resolve_runtime_paths(root, args.workspace)
-    identity = expected_identity(paths)
-    wanted = {int(value) for value in args.products.split(",") if value.strip()}
-    ranges = {int(row["product_index"]): row for row in load_checked_json(paths, paths.cache_dir / "product_ranges.json", expected=identity, artifact_schema_version=1)["products"]}
-    cues = load_checked_json(paths, paths.cache_dir / "subtitle_index.json", expected=identity, artifact_schema_version=1)["cues"]
-    by_source: dict[str, list[dict]] = {}
-    for cue in cues:
-        by_source.setdefault(str(cue["source_stem"]), []).append(cue)
-    for product_index in sorted(wanted):
-        product = ranges[product_index]
-        candidates, removed = [], []
-        for source_range in product["ranges"]:
-            stem = str(source_range["media_stem"])
-            source_cues = [
-                cue
-                for cue in by_source.get(stem, [])
-                if float(cue["end"]) > float(source_range["start"]) and float(cue["start"]) < float(source_range["end"])
-            ]
-            rows, rejected = build_wide_candidates(source_cues, stem, product["title"])
-            candidates.extend(rows)
-            removed.extend(rejected)
-        old = load_checked_json(paths, paths.cache_dir / f"product_{product_index:02d}_rough" / "mimo_request.json", product_id=product_index, expected=identity)
-        old["model"] = "mimo-v2.5-pro"
-        old["pipeline_version"] = "2.1"
-        old["product_range"] = {
-            "start": product["global_start"],
-            "end": product["global_end"],
-            "duration": product.get("product_range_duration", round(float(product["global_end"]) - float(product["global_start"]), 3)),
-            "basis": product.get("range_basis", "product_start_anchor_to_next_real_product_start"),
-        }
-        old["rules"]["phase"] = "完整商品范围宽候选池语义选择"
-        old["rules"]["requirements"] = [
-            "仅在已验证的当前商品区间内选择",
-            "每条成片严格大于45秒且小于60秒",
-            "候选不限长度，允许从长语义块内部截取完整句群，不能截断因果、转折、枚举或指代",
-            "每条开头必须独立，结尾必须闭合",
-            "禁止价格、优惠、抽奖、链接号和直播流程话术",
-            "不同版本源时间零重叠、语义不重复；首次失败必须返修，只有EXHAUSTED才可减少条数",
-            "因为、所以、但是、然后等连接词只触发依赖检查，不按关键词直接淘汰",
-        ]
-        old["candidates"] = candidates
-        old["local_forbidden_cues"] = removed
-        output = paths.cache_dir / f"product_{product_index:02d}_rough" / "codex_expanded_request.json"
-        pool_duration = round(sum(float(row["time_range"]["end"]) - float(row["time_range"]["start"]) for row in candidates), 3)
-        old["candidate_pool_summary"] = {
-            "segment_count": len(candidates),
-            "duration": pool_duration,
-            "product_range_duration": old["product_range"]["duration"],
-            "coverage": round(pool_duration / old["product_range"]["duration"], 6) if old["product_range"]["duration"] else 0.0,
-        }
-        output.write_text(json.dumps(old, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        write_metadata(paths, output, "build_expanded_codex_request.py", product_id=product_index, identity=identity)
-        print(f"商品{product_index} 宽候选={len(candidates)} 候选时长={pool_duration:g}秒")
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--root",default=".");parser.add_argument("--workspace");parser.add_argument("--products",required=True)
+    parser.add_argument("--max-block",type=float,help="已弃用；V2.1 candidate pool 不限长度")
+    args=parser.parse_args();paths=resolve_runtime_paths(Path(args.root).resolve(),args.workspace)
+    outputs=build_requests(paths,[int(value) for value in args.products.split(",") if value.strip()])
+    for path in outputs:print(f"生成范围绑定候选请求：{path.parent.name}")
 
 
 if __name__ == "__main__":

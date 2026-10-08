@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 def extract(raw: dict) -> dict:
@@ -36,9 +36,10 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
-    selection = load_checked_json(paths, paths.runtime_argument(args.selection))
-    request = load_checked_json(paths, paths.runtime_argument(args.repair_request))
-    repair = extract(load_checked_json(paths, paths.runtime_argument(args.repair_result)))
+    identity = expected_identity(paths)
+    selection = load_checked_json(paths, paths.runtime_argument(args.selection), expected=identity)
+    request = load_checked_json(paths, paths.runtime_argument(args.repair_request), expected=identity)
+    repair = extract(load_checked_json(paths, paths.runtime_argument(args.repair_result), expected=identity))
     failed = set(request.get("repair_variants") or [])
     repaired = {row.get("variant_id"): row for row in repair.get("selected_variants") or []}
     if set(repaired) != failed:
@@ -60,7 +61,7 @@ def main() -> None:
             })
     payload = {"selected_variants": sorted(merged, key=lambda row: row["variant_id"]), "duplicate_remove": repair.get("duplicate_remove") or []}
     paths.runtime_argument(args.output).write_text(json.dumps({"output_text": json.dumps(payload, ensure_ascii=False)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    write_metadata(paths, paths.runtime_argument(args.output), "merge_repair_result_v2.py", product_id=request.get("product_index"))
+    write_metadata(paths, paths.runtime_argument(args.output), "merge_repair_result_v2.py", product_id=request.get("product_index"), identity=identity)
     print("返修结果已与锁定方案合并")
 
 

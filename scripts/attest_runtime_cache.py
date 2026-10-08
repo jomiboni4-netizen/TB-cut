@@ -83,11 +83,7 @@ def main() -> None:
         if args.product_id is not None or not isinstance(document.get("products"), list):
             raise CacheIdentityError("products_attestation_invalid")
     else:
-        folder_id = int(artifact.parent.name.split("_")[1])
-        if args.product_id != folder_id or document.get("product_index") != folder_id:
-            raise CacheIdentityError("request_product_id_mismatch")
-        if str(document.get("pipeline_version")) != identity["pipeline_version"] or not isinstance(document.get("candidates"), list):
-            raise CacheIdentityError("request_pipeline_or_candidates_invalid")
+        raise CacheIdentityError("legacy_candidates_require_regeneration: range dependency unknown")
     write_metadata(paths, artifact, "explicit_human_attestation", product_id=args.product_id, identity=identity)
     print(f"attested: {artifact}")
 

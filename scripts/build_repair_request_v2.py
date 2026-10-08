@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 def main() -> None:
@@ -22,9 +22,10 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
-    request = load_checked_json(paths, paths.runtime_argument(args.request))
-    selection = load_checked_json(paths, paths.runtime_argument(args.selection))
-    audit = load_checked_json(paths, paths.runtime_argument(args.audit))
+    identity = expected_identity(paths)
+    request = load_checked_json(paths, paths.runtime_argument(args.request), expected=identity)
+    selection = load_checked_json(paths, paths.runtime_argument(args.selection), expected=identity)
+    audit = load_checked_json(paths, paths.runtime_argument(args.audit), expected=identity)
     failed = sorted({str(row.get("variant_id")) for row in audit.get("errors", []) if row.get("variant_id")})
     attempt = int(request.get("repair_attempt") or 0) + 1
     limit = int(request.get("repair_limit") or 5)
@@ -73,7 +74,7 @@ def main() -> None:
         }],
     })
     paths.runtime_argument(args.output).write_text(json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    write_metadata(paths, paths.runtime_argument(args.output), "build_repair_request_v2.py", product_id=request.get("product_index"))
+    write_metadata(paths, paths.runtime_argument(args.output), "build_repair_request_v2.py", product_id=request.get("product_index"), identity=identity)
     print("返修请求完成：" + ",".join(failed))
 
 

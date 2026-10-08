@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 def main() -> None:
@@ -20,10 +20,11 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
+    identity = expected_identity(paths)
     selection_path = paths.runtime_argument(args.selection)
     audit_path = paths.runtime_argument(args.audit)
-    selection = load_checked_json(paths, selection_path)
-    audit = load_checked_json(paths, audit_path)
+    selection = load_checked_json(paths, selection_path, expected=identity)
+    audit = load_checked_json(paths, audit_path, expected=identity)
     if audit.get("passed") is not True or audit.get("status", "PASS" if audit.get("passed") else "REPAIRABLE") != "PASS":
         raise SystemExit("粗选审计未通过，禁止提升")
     destination = selection_path.parent
@@ -35,8 +36,8 @@ def main() -> None:
     approved_audit.write_text(
         json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    write_metadata(paths, approved_selection, "promote_rough_selection.py", product_id=selection.get("product_index"))
-    write_metadata(paths, approved_audit, "promote_rough_selection.py", product_id=selection.get("product_index"))
+    write_metadata(paths, approved_selection, "promote_rough_selection.py", product_id=selection.get("product_index"), identity=identity)
+    write_metadata(paths, approved_audit, "promote_rough_selection.py", product_id=selection.get("product_index"), identity=identity)
     print(f"商品{selection.get('product_index')} 粗选已批准：{audit.get('variant_count')} 条")
 
 

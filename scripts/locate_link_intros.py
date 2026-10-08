@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Locate product-start anchors, then derive complete product ranges."""
+"""Locate anchors and publish non-authoritative range suggestions only."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import re
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+import tempfile
+from runtime_meta import CacheIdentityError, load_checked_json, write_metadata, validate_cache
+from runtime_publication import BuildSnapshot, generator_lock, publish_pair
+from apply_range_overrides_v2 import number, source_map, split_range, validate_range, signature
 
 
 DIGITS = "零一二三四五六七八九"
@@ -56,78 +59,33 @@ def score_context(context: str, pattern: re.Pattern[str]) -> tuple[int, list[str
 
 
 def choose_ordered(products: list[dict]) -> list[dict | None]:
-    """Choose one monotonically increasing candidate per product."""
-    target_gap = 980.0
-    minimum_gap = 180.0
-    maximum_gap = 3200.0
-    states: list[dict[int, tuple[float, int | None]]] = []
-    for product_pos, product in enumerate(products):
-        current: dict[int, tuple[float, int | None]] = {}
-        for candidate_pos, candidate in enumerate(product["candidates"]):
-            base = max(-6.0, min(12.0, float(candidate["score"])))
-            if product_pos == 0:
-                current[candidate_pos] = (base - abs(candidate["global_start"] - 400.0) / 300.0, None)
-                continue
-            best: tuple[float, int | None] | None = None
-            for previous_pos, (previous_score, _) in states[-1].items():
-                previous = products[product_pos - 1]["candidates"][previous_pos]
-                gap = float(candidate["global_start"]) - float(previous["global_start"])
-                if not minimum_gap <= gap <= maximum_gap:
-                    continue
-                transition = base - abs(gap - target_gap) / 260.0
-                proposed = (previous_score + transition, previous_pos)
-                if best is None or proposed[0] > best[0]:
-                    best = proposed
-            if best is not None:
-                current[candidate_pos] = best
-        states.append(current)
-    if not states or not states[-1]:
-        return [None] * len(products)
-    chosen_positions = [0] * len(products)
-    chosen_positions[-1] = max(states[-1], key=lambda pos: states[-1][pos][0])
-    for product_pos in range(len(products) - 1, 0, -1):
-        previous_pos = states[product_pos][chosen_positions[product_pos]][1]
-        if previous_pos is None:
-            return [None] * len(products)
-        chosen_positions[product_pos - 1] = previous_pos
-    return [
-        products[index]["candidates"][candidate_pos]
-        for index, candidate_pos in enumerate(chosen_positions)
-    ]
+    """Compatibility helper: select independently, never infer live order from IDs."""
+    return [classify_anchor(row)[1] for row in products]
 
 
-def split_range(start: float, end: float, sources: list[dict]) -> list[dict]:
-    ranges: list[dict] = []
-    for source in sources:
-        left = max(start, float(source["global_start"]))
-        right = min(end, float(source["global_end"]))
-        if right > left:
-            ranges.append({
-                "media_stem": source["source_stem"],
-                "start": round(left - float(source["global_start"]), 3),
-                "end": round(right - float(source["global_start"]), 3),
-            })
-    return ranges
+def classify_anchor(row):
+    ranked = sorted(row["candidates"], key=lambda item: (-item["score"], item["global_start"]))
+    selected = ranked[0] if ranked else None
+    if selected is None or selected["score"] < 7 or not row.get("title_present", True):
+        return "missing_or_low_confidence", None
+    if len(ranked) > 1 and selected["score"] - ranked[1]["score"] < 2:
+        return "ambiguous", None
+    return "confirmed", selected
 
 
 def complete_product_range(start_anchor: float, next_anchor: float | None, stream_end: float) -> tuple[float, float]:
-    """Treat title/link hits as anchors; range continues to next real start."""
-    start = max(0.0, float(start_anchor))
-    end = float(next_anchor) if next_anchor is not None else float(stream_end)
+    """Infer a suggestion only. This is not evidence of a confirmed product end."""
+    start = number(start_anchor)
+    if start < 0:
+        raise ValueError("negative_start_anchor")
+    end = number(next_anchor) if next_anchor is not None else number(stream_end)
     if end <= start:
         raise ValueError("下一商品边界必须晚于当前商品起点")
     return round(start, 3), round(end, 3)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--workspace")
-    args = parser.parse_args()
-    root = Path(args.root).resolve()
-    paths = resolve_runtime_paths(root, args.workspace)
-    index = load_checked_json(paths, paths.cache_dir / "subtitle_index.json", artifact_schema_version=1)
-    titles = load_checked_json(paths, paths.cache_dir / "titles.json")["products"]
+def build_suggestions(index, titles):
+    source_map(index)
     cues = index["cues"]
     results: list[dict] = []
     for product in titles:
@@ -179,56 +137,71 @@ def main() -> None:
             "candidates": candidates,
         })
 
-    # Select anchors independently, then sort by live time. Title-sheet order is not a boundary rule.
-    anchors: list[tuple[dict, dict]] = []
+    anchors = []
     for row in results:
-        ranked = sorted(row["candidates"], key=lambda candidate: (-candidate["score"], candidate["global_start"]))
-        selected = ranked[0] if ranked else None
-        ambiguous = bool(selected and len(ranked) > 1 and float(selected["score"]) - float(ranked[1]["score"]) < 2)
+        status, selected = classify_anchor(row)
+        row["boundary_status"] = status
         row["ordered_selected"] = selected
-        row["boundary_status"] = "ambiguous" if ambiguous else "confirmed" if selected and selected["score"] >= 7 else "missing_or_low_confidence"
-        if selected and selected["score"] >= 7 and not ambiguous and row["title_present"]:
+        if selected is not None:
             anchors.append((row, selected))
-    anchors.sort(key=lambda pair: float(pair[1]["global_start"]))
-    title_by_product = {int(row["product_index"]): row for row in titles}
-    range_products: list[dict] = []
-    for position, (row, selected) in enumerate(anchors):
-        next_selected = anchors[position + 1][1] if position + 1 < len(anchors) else None
-        start, end = complete_product_range(
-            float(selected["global_start"]),
-            float(next_selected["global_start"]) if next_selected else None,
-            float(index["sources"][-1]["global_end"]),
-        )
-        range_products.append({
-            "product_index": row["product_index"],
-            "encoding_id": row["encoding_id"],
-            "title": title_by_product[row["product_index"]].get("title"),
-            "confidence": "high",
-            "range_basis": "product_start_anchor_to_next_real_product_start",
-            "product_start_anchor": round(float(selected["global_start"]), 3),
-            "global_start": round(start, 3),
-            "global_end": round(end, 3),
-            "product_range_duration": round(end - start, 3),
-            "ranges": split_range(start, end, index["sources"]),
-        })
+    unresolved = [row["product_index"] for row in results if row["boundary_status"] != "confirmed"]
+    # Missing positions cannot be placed on the live timeline safely. Block the
+    # complete set rather than guessing which confirmed anchors they lie between.
+    suggestions = []
+    if not unresolved:
+        anchors.sort(key=lambda pair: pair[1]["global_start"])
+        for position, (row, anchor) in enumerate(anchors):
+            next_anchor = anchors[position + 1][1]["global_start"] if position + 1 < len(anchors) else None
+            suggested = {"product_index": row["product_index"],
+                         "boundary_provenance": {"start": "automatic_anchor", "end": "inferred_next_anchor_or_stream_end"},
+                         "status": "REQUIRES_CONFIRMATION"}
+            try:
+                start, end = complete_product_range(anchor["global_start"], next_anchor, index["sources"][-1]["global_end"])
+                suggested.update(global_start=start, global_end=end, ranges=split_range(start, end, index["sources"]))
+                validate_range(suggested, source_map(index))
+            except ValueError as exc:
+                suggested["status"] = "BLOCKED"
+                suggested["blocker"] = str(exc)
+            suggestions.append(suggested)
+    return {"schema_version": 1, "generator": "locate_link_intros.py:suggestions-v1",
+            "ready_for_cutting": False, "status": "BLOCKED" if unresolved or any(r["status"] == "BLOCKED" for r in suggestions) else "REQUIRES_CONFIRMATION",
+            "unresolved_products": unresolved, "products": results, "range_suggestions": suggestions}
 
-    output = paths.cache_dir / "link_intros.json"
-    output.write_text(json.dumps({"schema_version": 1, "products": results}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    write_metadata(paths, output, "locate_link_intros.py")
-    ranges_path = paths.cache_dir / "product_ranges.json"
-    ranges_path.write_text(
-        json.dumps({"schema_version": 1, "products": range_products}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    write_metadata(paths, ranges_path, "locate_link_intros.py")
-    for row in results:
-        selected = row.get("ordered_selected") or {}
-        confidence = row.get("boundary_status")
-        print(
-            f"商品{row['product_index']:02d} {confidence} "
-            f"候选={len(row['candidates'])} 来源={selected.get('source_stem', '-')} "
-            f"时间={selected.get('start', '-')} 分数={selected.get('score', '-')}"
-        )
+
+def generate(paths):
+    """Publish only diagnostics/suggestions; never open product_ranges for writing.
+
+    Existing confirmed OR unknown-provenance ranges are protected identically.
+    Removing them does not promote automatic suggestions to accepted ranges.
+    """
+    with generator_lock(paths):
+        snapshot = BuildSnapshot(paths)
+        inputs = [paths.cache_dir / name for name in ("subtitle_index.json", "titles.json")]
+        signatures = {path: signature(path) for path in inputs}
+        index, titles = [load_checked_json(paths, path, expected=snapshot.identity) for path in inputs]
+        model = build_suggestions(index, titles["products"])
+        def check_inputs():
+            snapshot.check()
+            if any(signature(path) != stamp for path, stamp in signatures.items()):
+                raise CacheIdentityError("artifact_changed_during_generation")
+        output = paths.cache_dir / "boundary_suggestions.json"
+        with tempfile.TemporaryDirectory(prefix=".boundary-suggestions-", dir=paths.cache_dir) as temporary:
+            staged = Path(temporary) / output.name
+            staged.write_text(json.dumps(model, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+            meta = write_metadata(paths, staged, "locate_link_intros.py", identity=snapshot.identity)
+            validate_cache(paths, staged, expected=snapshot.identity)
+            publish_pair(staged, meta, output, before_commit=check_inputs)
+        return model
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate boundary suggestions, never accepted ranges")
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--workspace")
+    args = parser.parse_args()
+    result = generate(resolve_runtime_paths(Path(args.root).resolve(), args.workspace))
+    print(result["status"] + ": automatic suggestions are not accepted product ranges")
+    raise SystemExit(2)
 
 
 if __name__ == "__main__":

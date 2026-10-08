@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
-from runtime_meta import load_checked_json, write_metadata
+from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 V2_REQUIREMENTS = [
@@ -38,9 +38,10 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
+    identity = expected_identity(paths)
     for raw in args.requests:
         path = paths.runtime_argument(raw)
-        document = load_checked_json(paths, path)
+        document = load_checked_json(paths, path, expected=identity)
         rules = document.setdefault("rules", {})
         document["pipeline_version"] = "2.1"
         document["rule_version"] = "v2.1"
@@ -52,7 +53,7 @@ def main() -> None:
         rules["physical_overlap_sec"] = 0.0
         rules["requirements"] = V2_REQUIREMENTS
         path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        write_metadata(paths, path, "enforce_v2_request_rules.py", product_id=document.get("product_index"))
+        write_metadata(paths, path, "enforce_v2_request_rules.py", product_id=document.get("product_index"), identity=identity)
         print(f"V2.1 请求规则已应用：{path.parent.name}")
 
 

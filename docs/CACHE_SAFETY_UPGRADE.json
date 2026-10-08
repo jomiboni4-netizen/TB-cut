@@ -35,5 +35,22 @@
       "prior_output_status": "Not certified by this gate; revalidation required before reuse, with no runtime edits in this code-only task",
       "semantic_scope": "Non-overlap does not certify complete coverage or semantic boundary correctness"
     }
+  },
+  "boundary_safety": {
+    "version": "boundary-safety-v1",
+    "runtime_applied": false,
+    "automatic_output": "boundary_suggestions.json only; never writes accepted product_ranges.json",
+    "unresolved_policy": "Block the whole automatic proposal set; no product-index order assumption",
+    "confirmation_policy": "Explicit override path only; preserve gaps and existing ranges on automatic runs",
+    "dependency_policy": "Downstream metadata requires range_dependency version 1 and authenticated product_ranges SHA-256; missing or mismatched dependencies are stale, never automatically attested",
+    "compatibility": "Automatic locator exits 2 pending confirmation. Legacy downstream artifacts require separately authorized regeneration. No migration or deletion.",
+    "confirmation_workflow": "publish_confirmed_ranges.py reads a complete source-local human manifest; preflight by default; --publish for first publication; --replace-confirmed required to replace authenticated manual ranges; fail closed on unknown provenance, invalid marker, missing product, illegal source time, coverage gap, or overlap",
+    "confirmation_marker": "Per-endpoint decision payload and SHA-256 traceability record, verified against current authenticated source index and titles; checksum is not a digital signature"
+  },
+  "downstream_rebuild": {
+    "expanded_request": "build_expanded_codex_request.py creates fresh base request from authenticated product ranges, titles, subtitle index and existing wide candidate cleaning",
+    "legacy_base_request_required": false,
+    "range_binding": "Body and metadata carry current authenticated product_ranges SHA-256",
+    "semantic_selection": "MiMo remains downstream semantic selector; not called by generator"
   }
 }
