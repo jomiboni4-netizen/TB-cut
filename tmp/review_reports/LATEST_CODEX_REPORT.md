@@ -128,7 +128,7 @@ Full beginning/end SHA-256 snapshots: all 1,119 protected files byte-identical, 
 
 **Current stage — 2026-10-08**
 
-MiMo called: no. Resolve connected: no. export performed: no. No real publish, override, cache rebuild, commit/push/PR mutation yet at report snapshot.
+MiMo called: no. Resolve connected: no. export performed: no. No real publish, override, or cache rebuild. This section records the precommit snapshot; the authorized commit, push, and PR update were completed afterward.
 
 **Current task — 2026-10-08**
 
@@ -165,6 +165,10 @@ The locked workbook dependency distribution is unavailable in the inspected curr
 No blocker in the requested consistency validation. No Runtime READY claim. Stopped after the private receipt and public summary; any later action requires separate user authorization.
 
 ## Git state
+
+**Post-push status — snapshot before report-only follow-up**
+
+The reviewed public changes were committed as `5dc95785200a21bd89fb3efd036909e266de12a1` and pushed fast-forward to `codex/repository-baseline`. Existing PR #1 was updated and remains OPEN / unmerged. Its description now records the safety changes, test results, workbook environment blocker, and the fact that real range publication was not performed. The 54-entry private file and private summary remain ignored under `reports/`. The six prior human decisions were preserved. No protected runtime files changed.
 
 **Current stage — 2026-10-08**
 
