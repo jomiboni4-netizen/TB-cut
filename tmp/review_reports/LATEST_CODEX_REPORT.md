@@ -18,7 +18,7 @@
 MiMo called: no
 Resolve connected: no
 export performed: no
-读取相关聊天和 GitHub 仓库、PR 状态；本次计划普通提交并快进推送现有 PR 分支，不合并 PR。
+读取相关聊天和 GitHub 仓库、PR 状态；文档提交已普通提交并快进推送现有 PR 分支；PR 正文已更新，保持开放且未合并。首次正文更新被自动审批拒绝，改用仅描述公开代码与文档的正文后成功。
 
 # Blockers
 文档无发布阻塞。工作簿依赖检查仍失败；部分实现仍在未提交工作区或本地运行脚本中，需另行审查和发布。原始运行数据不进入 GitHub。
@@ -26,9 +26,9 @@ export performed: no
 # Git state
 此快照位于本次后续提交之前。
 Branch: codex/repository-baseline
-HEAD: ae69f2f70712
+HEAD: 477633f76493
 PR: #1（现有，未合并）
-暂存：尚无。本次仅将复盘文档与固定报告暂存。现有未暂存与未跟踪状态：
+文档提交：477633f76493，已推送。后续仅提交本报告的发布状态更新。暂存：无；已有未提交代码和运行成果未纳入提交。此处记录发布状态更新前的工作区快照：
 
 ```
  M AGENTS.md
