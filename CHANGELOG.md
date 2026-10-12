@@ -1,5 +1,11 @@
 # Change Log
 
+## 2026-10-12 — one-project path binding and cache-safe grouped editing
+- Persist requirement to bind a complete Resolve project's input folder/configuration once and inherit it across Codex windows and product groups, asking only for missing/changed inputs.
+- Add P0 design for stable project identity, project/run/product/stage cache namespaces and signatures, concurrency-safe checkpoints and idempotent Resolve resumption. Do not re-attest or delete stale caches to hide conflicts.
+- Treat whole-project requests as full product coverage, processed in small quality-gated groups (initial proposal 2–3 products) with a final cross-group audit; a subset PASS never means whole-project completion.
+- Fold these changes into the existing 3–5 code-correction-round cap; this commit is documents/rules only and does not count as an implementation round. Runtime rule identity changes again; no real cache or Resolve mutations.
+
 ## 2026-10-12 — bounded correction plan and semantic/vision priorities
 - Save user-approved requirement for 3–5 reviewable Codex correction cycles before a separately authorized real-media acceptance test; stop after five and report unresolved blockers.
 - Prioritize final-cut speech continuity (especially middle seams), independent Codex final semantic review, practical causal sentence closure, measured runtime reduction and adaptive person sampling.
