@@ -8,7 +8,7 @@ from contextlib import ExitStack
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import test_project_resume as resume_fixtures
 from test_index_titles import synthetic_xlsx
-from quality_fixtures import fake_outcome, audit_fixture, valid_plan
+from quality_fixtures import fake_outcome, audit_fixture, valid_plan, synthetic_vision
 import codex_worker
 import index_titles
 import index_subtitles
@@ -50,6 +50,10 @@ class SchedulerTests(unittest.TestCase):
         self.fail_pid=None
         self.detector=self.material/'synthetic-detector'
         self.detector.write_text('synthetic')
+        weights = patch.object(pipeline, 'asr_model_identity', return_value={
+            'name': 'large-v3-turbo', 'resolved_path': 'synthetic', 'weights_digest': digest('synthetic weights'), 'files': {}})
+        weights.start()
+        self.addCleanup(weights.stop)
 
     def engine(self):
         stack=ExitStack()
@@ -65,13 +69,12 @@ class SchedulerTests(unittest.TestCase):
             pid=int((start+2)//100)+1
             return [{'start':(pid-1)*100+0.5,'end':(pid-1)*100+49.5,'text':self.texts[pid]}]
         stack.enter_context(patch.object(pipeline,'transcribe_window',side_effect=transcribe))
+        stack.enter_context(patch.object(pipeline,'asr_model_identity',return_value={
+            'name': 'large-v3-turbo', 'resolved_path': 'synthetic', 'weights_digest': digest('synthetic weights'), 'files': {}}))
         stack.enter_context(patch.object(pipeline,'source_fps',return_value=30))
         stack.enter_context(patch.object(pipeline,'audit_audio_start',side_effect=lambda media,start:(start,{'risk':False})))
         stack.enter_context(patch.object(pipeline,'refine_audio_end',side_effect=lambda media,start,end,duration:(end,{'risk':False})))
-        def vision(plan,sources,detector):
-            return {'variants':[{'variant_id':v['variant_id'],'host_identity_verified':True,'full_plan_coverage':True,
-                                  'host_visible_ratio_lower_bound':0.9} for v in plan['variants']]}
-        stack.enter_context(patch('person_coverage_audit_v2.registered_vision',side_effect=vision))
+        stack.enter_context(synthetic_vision(30))
         return stack
 
     def full(self):

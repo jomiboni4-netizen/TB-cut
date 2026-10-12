@@ -16,6 +16,7 @@ from final_quality_gate import final_task, import_final_review, approved_product
 from codex_worker import execute
 from registered_pipeline import (inputs, candidates, selection_task, rough_selection, local_asr, physical_plan, vision_audit)
 from audit_mimo_v2 import semantic_duplicate
+from compute_metrics import Metrics, scope, span, count
 
 
 def targets(paths):
@@ -66,52 +67,89 @@ def product_lease(paths, pid):
 def checkpoint(paths, pid, encoding, status, plan=None, evidence=None, reason=None):
     for _ in range(3):
         try:
-            return update_checkpoint(paths, product_id=pid, encoding_id=encoding, status=status, plan_ref=plan,
+            with span('checkpoint'):
+                return update_checkpoint(paths, product_id=pid, encoding_id=encoding, status=status, plan_ref=plan,
                                      evidence_ref=evidence, expected_revision=read_ledger(paths)['revision'], reason=reason)
         except CacheIdentityError as exc:
             if 'checkpoint_revision_conflict' not in str(exc):
                 raise
+            count('checkpoint', retries=1)
     raise CacheIdentityError('checkpoint_revision_contention')
 
 
 def process_product(paths, product, *, mode='package', detector=None):
     pid, encoding = product['product_id'], product['encoding_id']
     with product_lease(paths, pid):
+        resumed_at = time.perf_counter()
         existing = resume(paths, [pid])[pid]
         if existing['status'] in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED'):
             approved_product(paths, pid)
+            detailed = Metrics()
+            detailed.add('checkpoint', calls=1, hits=1, seconds=time.perf_counter()-resumed_at)
+            with workspace_lock(paths):
+                atomic_json(paths.project_records_dir/'metrics'/f'{pid}.json', {
+                    'product_id': pid, 'stages': [], 'compute': detailed.rows, 'resumed_valid': True,
+                    'time_semantics': 'inclusive nested wall-clock; do not sum spans'})
             return {'product_id': pid, 'status': existing['status'], 'cache_hit': True}
         cursor_path = paths.project_records_dir / 'cursors' / f'{pid}.json'
         cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {}
         metrics = []
-        checkpoint(paths, pid, encoding, 'IN_PROGRESS')
+        detailed = Metrics()
+        active_scope = scope(detailed)
+        active_scope.__enter__()
         def stage(name, function):
             started = time.perf_counter()
             ref = cursor.get(name)
             invalidation_reason = None
             if ref:
                 try:
-                    load_stage(paths, ref, product_id=pid, encoding_id=encoding)
+                    record = load_stage(paths, ref, product_id=pid, encoding_id=encoding)
+                    parents = {'rough': ['candidate'], 'asr': ['rough'], 'plan': ['rough', 'asr'],
+                               'vision': ['plan'], 'final_audit': ['plan', 'vision']}.get(name, [])
+                    dependencies = {d['path'] for d in record['identity']['dependencies']}
+                    if any(cursor.get(parent) not in dependencies for parent in parents):
+                        raise CacheIdentityError('cursor_dependency_changed')
+                    if name == 'vision':
+                        from registered_pipeline import vision_model_version
+                        if record['identity']['model_version'] != vision_model_version(detector):
+                            raise CacheIdentityError('vision_classifier_or_policy_changed')
+                    if name == 'asr':
+                        from registered_pipeline import asr_model_identity, current_asr_parameters
+                        body = record['body']
+                        if body.get('parameters') != current_asr_parameters() or body.get('model') != asr_model_identity(body['model']['name']):
+                            raise CacheIdentityError('asr_model_or_parameters_changed')
+                    if name == 'final_audit':
+                        from final_quality_gate import verify_final_record
+                        verify_final_record(paths, cursor['plan'], record['body'])
                 except (ValueError, OSError, KeyError) as exc:
                     invalidation_reason = str(exc)[:100]
+                    count('cache', reason=type(exc).__name__)
                     ref = None
             hit = ref is not None
             if not ref:
-                ref = function()
+                with span(name):
+                    ref = function()
                 cursor[name] = ref
                 with workspace_lock(paths):
                     atomic_json(cursor_path, cursor)
             metrics.append({'stage': name, 'elapsed_seconds': time.perf_counter()-started, 'cache_hit': hit,
                             'invalidation_reason': invalidation_reason})
+            if hit:
+                count(name, hits=1)
             return ref
         def worker(task):
             started = time.perf_counter()
             cached = (paths.project_records_dir / 'worker_receipts' / (task['task_digest']+'.json')).exists()
             try:
-                return execute(paths, task)
+                with span(task['role']), span('codex_request_wait'):
+                    result = execute(paths, task)
+                if cached:
+                    count('codex_request_wait', hits=1)
+                return result
             finally:
                 metrics.append({'stage': task['role'], 'elapsed_seconds': time.perf_counter()-started, 'cache_hit': cached})
         try:
+            checkpoint(paths, pid, encoding, 'IN_PROGRESS')
             pointer = current_range_path(paths, pid, encoding)
             if not pointer.exists():
                 raise CacheIdentityError('confirmed_product_range_missing')
@@ -156,7 +194,10 @@ def process_product(paths, product, *, mode='package', detector=None):
             # Product-only timing; no candidate text, transcript or chat events in controller summaries.
             with workspace_lock(paths):
                 atomic_json(paths.project_records_dir / 'metrics' / f'{pid}.json',
-                            {'product_id': pid, 'stages': metrics, 'repair_attempts': cursor.get('repair_attempts', 0)})
+                            {'product_id': pid, 'stages': metrics, 'compute': detailed.rows,
+                             'time_semantics': 'inclusive nested wall-clock; do not sum spans',
+                             'repair_attempts': cursor.get('repair_attempts', 0)})
+            active_scope.__exit__(None, None, None)
 
 
 def subprocess_error_types():
@@ -216,7 +257,7 @@ def project_review_task(paths, products, rows):
     return task
 
 
-def run_project(paths, *, group_size=3, mode='package', detector=None):
+def _run_project(paths, *, group_size=3, mode='package', detector=None):
     manifest = schedule(paths, group_size)
     by_id = {v['product_id']: v for v in manifest['targets']}
     processed = []
@@ -225,7 +266,8 @@ def run_project(paths, *, group_size=3, mode='package', detector=None):
         processed.append({'products': group, 'statuses': [r['status'] for r in results]})
         if any(r['status'] not in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED') for r in results):
             break  # Preserve good siblings; no silent skip into later groups.
-    preliminary = project_audit(paths)
+    with span('project_quality_gate'):
+        preliminary = project_audit(paths)
     if preliminary['errors'] == ['PROJECT_CODEX_REVIEW_PENDING'] and mode == 'codex':
         rows = resume(paths)
         products = [approved_product(paths, p['product_id'], rows[p['product_id']]) for p in manifest['targets']]
@@ -234,13 +276,28 @@ def run_project(paths, *, group_size=3, mode='package', detector=None):
             atomic_json(paths.project_records_dir / 'tasks' / (task['task_digest']+'.json'),
                         {'status': 'REVIEW_PENDING', 'task': task})
         try:
-            execute(paths, task)
+            with span('project_review'), span('codex_request_wait'):
+                execute(paths, task)
         except (ValueError, OSError, subprocess_error_types()):
             pass  # Remain explicitly pending; no global approval without the receipt.
-    result = {**project_audit(paths), 'groups_processed': processed}
+    with span('project_quality_gate'):
+        result = {**project_audit(paths), 'groups_processed': processed}
     with workspace_lock(paths):
         atomic_json(paths.project_records_dir / 'project_audit_v3.json', result)
     return result
+
+
+def run_project(paths, *, group_size=3, mode='package', detector=None):
+    metrics = Metrics()
+    with scope(metrics):
+        try:
+            with span('project_total'):
+                return _run_project(paths, group_size=group_size, mode=mode, detector=detector)
+        finally:
+            with workspace_lock(paths):
+                atomic_json(paths.project_records_dir/'metrics'/'project.json', {
+                    'compute': metrics.rows, 'product_metrics': 'metrics/<product_id>.json',
+                    'time_semantics': 'inclusive nested wall-clock; do not sum spans'})
 
 
 def main():

@@ -9,7 +9,7 @@ from codex_worker import verify_receipt
 from audit_mimo_v2 import FORBIDDEN, semantic_duplicate
 from build_expanded_codex_request import FORBIDDEN as CANDIDATE_FORBIDDEN
 
-CONTRACT = 'final-gate-v3'
+CONTRACT = 'final-gate-v4-host-strata'
 
 
 def plan_errors(plan):
@@ -86,16 +86,9 @@ def final_task(paths, plan_ref):
     return payload
 
 
-def validate_vision(plan, vision):
-    rows = vision.get('variants', [])
-    expected = {v['variant_id'] for v in plan['variants']}
-    if {r.get('variant_id') for r in rows} != expected or len(rows) != len(expected):
-        raise CacheIdentityError('vision_variant_coverage_missing')
-    for row in rows:
-        if (row.get('host_identity_verified') is not True or row.get('full_plan_coverage') is not True
-                or not isinstance(row.get('host_visible_ratio_lower_bound'), (float, int))
-                or not 0.70 < row['host_visible_ratio_lower_bound'] <= 1):
-            raise CacheIdentityError('vision_unverified_uncertain_or_below_threshold')
+def validate_vision(plan, vision, paths):
+    from adaptive_vision import verify
+    verify(paths, plan, vision)
 
 
 def verify_final_record(paths, plan_ref, body):
@@ -120,6 +113,14 @@ def verify_final_record(paths, plan_ref, body):
     errors = plan_errors(plan['body'])
     if errors:
         raise CacheIdentityError('local_final_veto: ' + ','.join(errors))
+    for dependency in plan['identity']['dependencies']:
+        parent = load_stage(paths, dependency['path'])
+        if parent['identity']['stage'] == 'asr':
+            from registered_pipeline import asr_model_identity, current_asr_parameters
+            model = parent['body'].get('model')
+            if (not model or parent['body'].get('parameters') != current_asr_parameters()
+                    or asr_model_identity(model['name']) != model):
+                raise CacheIdentityError('final_asr_model_identity_changed')
     from publish_confirmed_ranges import verify_confirmation
     range_records = [load_stage(paths, d['path']) for d in plan['identity']['dependencies']
                      if load_stage(paths, d['path'])['identity']['stage'] == 'range']
@@ -135,7 +136,7 @@ def verify_final_record(paths, plan_ref, body):
     vision = load_stage(paths, body['vision_ref'], product_id=plan['identity']['product_id'], encoding_id=plan['identity']['encoding_id'])
     if vision['identity']['stage'] != 'vision' or plan_ref not in [d['path'] for d in vision['identity']['dependencies']]:
         raise CacheIdentityError('vision_not_bound_to_exact_plan')
-    validate_vision(plan['body'], vision['body'])
+    validate_vision(plan['body'], vision['body'], paths)
     return plan
 
 

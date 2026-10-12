@@ -1,11 +1,28 @@
 """Synthetic transport fixtures only; no production test mode or fake review provider."""
 import uuid
+import json
+from pathlib import Path
+from contextlib import contextmanager
 from unittest.mock import patch
 from project_registry import digest
 from product_checkpoints import capture_stage, publish_stage
 from publish_confirmed_ranges import build_confirmed_ranges
 import codex_worker
 from final_quality_gate import final_task, import_final_review
+
+
+@contextmanager
+def synthetic_vision(fps=10, classifier=None):
+    """Replace decode/classification boundaries, run the real sampler/cache/gate."""
+    import adaptive_vision
+    def host(*args):
+        return {'label': 'HOST_VISIBLE', 'host_verified': True, 'main_subject_verified': True,
+                'reason': 'synthetic transport only'}
+    with patch.object(adaptive_vision, 'frame_clock', return_value={
+            'fps': fps, 'frame_count': 100000, 'pts_digest': digest(['synthetic pts', fps]), 'mapping': 'decoded-cfr-v3'}), \
+         patch.object(adaptive_vision, 'clock_model_identity', return_value={'ffprobe': 'synthetic-clock'}), \
+         patch.object(adaptive_vision, 'classify_frame', side_effect=classifier or host) as mocked:
+        yield mocked
 
 
 def valid_plan(source='001.mp4', offset=0, text='这件衣服穿起来轻便活动不受限制'):
@@ -35,8 +52,14 @@ def fake_outcome(task, *, verdict='PASS', checks=None, selected_ranges=None):
 def audit_fixture(paths, plan_ref):
     from product_checkpoints import load_stage
     plan=load_stage(paths,plan_ref)
-    body={'variants': [{'variant_id': v['variant_id'], 'host_identity_verified': True, 'full_plan_coverage': True,
-                         'host_visible_ratio_lower_bound': 0.9} for v in plan['body']['variants']]}
+    import adaptive_vision
+    detector = paths.workspace_root/'synthetic-detector'
+    if not detector.exists(): detector.write_text('synthetic classifier transport')
+    state = json.loads(paths.state_path.read_text())
+    sources = {Path(p).name: p for p in state['video_paths']}
+    fps = plan['body']['variants'][0]['clips'][0]['fps']
+    with synthetic_vision(fps):
+        body = adaptive_vision.audit(paths, plan['body'], sources, detector)
     args=dict(product_id=plan['identity']['product_id'],encoding_id=plan['identity']['encoding_id'],stage='vision',
               version=digest(body),model_version='synthetic-detector',dependencies=[plan_ref])
     vision=publish_stage(paths,**args,body=body,snapshot=capture_stage(paths,**args))

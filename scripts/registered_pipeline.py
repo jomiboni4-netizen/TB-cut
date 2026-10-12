@@ -13,6 +13,9 @@ from build_expanded_codex_request import build_wide_candidates
 from publish_confirmed_ranges import build_confirmed_ranges
 from refine_plans_v2 import (refine_words, normalize_physical_clips, audit_audio_start,
                             refine_audio_end, media_duration)
+from compute_metrics import span
+from compute_store import media_signature, identity as compute_identity, cached, containing_asr
+from asr_identity import model_identity as asr_model_identity, PARAMETERS as ASR_PARAMETERS
 
 
 def publish(paths, product_id, encoding_id, stage, body, dependencies=(), model_version='local-v3', snapshot=None):
@@ -104,12 +107,14 @@ def rough_selection(paths, candidate_ref, receipt_ref):
 
 def transcribe_window(media, start, end, model):
     with tempfile.NamedTemporaryFile(suffix='.wav') as wav:
-        subprocess.run(['/opt/homebrew/bin/ffmpeg', '-v', 'error', '-y', '-ss', str(start), '-i', str(media),
+        with span('audio_decode', end-start):
+            subprocess.run(['/opt/homebrew/bin/ffmpeg', '-v', 'error', '-y', '-ss', str(start), '-i', str(media),
                         '-t', str(end-start), '-vn', '-ar', '16000', '-ac', '1', wav.name], check=True, capture_output=True)
-        segments, _ = model.get().transcribe(wav.name, language='zh', beam_size=5, vad_filter=True,
+        with span('local_asr_vad', end-start):
+            segments, _ = model.get().transcribe(wav.name, language='zh', beam_size=5, vad_filter=True,
                                              word_timestamps=True, condition_on_previous_text=False)
-        return [{'start': start + w.start, 'end': start + w.end, 'text': w.word}
-                for segment in segments for w in segment.words or []]
+            return [{'start': start + w.start, 'end': start + w.end, 'text': w.word}
+                    for segment in segments for w in segment.words or []]
 
 
 def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
@@ -123,9 +128,16 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
     jobs = [{'source_file': by_id[r['candidate_id']]['source_file'], 'start': max(0, r['start']-2),
              'end': min(sources[by_id[r['candidate_id']]['source_file']]['duration'], r['end']+3)}
             for r in rough['body']['selected_ranges']]
-    model = LazyModel(lambda: load_model(model_name))
+    weights = asr_model_identity(model_name)
+    from adaptive_vision import decoder_identity
+    parameters = {**ASR_PARAMETERS, 'decoder': decoder_identity(),
+                  'sample_rate': 16000, 'channels': 1}
+    def create_model():
+        with span('asr_model_load'):
+            return load_model(weights['resolved_path'])
+    model = LazyModel(create_model)
     args = dict(product_id=rough['identity']['product_id'], encoding_id=rough['identity']['encoding_id'], stage='asr',
-                version=digest(jobs), model_version=model_name, dependencies=[rough_ref])
+                version=digest([jobs, parameters]), model_version=digest(weights), dependencies=[rough_ref])
     snapshot = capture_stage(paths, **args)
     from product_checkpoints import stage_path
     output = stage_path(paths, snapshot)
@@ -133,21 +145,30 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
         load_stage(paths, paths.reference(output))
         return paths.reference(output)
     windows = []
+    signatures = {n: media_signature(sources[n]['video_path']) for n in {j['source_file'] for j in jobs}}
     for job in merge_windows(jobs):
-        words = transcribe_window(Path(sources[job['source_file']]['video_path']), job['start'], job['end'], model)
-        windows.append({**job, 'window_start': job['start'], 'window_end': job['end'], 'words': words})
-    return publish_stage(paths, **args, snapshot=snapshot, body={'windows': windows})
+        expected = compute_identity(paths, 'asr', signatures[job['source_file']], weights, parameters, [job['start'], job['end']])
+        window = containing_asr(paths, expected)
+        if window is None:
+            def compute():
+                with span('asr_transcription', job['end']-job['start']):
+                    words = transcribe_window(Path(sources[job['source_file']]['video_path']), job['start'], job['end'], model)
+                    return {**job, 'window_start': job['start'], 'window_end': job['end'], 'words': words}
+            window, _ = cached(paths, expected, compute)
+        windows.append(window)
+    if asr_model_identity(model_name) != weights:
+        raise CacheIdentityError('asr_weights_changed_during_compute')
+    return publish_stage(paths, **args, snapshot=snapshot, body={'windows': windows, 'model': weights, 'parameters': parameters})
 
 
-def source_fps(media):
-    from fractions import Fraction
-    result = subprocess.run(['/opt/homebrew/bin/ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                             '-show_entries', 'stream=r_frame_rate', '-of', 'default=noprint_wrappers=1:nokey=1',
-                             str(media)], text=True, capture_output=True, check=True)
-    value = float(Fraction(result.stdout.strip()))
-    if not math.isfinite(value) or value <= 0:
-        raise CacheIdentityError('source_fps_unverified')
-    return value
+def current_asr_parameters():
+    from adaptive_vision import decoder_identity
+    return {**ASR_PARAMETERS, 'decoder': decoder_identity(), 'sample_rate': 16000, 'channels': 1}
+
+
+def source_fps(media, paths=None):
+    from adaptive_vision import frame_clock, proven_clock
+    return (proven_clock(paths, media) if paths else frame_clock(media))['fps']
 
 
 def physical_plan(paths, rough_ref, asr_ref, *, fps=None):
@@ -174,10 +195,12 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None):
         window = containing_window(asr['body']['windows'], source_file, row['start'], row['end'])
         start, end, _, boundary = refine_words(window, row['start'], row['end'])
         media = Path(sources[source_file]['video_path'])
-        frame_rates.setdefault(source_file, fps if fps is not None else source_fps(media))
+        if source_file not in frame_rates:
+            frame_rates[source_file] = fps if fps is not None else source_fps(media, paths)
         clip_fps = frame_rates[source_file]
-        start, opening = audit_audio_start(media, start)
-        end, ending = refine_audio_end(media, start, end, sources[source_file]['duration'])
+        with span('audio_rms_boundaries', end-start):
+            start, opening = audit_audio_start(media, start)
+            end, ending = refine_audio_end(media, start, end, sources[source_file]['duration'])
         lo, hi = math.floor(start*clip_fps), math.ceil(end*clip_fps)
         if not any(part['media_stem']+'.mp4' == source_file and part['start'] <= lo/clip_fps < hi/clip_fps <= part['end'] for part in ranges):
             raise CacheIdentityError('refined_plan_outside_confirmed_range')
@@ -207,8 +230,14 @@ def vision_audit(paths, plan_ref, detector):
     from person_coverage_audit_v2 import registered_vision
     _, index = inputs(paths)
     sources = {Path(s['video_path']).name: s['video_path'] for s in index['sources']}
+    import uuid
     args = dict(product_id=plan['identity']['product_id'], encoding_id=plan['identity']['encoding_id'], stage='vision',
-                version=plan['body_digest'], model_version=_sha256(Path(detector)), dependencies=[plan_ref])
+                version=digest([plan['body_digest'], str(uuid.uuid4())]), model_version=vision_model_version(detector), dependencies=[plan_ref])
     snapshot = capture_stage(paths, **args)
-    body = registered_vision(plan['body'], sources, detector)
+    body = registered_vision(plan['body'], sources, detector, paths=paths)
     return publish_stage(paths, **args, snapshot=snapshot, body=body)
+
+
+def vision_model_version(detector):
+    from adaptive_vision import classifier_identity, POLICY
+    return digest([classifier_identity(detector), POLICY])

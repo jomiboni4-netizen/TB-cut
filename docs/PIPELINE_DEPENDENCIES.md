@@ -222,3 +222,20 @@ ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需�
 旧固定路径主流程的范围发布/覆盖、候选批量 CLI、MiMo/旧语义审稿 CLI、粗选修复/批准 CLI、ASR/window-quality/refine/person 的旧 batch CLI、真实 Resolve 写入与回读、导出及验证、迁移/attest/preflight/cleanup 等仍保持原身份门禁或明确登记模式 BLOCKED。本轮接入的是这些真实算法的登记适配器、批准入口与写前质量接口，不是所有旧 CLI 的兼容迁移。旧 schema 1 工具仍不具有新最终 Codex 质量许可。Resolve 稳定 ID 回读、真实检测器主播保证、VFR 的精确帧时间证明、自动返修/跨批次选择性物理计算复用和实际 timeline/export 证据需要后续收敛。真实素材、MiMo、Resolve 和导出均未执行。
 
 旧 schema 1 的批准命令和 Resolve 写入命令也明确阻塞，不能走旧启发式许可绕过新终审。旧读取 helper 可作历史身份校验，不是新写入授权。实际 ASR 执行需要带本机 faster-whisper 依赖的 Python 环境及已确认模型版本；本轮不调用真实模型或媒体，未验证该执行环境。自动阶段拆包和自动语义返修仍未接入。
+
+## 第 3 轮：主播分层审核与共享计算（2026-10-12）
+
+登记链：registered_pipeline → adaptive_vision → final_quality_gate（final-gate-v4-host-strata）→ product_checkpoints → approve_final_plans / project_scheduler / Resolve --check-only。新人物证据包含精确方案摘要、每个物理片段的源帧、轮次、分类及确定性采样策略；封存后才允许门禁复核。普通人检测只能 NO_PERSON/UNCERTAIN，不能证明主播主体。原 person batch CLI 明确阻塞旧计数许可，旧文件保留；注册模式使用 scheduler --detector 指向新 apple_frame_probe 的二进制。旧 person_coverage_probe 协议不自动兼容。
+
+- 初始 ceil(时长/60×16)，每个有时长的物理片段至少覆盖可用的首尾帧；短片段多时允许超过基础预算。固定种子抖动，追加最长未覆盖间隙的中点，最多五轮，不重复源帧；不同 FPS 用源帧映射。极短素材耗尽后停止。
+- 每片段以邻近样本的时间分层权重估计，按实际片段时长汇总。Wilson 参考使用两秒时间块上限并扣除最大未覆盖间隙；它是保守启发式，不是连续视频的独立样本/95% 覆盖保证。关键 UNCERTAIN、错误、覆盖间隙或保守值不严格 >70% 都不能 PASS。
+- ffprobe 全解码时间戳证明 CFR；r_frame_rate 不作证明。VFR、非零首帧时间戳、不完整时间戳明确 BLOCKED，精确 VFR 映射未编码。首次时间戳验证成本单独记录，后续共享封存 clock 缓存。
+- compute_store/compute_v3 只共享底层 ASR、clock 和源帧分类。项目 UUID、真实媒体路径/device/inode/大小/mtime/内容 SHA、模型权重/库版本、范围/帧、参数和协议参与身份。锁、原子发布、HMAC 和正文摘要拒绝静默覆盖及无证明缓存。旧目录不导入，不清空；损坏新版记录阻塞而非自动重算认证。签名用于本机执行完整性，不能抵御持有本机密钥的所有者。
+- ASR 重叠/相邻任务仍用既有 merge_windows；相同或被已验证窗口包含的请求共享完整词窗口，保留更大上下文，当前 ASR 阶段另绑定粗选依赖。模型加载只在 miss；权重本机解析 local_files_only，不下载。模型权重文件 SHA 与实际 Whisper/CT2 版本入身份，进程内按文件 stat 复用权重 SHA。模型/参数更新在许可和 cursor 中复核，重建受影响方案及终审。
+- compute_metrics 记录候选、选择/终审/项目审核请求等待、ASR 加载/转写/VAD、音频解码/RMS、视频抽帧/Vision、质量与检查点、cache/签名/clock，统计次数、单位量、hits、失效原因、错误和重试。Qwen/MiMo 未调用计零。时长为包含子阶段的墙钟，不能相加宣称总耗时；ASR/VAD 内置一体，未声称拆出独立 VAD 耗时。
+
+接入但环境 BLOCKED：可信主播身份/主体分类模型尚无；Apple 仅 generic person，Qwen 没有已验证且授权的本地模型；默认 Python 无 faster_whisper；私有 workbook doctor 不通过。需要授权后验证指定 ASR 环境、真实模型质量及统计风险。
+
+未编码/未迁移：真实 Resolve 写入/回读/幂等恢复与导出验证、精确 VFR、完整自动语义返修；旧固定路径候选/范围覆盖、window_quality/ASR/refine batch CLI、旧粗选/语义/repair、validate/export/attest/migration/preflight/cleanup 仍不作为新登记链消费者。保留第 2 轮阻塞，不宣称全面迁移。统一批准和 Resolve loader/check-only 使用新门禁，实际写入入口仍拒绝。
+
+来源：Apple VNDetectHumanRectanglesRequest 仅检测人体（https://developer.apple.com/documentation/vision/vndetecthumanrectanglesrequest）；Wilson 的二项比例公式参考 NIST（https://itl.nist.gov/div898/handbook/prc/section2/prc241.htm），连续视频相关性限制由本轮明确保守处理，不作该公式的统计保证。
