@@ -66,4 +66,6 @@
 | 4（按需） | 修复第 3 轮可复现失败及性能瓶颈 | 明确修复及回归证明 |
 | 5（最多） | 最后一次定向收敛与交付检查 | **停止修正循环**，交付候选与阻塞/风险，等待用户决定实测 |
 
-**最新两项需求同样尚未落地：** 不重复指定同一 Resolve 项目文件夹、缓存消除冲突、整项目按小组质量门禁全部完成，均为待编码、待合成测试、待实测的目标。\n\n**公开代码现状提示：** `scripts/person_coverage_probe.swift` 当前固定每 `0.5s` 取样；`scripts/person_coverage_audit_v2.py` 对点样本比例直接判 PASS；`scripts/refine_plans_v2.py` 采用启发式语义闭合。表内目标尚不代表已提交实现。
+**最新两项需求同样尚未落地：** 不重复指定同一 Resolve 项目文件夹、缓存消除冲突、整项目按小组质量门禁全部完成，均为待编码、待合成测试、待实测的目标。
+
+**公开代码现状提示：** `scripts/person_coverage_probe.swift` 当前固定每 `0.5s` 取样；`scripts/person_coverage_audit_v2.py` 对点样本比例直接判 PASS；`scripts/refine_plans_v2.py` 采用启发式语义闭合。表内目标尚不代表已提交实现。
