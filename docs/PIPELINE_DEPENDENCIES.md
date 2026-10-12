@@ -186,3 +186,39 @@ does not assert Runtime READY or revalidate any real human boundary decisions.
 尚未接入：范围发现/确认/覆盖（`locate_link_intros.py`、`publish_confirmed_ranges.py`、`apply_range_overrides_v2.py`）；候选与选段/修复（`build_expanded_codex_request.py`、`audit_mimo_v2.py`、`build_repair_request_v2.py`、`merge_repair_result_v2.py`、`drop_failed_variants_v2.py`、`enforce_v2_request_rules.py`、`promote_rough_selection.py`、`collect_post_audit_failures.py`、`local_semantic_review_v2.py`、`mimo_review_v2.py`）；物理和画面审核（`windowed_asr_v2.py`、`window_quality_v2.py`、`refine_plans_v2.py`、`person_coverage_audit_v2.py`、`approve_final_plans.py`、`review_compute_cache.py`）；写入/导出（`resolve_write_v2.py`、`validate_resolve_write_v2.py`、`inspect_timeline_for_export.py`、`export_marked_variants.py`、`verify_exports.py`、`compare_timeline_versions.py`）；维护（`workspace_preflight.py`、`migrate_runtime_layout.py`、`attest_runtime_cache.py`、`fingerprint_inputs.py`、`cleanup.py`）以及完整调度入口。
 
 这些入口需要接入不可变阶段记录与当前范围/方案依赖、计算复用、全项目进度和组间审核；尚不能把本轮登记模式用于真实完整流水线。Resolve 稳定 ID 的 API 回读、实际标记幂等性和全项目终审留待后轮及独立实测授权。本轮没有调用 MiMo、连接 Resolve、剪辑或导出。
+
+## 第 2 轮：独立工作上下文与质量链（代码，合成验收）
+
+本节优先于第 1 轮的下游“一律未接入”描述。登记 schema 仍为 2；质量合同升级为 `final-gate-v3`，项目调度清单 schema=3。相关代码内容摘要进入商品阶段身份，旧阶段/检查点不自动认证；真实 state/cache 未改。正式独立上下文接口已核对 [Codex 非交互文档](https://developers.openai.com/codex/noninteractive)。
+
+### 新的真实入口
+
+- `project_scheduler.py --workspace <workspace> --mode package|codex`：从认证标题索引得到全部非空商品，必要时沿用原项目配置更新完整目标清单。内部默认 3 款、可设 2 款；分组不改 batch identity。一组中失败或 REPAIRABLE 保留其他有效成果，并停止进入下一组。总控结果仅含编号、状态、数量和短错误，没有聊天/字幕/原始模型日志。
+- `--product <index>` 是独立单商品入口；配置仍来自同一登记 workspace。每个商品用独立目录锁，checkpoint 用 workspace 锁/revision；不同商品可通过多个独立进程执行，同商品并发立即阻塞。默认 package 模式只发布结构化工作单，保存 REVIEW_PENDING/商品 BLOCKED，不冒充已自动执行。
+- `codex_worker.py` 使用新 `codex exec --ephemeral --json --sandbox read-only --ignore-user-config` 进程，不用 resume/fork。隔离的临时工作目录只含本任务规则和 JSON schema，当前商品清理后的任务从 stdin 进入；禁止工具行为，收到工具事件、失败/超时、错误身份或缺完成事件就拒绝结果。每个商品选择与终审再分开上下文；最终还有独立项目语义复核上下文。
+- CLI 成功结果绑定 task 摘要、不同 thread ID、完成事件摘要和返回结果；本地随机密钥封存执行记录。严格导入校验封存、任务角色、当前方案/输入及结果字段。该记录是本机执行来源完整性约定，不是防止本机所有者恶意伪造的远端数字签名。CLI 缺失/不可用时工作单留待审核；不会自动换模型或使用启发式冒充 Codex。
+- 工作单只带当前商品的确认范围、认证候选或精修方案、规则/配置引用、有效阶段引用与简短问题；不传前一商品对话。超过 128KB 必须拆任务并 BLOCKED，不能截掉候选。任务、执行记录与详细文本只在本地忽略目录保存。
+
+### 已接入的关键质量链
+
+`registered_pipeline.py` 复用真实 `build_confirmed_ranges` 人工证明/源覆盖验证、`build_wide_candidates` 全范围清理、现有本机 Whisper 加载及合并窗口、`refine_words`、RMS 开头/句尾检查和 `normalize_physical_clips`。它把 range → candidate → Codex rough → local ASR → physical plan → exact vision → independent Codex final review → final audit 写入第 1 轮不可变商品记录，而非把旧固定路径产物贴新身份。
+
+ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需加载，已有有效窗口可复用。物理方案用源媒体帧率、向外保留词音的帧边界、当前完整范围，保存实际帧、同步音频范围、保留文字、词级窗口和接缝邻域。不通过截句尾凑时长；失败进入 REPAIRABLE/BLOCKED。源文件同名歧义及跨人工边界的粗字幕 cue 暂时阻塞，等待局部对齐，不能静默排除后称完整覆盖。
+
+`final_quality_gate.py` 独立计算精确时长、禁用内容、词边界截断、音画范围一致、物理源重叠、跨版本文本重复和无意义接缝；所有检查只是本地 veto。完整逻辑、因果/条件/指代/列举/卖点以及语义重复仍需要独立 Codex；不按“因为/所以”关键词自动拒绝。最终任务带实际顺序/源帧、可靠词窗口和源邻域，绑定方案与终审输入摘要。任何切点/顺序/对齐/规则/源输入变化撤销旧审核。
+
+独立终审命令：`final_quality_gate.py --workspace <workspace> --plan <stage-ref>` 默认只生成 REVIEW_PENDING；同时提供 `--vision <exact-plan-stage-ref> --receipt <sealed-Codex-receipt-ref>` 才能严格导入、重算门禁并更新 FINAL_PASS。直接人工写 verdict、粗选 PASS、旧 closure_check 或旧 final_audit 都不能更新新 FINAL_PASS。原 `approve_final_plans.py` 的登记模式现校验该链并发布不可变 approved 阶段；原 Resolve `load_products` 接入此审核读取，`resolve_write_v2.py --check-only` 可只读验证全项目，绝不连接 Resolve。登记模式真实写入仍显式 BLOCKED。
+
+人物接口 `person_coverage_audit_v2.registered_vision` 对精确方案收集真实 detector 输出；现有 Swift 只有任意人物样本数，无法证明主播身份及全方案覆盖，故明确 UNCERTAIN，不能拿 >70% 样本数强行 PASS。门禁要求同方案全部版本、已验证主播、完整覆盖及严格 >70% 的保守比例。合成测试的视觉执行边界替身不代表该真实检测器已通过，也未修改抽样算法。
+
+### 项目完成与统计
+
+全部目标商品都通过后，仍需独立项目 Codex 审核当前最终文字摘要/方案和单商品审核引用，检查跨商品、跨组语义重复；没有该执行记录保持 PROJECT_CODEX_REVIEW_PENDING。本地还检查跨组实际源秒范围重叠。区分 final_review_complete、written_count、export_verified_count；delivery_complete 始终因未迁移真实写入/导出复验而阻塞，不能宣称全部交付。
+
+每商品按阶段记录实测耗时、模型/ASR/物理/人物/终审阶段、缓存命中和失效原因、失败状态及修复计数入口。不宣称优化幅度。商品级 REPAIRABLE 需要修正当前方案并重新提交，自动全池返修编排尚未完成。
+
+### 尚未迁移，不能绕过
+
+旧固定路径主流程的范围发布/覆盖、候选批量 CLI、MiMo/旧语义审稿 CLI、粗选修复/批准 CLI、ASR/window-quality/refine/person 的旧 batch CLI、真实 Resolve 写入与回读、导出及验证、迁移/attest/preflight/cleanup 等仍保持原身份门禁或明确登记模式 BLOCKED。本轮接入的是这些真实算法的登记适配器、批准入口与写前质量接口，不是所有旧 CLI 的兼容迁移。旧 schema 1 工具仍不具有新最终 Codex 质量许可。Resolve 稳定 ID 回读、真实检测器主播保证、VFR 的精确帧时间证明、自动返修/跨批次选择性物理计算复用和实际 timeline/export 证据需要后续收敛。真实素材、MiMo、Resolve 和导出均未执行。
+
+旧 schema 1 的批准命令和 Resolve 写入命令也明确阻塞，不能走旧启发式许可绕过新终审。旧读取 helper 可作历史身份校验，不是新写入授权。实际 ASR 执行需要带本机 faster-whisper 依赖的 Python 环境及已确认模型版本；本轮不调用真实模型或媒体，未验证该执行环境。自动阶段拆包和自动语义返修仍未接入。

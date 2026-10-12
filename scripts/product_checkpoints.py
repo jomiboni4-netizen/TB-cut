@@ -23,7 +23,10 @@ def context(paths, product_id, encoding_id, stage):
     value = {k: identity[k] for k in ('identity_contract', 'project_key', 'config_digest',
                                      'upstream_fingerprint', 'rules_fingerprint', 'pipeline_version')}
     value.update({'product_id': product_id, 'encoding_id': encoding_id,
-                  'store_version': _sha256(Path(__file__)),
+                  'store_version': digest([_sha256(Path(__file__).parent / name) for name in
+                                          ('product_checkpoints.py', 'final_quality_gate.py', 'codex_worker.py', 'registered_pipeline.py',
+                                           'refine_plans_v2.py', 'audit_mimo_v2.py', 'build_expanded_codex_request.py',
+                                           'person_coverage_audit_v2.py', 'windowed_asr_v2.py', 'review_compute_cache.py')]),
                   'processing_policy': digest(state.get('batch_overrides', {})),
                   'stage_policy': digest({k: state.get('runtime', {}).get(k, {}).get(stage)
                                           for k in ('stage_versions', 'model_versions')})})
@@ -99,7 +102,7 @@ def capture_stage(paths, *, product_id, encoding_id, stage, version, model_versi
 
 
 def publish_stage(paths, *, product_id, encoding_id, stage, version, model_version, body, dependencies=(), snapshot=None):
-    if stage not in {'range', 'candidate', 'plan', 'asr', 'vision', *PASS_STAGES.values()}:
+    if stage not in {'range', 'candidate', 'rough', 'plan', 'asr', 'vision', 'approved', *PASS_STAGES.values()}:
         raise CacheIdentityError('unknown_stage')
     if not version or not model_version:
         raise CacheIdentityError('stage_and_model_version_required')
@@ -187,6 +190,9 @@ def verify_evidence(paths, product_id, encoding_id, plan_ref, evidence_ref, stat
         raise CacheIdentityError('checkpoint_evidence_not_passed')
     if status == 'FINAL_PASS' and body.get('audit_scope') != 'final_plan':
         raise CacheIdentityError('selection_pass_is_not_final_pass')
+    if status == 'FINAL_PASS':
+        from final_quality_gate import verify_final_record
+        verify_final_record(paths, plan_ref, body)
     return plan
 
 
@@ -205,13 +211,16 @@ def read_ledger(paths):
     return ledger
 
 
-def resume(paths):
+def resume(paths, product_ids=None):
     """Read-only revalidation: stale evidence is BLOCKED, interrupted work resumes."""
     state = json.loads(paths.state_path.read_text())
     checked_project(paths, state)
     ledger = read_ledger(paths)
     results = {}
-    for pid in state['batch']['product_ids']:
+    selected = state['batch']['product_ids'] if product_ids is None else list(product_ids)
+    if not set(selected).issubset(state['batch']['product_ids']):
+        raise CacheIdentityError('resume_product_outside_target_set')
+    for pid in selected:
         row = ledger['products'].get(str(pid))
         if not row:
             results[pid] = {'status': 'PENDING'}

@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import array
 import hashlib
 import json
+import math
 import re
+import subprocess
 from difflib import SequenceMatcher
 from itertools import combinations
 from pathlib import Path
@@ -16,6 +19,101 @@ from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
 RISK_ENDING = ("然后", "所以", "因为", "但是", "而且", "如果", "比如", "这个", "那个", "我们", "它的", "第一", "第二")
+AUDIO_SILENCE_DBFS = -23.0
+AUDIO_FRAME_SEC = 0.02
+AUDIO_SILENCE_HOLD_SEC = 0.12
+AUDIO_END_LOOKAHEAD_SEC = 1.6
+
+
+def audio_level_frames(media: Path, start: float, end: float) -> list[tuple[float, float]]:
+    """Return (frame_start_seconds, dBFS) for 20 ms mono PCM windows."""
+    if end <= start:
+        return []
+    result = subprocess.run([
+        "/opt/homebrew/bin/ffmpeg", "-v", "error", "-ss", f"{start:.6f}",
+        "-i", str(media), "-t", f"{end - start:.6f}", "-vn", "-ac", "1",
+        "-ar", "16000", "-f", "s16le", "-acodec", "pcm_s16le", "-",
+    ], capture_output=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"音频切点电平分析失败：{media.name} {result.stderr[-300:].decode(errors='replace')}")
+    samples = array.array("h")
+    samples.frombytes(result.stdout[:len(result.stdout) // 2 * 2])
+    samples_per_frame = round(16000 * AUDIO_FRAME_SEC)
+    frames = []
+    for offset in range(0, len(samples) - samples_per_frame + 1, samples_per_frame):
+        chunk = samples[offset:offset + samples_per_frame]
+        rms = math.sqrt(sum(value * value for value in chunk) / len(chunk))
+        dbfs = 20 * math.log10(max(rms / 32768, 1e-8))
+        frames.append((start + offset / 16000, dbfs))
+    return frames
+
+
+def refine_audio_end(media: Path, start: float, end: float, source_duration: float) -> tuple[float, dict]:
+    """Extend a cut only when sound continues across it and a nearby quiet run is found."""
+    lookback = max(start, end - 0.24)
+    lookahead = min(source_duration, end + AUDIO_END_LOOKAHEAD_SEC)
+    frames = audio_level_frames(media, lookback, lookahead)
+    before = [level for at, level in frames if end - 0.20 <= at < end]
+    after = [(at, level) for at, level in frames if end <= at < lookahead]
+    active_after = [(at, level) for at, level in after if level > AUDIO_SILENCE_DBFS]
+    continued = bool(active_after and active_after[0][0] <= end + AUDIO_FRAME_SEC * 2)
+    extension = 0.0
+    quiet_run = 0
+    quiet_start = None
+    if continued:
+        for at, level in after:
+            if level <= AUDIO_SILENCE_DBFS:
+                if quiet_run == 0:
+                    quiet_start = at
+                quiet_run += 1
+                if quiet_run * AUDIO_FRAME_SEC >= AUDIO_SILENCE_HOLD_SEC:
+                    candidate_end = (quiet_start or at) + 0.04
+                    extension = max(0.0, min(candidate_end, end + AUDIO_END_LOOKAHEAD_SEC) - end)
+                    break
+            else:
+                quiet_run, quiet_start = 0, None
+    adjusted_end = end + extension
+    return adjusted_end, {
+        "method": "rms_dbfs_20ms",
+        "silence_threshold_dbfs": AUDIO_SILENCE_DBFS,
+        "end_level_before_dbfs": round(before[-1], 1) if before else None,
+        "speech_continues_after_end": continued,
+        "quiet_run_found": extension > 0,
+        "end_extension_sec": round(extension, 3),
+        "risk": bool(continued and extension == 0),
+    }
+
+
+def audit_audio_start(media: Path, start: float) -> tuple[float, dict]:
+    frames = audio_level_frames(media, max(0.0, start - 0.80), start + 0.10)
+    onset = None
+    quiet_frames = round(AUDIO_SILENCE_HOLD_SEC / AUDIO_FRAME_SEC)
+    for index, (at, level) in enumerate(frames):
+        if at < start - 0.40 or at > start + AUDIO_FRAME_SEC or level <= AUDIO_SILENCE_DBFS:
+            continue
+        prior = frames[max(0, index - quiet_frames):index]
+        if len(prior) == quiet_frames and all(value <= AUDIO_SILENCE_DBFS for _, value in prior):
+            onset = at
+            break
+    adjusted_start = min(start, onset) if onset is not None else start
+    before = [level for at, level in frames if at < adjusted_start]
+    active_before = bool(before and before[-1] > AUDIO_SILENCE_DBFS)
+    return adjusted_start, {
+        "method": "rms_dbfs_20ms",
+        "silence_threshold_dbfs": AUDIO_SILENCE_DBFS,
+        "speech_before_start": active_before,
+        "start_onset_found": onset is not None,
+        "start_extension_sec": round(start - adjusted_start, 3),
+        "risk": active_before,
+    }
+
+
+def media_duration(media: Path) -> float:
+    result = subprocess.run([
+        "/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(media),
+    ], text=True, capture_output=True, check=True)
+    return float(result.stdout.strip())
 
 
 def digest(path: Path) -> str:
@@ -161,6 +259,13 @@ def main() -> None:
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
     state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    media_by_name = {
+        media.name: media
+        for item in state.get("video_paths") or []
+        for media in (Path(item).glob("*.mp4") if Path(item).is_dir() else [Path(item)])
+        if media.is_file() and media.suffix.lower() == ".mp4"
+    }
+    durations = {name: media_duration(media) for name, media in media_by_name.items()}
     target = state["resolve"]["target_timeline"]
     source_timeline = state["resolve"]["source_timeline"]
     for product_index in [int(value) for value in args.products.split(",") if value.strip()]:
@@ -187,8 +292,11 @@ def main() -> None:
             clips = []
             for clip_index, rough in enumerate(variant["timeline"], 1):
                 candidate = candidates[rough["source"]]
+                media = media_by_name[candidate["source_file"]]
                 window = containing_window(asr["windows"], candidate["source_file"], float(rough["start"]), float(rough["end"]))
                 start, end, alignment_text, boundary = refine_words(window, float(rough["start"]), float(rough["end"]))
+                start, audio_start = audit_audio_start(media, start)
+                end, audio_end = refine_audio_end(media, start, end, durations[candidate["source_file"]])
                 start_frame, end_frame = round(start * args.fps), round(end * args.fps)
                 start, end = start_frame / args.fps, end_frame / args.fps
                 if end <= start:
@@ -196,6 +304,10 @@ def main() -> None:
                     continue
                 if not boundary["clean_start"] or not boundary["clean_end"]:
                     errors.append({"variant_id": variant["variant_id"], "code": "UNCLEAN_BOUNDARY", "clip": clip_index})
+                if audio_end["risk"]:
+                    errors.append({"variant_id": variant["variant_id"], "code": "AUDIO_TAIL_CONTINUES_BEYOND_SCAN", "clip": clip_index})
+                if audio_start["risk"]:
+                    errors.append({"variant_id": variant["variant_id"], "code": "AUDIO_HEAD_CONTINUES_BEFORE_SCAN", "clip": clip_index})
                 if overlaps(start, end, unsafe_by_source.get(candidate["source_file"], [])):
                     errors.append({"variant_id": variant["variant_id"], "code": "UNSAFE_VISUAL_RANGE", "clip": clip_index})
                 clips.append({
@@ -214,16 +326,32 @@ def main() -> None:
                         "roles": [rough.get("role")] if rough.get("role") else [],
                         "complete_boundary": boundary["clean_start"] and boundary["clean_end"],
                         "boundary": boundary,
+                        "audio_cutpoint": {"start": audio_start, "end": audio_end},
                     },
                 })
             clips, meaningless_cut_count = normalize_physical_clips(clips, tolerance_frames=2)
             clips, duration_removed = fit_duration_with_complete_segments(clips)
+            for left_clip, right_clip in combinations(clips, 2):
+                if left_clip["source_file"] != right_clip["source_file"]:
+                    continue
+                overlap_frames = min(
+                    int(left_clip["source_end_frame"]), int(right_clip["source_end_frame"])
+                ) - max(
+                    int(left_clip["source_start_frame"]), int(right_clip["source_start_frame"])
+                )
+                if overlap_frames > 0:
+                    errors.append({
+                        "variant_id": variant["variant_id"],
+                        "code": "WITHIN_VARIANT_SOURCE_OVERLAP",
+                        "frames": overlap_frames,
+                    })
             duration = round(sum(float(clip["duration_sec"]) for clip in clips), 3)
             if not 45.0 < duration < 60.0:
                 errors.append({"variant_id": variant["variant_id"], "code": "FINAL_DURATION_INVALID", "duration": duration})
             plans.append({
                 "schema_version": 2,
                 "pipeline_version": "2.1",
+                "cutpoint_audio_audit_version": "rms-v2",
                 "status": "PASS",
                 "writes_davinci": True,
                 "product_index": product_index,
@@ -271,6 +399,8 @@ def main() -> None:
             json.dumps({
                 "schema_version": 2,
                 "pipeline_version": "2.1",
+                "cutpoint_audio_audit_version": "rms-v2",
+                "audio_silence_threshold_dbfs": AUDIO_SILENCE_DBFS,
                 "product_index": product_index,
                 "plans": [paths.reference(output_dir / f"cut_plan_variant_{ordinal}.json") for ordinal in range(1, len(plans) + 1)],
             }, ensure_ascii=False, indent=2) + "\n",

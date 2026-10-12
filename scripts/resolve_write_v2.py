@@ -89,6 +89,9 @@ def validate_uniqueness(product_index: int, plans: list[dict]) -> None:
 
 def load_products(root: Path, wanted: list[int], identity: dict | None = None, workspace: Path | None = None) -> list[dict]:
     paths = resolve_runtime_paths(root, workspace)
+    if paths.registered_scope():
+        from final_quality_gate import approved_product
+        return [approved_product(paths, pid) for pid in wanted]
     identity = identity or expected_identity(paths)
     titles = {int(row["product_index"]): row for row in load_checked_json(paths, paths.cache_dir / "titles.json", expected=identity)["products"]}
     visual = load_checked_json(paths, paths.cache_dir / "person_coverage_audit.json", expected=identity, artifact_schema_version=2)
@@ -171,6 +174,16 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
+    if paths.registered_scope():
+        if not args.check_only:
+            raise SystemExit('registered_resolve_write_not_migrated: preflight only')
+        from project_scheduler import project_audit
+        result = project_audit(paths)
+        if not result['final_review_complete']:
+            raise SystemExit('project_quality_preflight_failed')
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    raise SystemExit('legacy_resolve_write_not_migrated: independent Codex quality evidence required')
     identity = expected_identity(paths)
     state = read(paths.state_path)
     failed = {int(value) for value in state.get("batch", {}).get("failed_product_ids", [])}

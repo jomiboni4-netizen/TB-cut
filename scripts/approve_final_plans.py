@@ -19,6 +19,18 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
+    if paths.registered_scope():
+        from final_quality_gate import approved_product
+        from registered_pipeline import publish
+        from product_checkpoints import resume
+        rows = resume(paths)
+        for pid in [int(value) for value in args.products.split(',')]:
+            product = approved_product(paths, pid)
+            publish(paths, pid, product['encoding_id'], 'approved', product,
+                    [rows[pid]['plan_ref'], rows[pid]['evidence_ref']])
+            print(f'商品{pid} 精确方案与独立终审已验证')
+        return
+    raise SystemExit('legacy_final_approval_not_migrated: independent Codex quality evidence required')
     identity = expected_identity(paths)
     for product_index in [int(value) for value in args.products.split(",") if value.strip()]:
         directory = paths.cache_dir / f"product_{product_index:02d}_windowed"

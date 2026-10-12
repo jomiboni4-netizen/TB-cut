@@ -13,7 +13,6 @@ from runtime_paths import resolve_runtime_paths
 
 from runtime_meta import expected_identity, load_checked_json, write_metadata
 
-from faster_whisper import WhisperModel
 
 
 def fingerprint(path: Path) -> str:
@@ -30,6 +29,19 @@ def merge_windows(rows: list[dict]) -> list[dict]:
             merged.append(dict(row))
     return merged
 
+
+def load_model(name):
+    from faster_whisper import WhisperModel
+    return WhisperModel(name, device="cpu", compute_type="int8", local_files_only=True)
+
+def merge_windows(rows: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    for row in sorted(rows, key=lambda item: (item["source_file"], item["start"])):
+        if merged and merged[-1]["source_file"] == row["source_file"] and row["start"] <= merged[-1]["end"]:
+            merged[-1]["end"] = max(merged[-1]["end"], row["end"])
+        else:
+            merged.append(dict(row))
+    return merged
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -76,6 +88,7 @@ def main() -> None:
                 })
         jobs_by_product[product_index] = merge_windows(jobs)
 
+    from faster_whisper import WhisperModel
     model = WhisperModel(args.model, device="cpu", compute_type="int8", local_files_only=True)
     cache_root = paths.cache_dir / "asr_windows"
     for product_index, jobs in jobs_by_product.items():

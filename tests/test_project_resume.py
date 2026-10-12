@@ -74,13 +74,15 @@ class ProjectResumeTests(unittest.TestCase):
     def plan(self, paths=None, version='v1', body=None):
         paths = paths or self.paths
         source_range = publish_stage(paths, product_id=1, encoding_id='001', stage='range', version='range-v1',
-                                     model_version='synthetic-boundary', body={'start': 0, 'end': 2})
+                                     model_version='synthetic-boundary', body=__import__('quality_fixtures').range_body())
         return publish_stage(paths, product_id=1, encoding_id='001', stage='plan',
                              version=version, model_version='synthetic-model-v1',
-                             body=body or {'clips': [{'source': '001', 'start': 0, 'end': 1}]}, dependencies=[source_range])
+                             body=body or __import__('quality_fixtures').valid_plan(), dependencies=[source_range])
 
     def audit(self, plan, paths=None, version='v1', scope='final_plan'):
         paths = paths or self.paths
+        if scope == 'final_plan':
+            return __import__('quality_fixtures').audit_fixture(paths, plan)
         data = load_stage(paths, plan)
         return publish_stage(paths, product_id=1, encoding_id='001', stage='final_audit',
                              version=version, model_version='synthetic-auditor-v1',
@@ -205,7 +207,7 @@ class ProjectResumeTests(unittest.TestCase):
         load_stage(self.paths, plan)
         with self.assertRaises(CacheIdentityError):
             load_stage(self.paths, self.paths.reference(old))
-        with self.assertRaisesRegex(CacheIdentityError, 'registered_downstream_not_integrated'):
+        with self.assertRaisesRegex(CacheIdentityError, 'product_not_final_quality_passed'):
             load_products(self.repo, [1], workspace=self.paths.workspace_root)
         with patch.object(sys, 'argv', ['refine', '--root', str(self.repo), '--workspace', str(self.paths.workspace_root), '--products', '1']):
             with self.assertRaisesRegex(CacheIdentityError, 'registered_downstream_not_integrated'):
@@ -308,7 +310,7 @@ class ProjectResumeTests(unittest.TestCase):
         rules.write_text(original)
         artifact = self.paths.resolve_reference(plan).path
         value = json.loads(artifact.read_text())
-        value['body']['clips'][0]['start'] = 0.2
+        value['body']['variants'][0]['clips'][0]['source_start_frame'] = 2
         artifact.write_text(json.dumps(value))
         self.assertEqual(resume(self.paths)[1]['status'], 'BLOCKED')
 

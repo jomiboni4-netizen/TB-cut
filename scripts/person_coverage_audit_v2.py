@@ -17,6 +17,23 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def registered_vision(plan, sources, detector):
+    """Collect exact-plan detector evidence; generic person counts cannot certify host coverage."""
+    rows = []
+    for variant in plan['variants']:
+        reports = []
+        for clip in variant['clips']:
+            fps = clip['fps']
+            bounds = f"{clip['source_start_frame']/fps:.6f}:{clip['source_end_frame']/fps:.6f}"
+            result = subprocess.run([str(detector), sources[clip['source_file']], bounds, '--summary'],
+                                    check=True, text=True, capture_output=True)
+            reports.append(json.loads(result.stdout))
+        # Current Swift output has person counts, not verified host identity/full coverage.
+        rows.append({'variant_id': variant['variant_id'], 'detector_reports': reports,
+                     'host_identity_verified': False, 'full_plan_coverage': False,
+                     'host_visible_ratio_lower_bound': 0.0, 'status': 'UNCERTAIN'})
+    return {'variants': rows}
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")

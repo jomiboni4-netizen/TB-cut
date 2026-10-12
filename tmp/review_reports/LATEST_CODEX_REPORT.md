@@ -1,53 +1,60 @@
 # Task
-TB-cut 既定 3–5 轮代码修正中的第 1 轮：项目身份、缓存隔离与断点基础。参考提交 bad5a547da36；只使用合成输入。结束后停止，不启动第 2 轮或真实项目实测。
+TB-cut 第 2 轮综合修正：全项目总控、自动分组、独立商品 Codex 上下文、统一精确方案质量门禁与恢复。父提交 3efd30cfc714；属于既定 3–5 轮中的第 2 轮。仅合成验收，结束后停止，等待复核。
 
 # Repo changes
 本轮解决的问题：
-- init_project 保存本地项目配置；同一 workspace 跨窗口继承整项目路径，缺失标题可单项补充。项目 UUID、确认的稳定 Resolve ID、目录身份和配置摘要共同校验，不凭显示名称识别项目。旧状态拒绝自动迁移。
-- 新合同 project-resume-v2/schema 2 分离项目索引、批次路径和商品阶段。真正的标题/字幕生成器跨批次复用相同有效上游；批次审核不删除 batch_id 校验。商品阶段按商品编号、encoding ID、阶段/版本、模型、规则和父依赖保存不可变结果。
-- 七种检查点状态绑定当前方案与逐级审核/写入/导出证据。新方案或范围撤销旧通过；预计算 snapshot、共享 workspace 锁、revision 比较、原子 JSON 和失败标记防止覆盖及半完成。重复恢复不会重复计数。
-- 真实 update_batch_state 接入恢复；裸完成标志阻塞。真实 refine/Resolve loader 和辅助入口在新登记模式的外部动作前阻塞未完成迁移。
-- 复核并复用既有 runtime_meta 输入/编号校验、index_titles 占位编号实现、相应合成测试和 workbook_runtime 默认路径选择。没有纳入其余尚未复核的剪辑/连接/缓存实现。
-- 同步远端仅增补的计划/规则基线，保留工作区原有内容；CHANGELOG 的既有顶部结构与基线不同，提交只收录远端基线及本轮脱敏条目，原有运行记录仍留在工作区。
-- 更新 PIPELINE_DEPENDENCIES、CODEX_CORRECTION_PLAN、PROJECT_RESUME_UPGRADE 和本固定报告。剪辑时长、人物比例、语义闭合、去重硬规则未修改。
+- project_scheduler 从认证标题索引建立完整目标清单，沿用第 1 轮配置补齐当前目标集，不重填素材路径。默认每组 3 款、可设 2 款；分组不改 batch identity。商品失败/REPAIRABLE 后保留同组已通过商品，停止下一组，不声称项目完成。
+- codex_worker 用真实 fresh codex exec/ephemeral/read-only 独立进程，商品选择、最终审核和项目审核各用新上下文。正式接口已查阅 OpenAI 非交互文档；实际运行三个合成 CLI 探针，其中两次成对调用确认不同会话 ID 和匹配任务摘要。没有向工作会话复制上一商品聊天。
+- 工作单含当前项目/配置引用、商品与编码、确认范围/候选/最终帧与词窗口、规则、有效引用与短问题。没有历史聊天、他商品原始字幕或完整错误日志。输入超过 128KB 阻塞要求拆包，不截掉候选。支持单商品独立入口和 package 模式；缺 CLI/完成事件/正确身份时 REVIEW_PENDING/BLOCKED。
+- registered_pipeline 接入真实人工范围验证、全范围候选清理、现有 Whisper 加载/窗口合并、refine_words、RMS 起止检查、源帧换算与连续片段归并，产物进入第 1 轮不可变商品阶段。ASR 改为按需加载，避免仅导入模块就加载未安装依赖。
+- final_quality_gate 把精修后的源帧/音频同步范围、顺序、保留文字、邻近词窗口和全片逻辑交给独立 Codex；保存封存执行记录和精确任务摘要，严格导入并重新计算本地 veto。缺真实 Codex 记录、手填 verdict、旧 closure_check 或粗选 PASS 均不能获得新 FINAL_PASS。中段吃字、旧审核伴随新切点、禁用内容、时长、重叠、无意义接缝等拒绝放行；连接词不机械判错。
+- 人物证据绑定精确方案/全部版本，必须有已验证主播、完整覆盖和严格 >70% 的保守比例。现有 detector 仅任意人物样本数，适配器明确 UNCERTAIN，不能自动 PASS。没有改抽样算法或硬阈值。
+- 原批准入口接入该许可；原 Resolve loader 接入精确许可读取，--check-only 只读全项目验收、不连接 Resolve。登记模式真实写入及旧 schema 1 批准/写入命令明确 BLOCKED，防止旧许可绕过新门禁。
+- 全项目检查完整商品状态、跨组源范围/文本重复，随后另需独立项目 Codex 审核。没有项目审核记录保持 PROJECT_CODEX_REVIEW_PENDING；分别统计 final_review_complete、written_count、export_verified_count；真实交付尚未迁移，delivery_complete 不会自动为 true。
+- 商品 lease、workspace 锁/revision、不可变结果和依赖复核防止重复覆盖/计数。单商品恢复只读取所需商品，不随分组积累聊天。阶段计时、缓存命中/失效原因、失败和返修计数有本地入口。
 
-公开提交文件：.gitignore；AGENTS.md；PROJECT_RULES.md；CHANGELOG.md；docs/CODEX_CORRECTION_PLAN.md；docs/PIPELINE_DEPENDENCIES.md；docs/PROJECT_RESUME_UPGRADE.json；scripts/{project_registry,product_checkpoints,runtime_paths,runtime_meta,runtime_publication,init_project,update_batch_state,index_subtitles,index_titles,workbook_runtime,fingerprint_inputs,compare_timeline_versions,inspect_timeline_for_export}.py；tests/{test_project_resume,test_index_titles,test_range_overrides,test_workbook_dependencies}.py；本固定报告。共 25 个文件。
+公开源码/测试文件：scripts/{codex_worker,final_quality_gate,registered_pipeline,project_scheduler,product_checkpoints,approve_final_plans,refine_plans_v2,person_coverage_audit_v2,resolve_write_v2,windowed_asr_v2,review_compute_cache}.py；tests/{quality_fixtures,test_project_scheduler,test_project_resume}.py；docs/{PIPELINE_DEPENDENCIES,CODEX_CORRECTION_PLAN}.md；docs/INDEPENDENT_WORKER_UPGRADE.json；CHANGELOG.md；本固定报告。共 19 个文件。
+复核并复用必要的既有音频精修函数、ASR 按需加载/窗口合并和 LazyModel；人物/Resolve/ASR 文件只选本轮适配器和必要接口，不把其他未提交实现整包发布。旧变更记录与其他未提交文件原位保留。
 
 # Runtime changes
-只在临时合成工作区登记、生成索引、发布阶段和恢复检查点，并导出独立公开源码快照验收。没有修改真实素材、SRT、标题工作簿、PROJECT_STATE、原有运行缓存或时间线。未清理缓存。现有未提交改动均保留；真实运行文件不会提交。
+只在临时合成 workspace 中生成工作簿/字幕/媒体占位、范围与阶段记录、工作单、模拟执行证据、检查点及质量结果。真实 CLI 只发送合成上下文隔离探针，不读取真实素材。没有修改真实 state、缓存、工作簿、字幕、视频、Resolve 或导出。没有清理缓存。
 
 # Validation
-- PASS：独立公开源码快照的可用测试 152 项，其中本轮新合成集 15 项。覆盖双项目同编号商品、跨窗口不重填路径、跨批次上游命中与旧审拒用、新方案/范围使旧 PASS 失效、进程并发锁、不可变覆盖冲突、revision 冲突、登记/发布/账本失败恢复、重复计数、旧新版缓存共存、模型/输入/规则/依赖变化、真实消费者外部动作前阻塞。
-- 全量公开快照：实际运行 153 项，152 通过，1 项 ERROR；分类为 BLOCKED 的是真实 Node 工作簿解析集成，缺失私有 artifact-tool 分发。命令返回非零，未宣称全量 PASS。独立可用测试运行明确排除该已记录 blocker，不把它改成 PASS。
-- 工作区兼容回归：实际运行 175 项，174 通过，1 项 ERROR/BLOCKED；工作簿包版本不匹配。包含原有尚未提交测试，因此交付依据以独立公开快照为准。
-- 修正合成范围 fixture 的显式商品清单；未放松范围身份门禁。依赖负例 fixture 在 node_modules 不存在时处理已有失效符号链接，避免 FileExistsError 掩盖原错误。
-- Project doctor：BLOCKED。当前工作区 artifact_tool_version_mismatch；公开快照缺失私有包。结构/命令检查已运行；没有修锁、替换 parser 或安装私有依赖。
-- Preflight：合成 workspace/preflight 兼容测试通过；新登记的完整 downstream preflight 尚未迁移，保持阻塞。真实项目 preflight 未运行。
-- Git diff checks：PASS，工作区与独立暂存快照均通过；公开文件与脱敏报告扫描无真实路径、商品数据、凭据或运行产物。
-- 未运行：真实 ASR/人物检测、视频剪辑、MiMo、Resolve 连接/写入/回读、导出、真实项目续剪。无性能提升结论。
+PASS：
+- 最终独立公开源码快照的可用测试 165 项全部通过；包含第 1 轮适配回归及第 2 轮 13 项新合成测试。明确排除并另列已知私有解析 blocker，不把它写成 PASS。
+- 包含私有集成的公开全量命令此前实际运行 165 项，164 PASS、1 ERROR/BLOCKED，命令非零；之后补充 1 项完整目标继承测试，纳入上述最终 165 项可用测试。未把“含私有测试的最后 166 项全量”宣称全部通过。
+- 工作区兼容全量实际运行 186 项，185 PASS、1 ERROR/BLOCKED。新增旧许可阻塞/完整目标补齐的验收以独立公开快照为准，不用未提交代码的工作区 PASS 代替交付证据。
+- 两个真实成对 Codex CLI 合成调用有不同 fresh thread ID、完成事件及任务摘要；初始独立探针也成功。没有声称这证明真实视频语义/视觉质量。
+- 12 商品/4 组、单商品选择+独立终审+项目审核、总控无历史积累、跨窗口/全目标路径继承、第二组失败停止、有效完成不重算/不重复计数、粗选 PASS 后吃字拒绝、自然结论不按“因为”机械拒绝、新切点旧审失效、跨组实际源重叠、缺终审、双项目隔离、并发 checkpoint/product lease、封存篡改、无 CLI 任务包、旧消费者拒用均有合成证据。
+- 质量链测试只替换外部 Codex 传输、本机 ASR/音频/帧率探测、人物 detector 和私有 workbook parser 的执行边界；调度、真实范围/候选/精修算法、不可变产物、审核导入、检查点和写前读取实际执行。替身不是生产测试模式，也不认证真实源片。
+- Git diff checks、独立暂存清单和源码/报告隐私扫描通过。
+
+FAIL：最终可用代码回归无失败。开发中发现并修复了嵌套封存读取锁、测试 fixture/源快照变动失效以及公开 ASR import 提前加载依赖问题；未保留已知失败作为 PASS。
+
+BLOCKED：真实 Node→工作簿集成与 project doctor。工作区 artifact_tool_version_mismatch；独立快照缺失私有 artifact-tool 包。doctor 已运行，均非零；未降级门槛、换 parser、改依赖锁或安装私有包。真实人物证明、实际 ASR 环境/模型和 timeline/export 消费者没有实测许可；不称完整流程 READY。
+
+未运行：真实素材 ASR/音频/人物、真实剪辑、MiMo、Resolve 连接/写入/回读、导出、实际全项目续剪或耗时对照。合成 preflight/质量接口已测，真实 workspace preflight 未跑。无准确率或性能提升结论。
 
 # External actions
 MiMo called: no
 Resolve connected: no
 export performed: no
-只读核对 GitHub PR #1 和参考提交，取回缺失计划文档并 fetch 工作分支；PR 保持开放未合并，已关联当前聊天。仅创建本地提交；本轮无推送授权，不推送，不更新 PR 正文，不改 main。
+只读核对 GitHub PR #1，仍 OPEN、未合并，远端仍 bad5a547da36；第 1 轮没有推送。查询官方 OpenAI 文档，使用正式 CLI 发出三个合成探针；不发送真实项目内容。仅本地提交；当前没有推送授权，不推送、不改 main、不更新/合并 PR。当前没有可用的对话附件上传接口，报告仅保存本地并提供准确文件链接；不声称已上传。
 
 # Blockers
 尚未解决的问题：
-- 缓存冲突并未全链路解决。新登记模式只接入初始化、两种索引和检查点，未迁移的下游阻塞；schema 1 模式保留原有严格检查，不具备新项目登记/续剪能力。
-- 待接入消费者完整清单在 PIPELINE_DEPENDENCIES：范围确认、候选/选段/修复、ASR/切点/画面、最终批准、Resolve 写入与导出、preflight/迁移/attest/清理及总调度。既有未提交 publish_confirmed_ranges 的 stale replacement 等改动未纳入或认证。
-- 旧状态/缓存不能自动提升为新合同；中断标记需要后续明确恢复入口，不允许删标记绕过。多文件发布不是跨文件事务或断电持久性保证。
-- 上游输入/全局规则变化仍保守生成整套新索引；未实现逐源文件增量索引。视频签名仍为路径/大小/mtime，不识别保持这些字段的刻意字节替换。模型标识绑定不验证实际模型执行；检查点绑定不替代真实硬审核。
-- 稳定 Resolve ID 本轮仅离线确认；实际 API 身份回读、标记幂等性、跨组重叠/语义去重、全项目完成门禁尚未实测。
-- 私有工作簿依赖阻塞真实解析集成与 doctor；不得称完整流程 READY。
+- 缓存与下游尚未全面迁移。已完成登记适配链、批准与写前验收；旧固定路径 range/override、候选 batch CLI、旧语义/修复/粗选批准、window quality/ASR/refine/person batch CLI、实际 Resolve/验证/export、attest/迁移/preflight/cleanup 等仍未完整接入。详细清单和行为在 PIPELINE_DEPENDENCIES。旧产物保留，不自动认证或清空。
+- 自动创建独立 Codex 上下文：当前正式 CLI 可用且真实合成探针通过，不列为环境 BLOCKED；缺 CLI/认证/执行失败的其他环境已提供可恢复 REVIEW_PENDING 工作单，不能假装执行。自动分拆超大商品任务与完整语义返修循环仍待接入。
+- 实际 detector 没有主播身份/完整覆盖的证明，真实 vision PASS 仍阻塞。第 3 轮必须接入可信主播判定、自适应保守抽样及对应精确方案证据。
+- 本轮没有认证 actual ASR 依赖/模型权重或服务端默认 Codex 模型版本。当前配置模型标识与代码版本参与身份，精确模型分发/权重指纹、跨批次选择性物理计算复用和更细失效范围仍要补强。不能称缓存体系全面完成。
+- VFR 的精确源帧时间证明、真实 Resolve 稳定 ID 回读/标记幂等性、同步写入验证、导出验证尚未迁移；交付完成明确阻塞。封存是本机执行完整性约定，不是抵御本机所有者的远端数字签名。
+- 阶段/检查点的新代码摘要使旧审核过期，升级清单已记录；不写真实状态。多记录发布沿用第 1 轮失败标记，不保证跨文件/断电事务。
 
-下一轮建议：在总共 3–5 轮预算内接入全项目小批次自动处理、最终物理方案的独立 Codex 语义终审和全部质量门禁；贯通本轮阶段与检查点，保留中段吃字案例，并验证跨组完整覆盖。本轮结束后停止，真实项目实测仍需独立指令。
+下一轮建议：第 3 轮集中处理自适应主播检测、阶段耗时和缓存效率、剩余消费者及全链路回归；补模型/检测器来源和帧域证据，保持最终 Codex 审核独立。第 2 轮结束立即停止，不启动第 3 轮或真实项目实测。
 
 # Git state
-本快照位于后续提交之前，不使用自引用提交号。
+本快照在后续提交之前，不用自引用提交号。
 Branch: codex/repository-baseline
-启动 HEAD: aaf928564aec
-fetch 后参考/远端 HEAD: bad5a547da36
-拟创建一个以 bad5a547da36 为父提交的独立第 1 轮提交；aaf928564aec 是其祖先，分支只向前推进，不重写历史。使用独立暂存快照选择上述 25 个公开文件，主工作区未提交实现和真实运行数据保持原位。
-PR: #1，OPEN，未合并；远端仍是 bad5a547da36，本轮不推送。
-主 index 在本快照中无暂存改动；独立 index 含本轮审阅成果。保留的未提交部分涉及原有 AGENTS/规则/CHANGELOG/项目说明/模板/依赖锁，以及候选生成、范围发布、视觉、切点、连接、导出等脚本和本地 archive；它们不因本轮测试而被认证或自动提交。
+HEAD/拟用父提交: 3efd30cfc714
+PR: #1，OPEN，未合并；远端 head bad5a547da36。第 1/2 轮均不推送。
+拟提交 19 个公开文件，独立 index 选择上述源码、合成测试、文档及脱敏固定报告。主 index 本快照无暂存改动。原有未提交 AGENTS、规则、项目说明、模板、依赖锁、候选/范围、人物 probe、连接、导出等实现及本地 archive 保留；仅复用并复核必要函数，未认证其余真实运行实现。不存在 reset/clean/覆盖工作树或 main 修改。
