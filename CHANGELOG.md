@@ -1,5 +1,10 @@
 # Change Log
 
+## 2026-10-12 — bounded correction plan and semantic/vision priorities
+- Save user-approved requirement for 3–5 reviewable Codex correction cycles before a separately authorized real-media acceptance test; stop after five and report unresolved blockers.
+- Prioritize final-cut speech continuity (especially middle seams), independent Codex final semantic review, practical causal sentence closure, measured runtime reduction and adaptive person sampling.
+- This persistent-rule addition changes the runtime rules fingerprint. Existing derived runtime caches must be treated as stale until properly rebuilt; no real state/cache/Resolve changes were made. The algorithm documented here is a design target, not released code.
+
 ## 2026-09-26 — authenticated range override safety
 - Allow missing ranges to be added only for authenticated current titles; reject duplicate, unknown and invalid source/time overrides.
 - Stage and validate outputs under a fixed input snapshot and shared generator lock; publish with fail-closed rollback handling.
