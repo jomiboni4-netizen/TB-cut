@@ -104,11 +104,39 @@ def _state(root: Path | RuntimePaths) -> dict:
     if not path.is_file():
         raise CacheIdentityError(f"runtime_state_missing: {path}")
     state = json.loads(path.read_text(encoding="utf-8"))
+    from project_registry import CONFIG_NAME, is_registered
+    if (_paths(root).workspace_root / CONFIG_NAME).exists() and not is_registered(state):
+        raise CacheIdentityError('registered_identity_removed_legacy_fallback_forbidden')
     if not state.get("batch", {}).get("batch_id"):
         raise CacheIdentityError("batch_id_missing: PROJECT_STATE.json")
     if not state.get("runtime", {}).get("pipeline_version"):
         raise CacheIdentityError("pipeline_version_missing: PROJECT_STATE.json")
     return state
+
+
+def upstream_fingerprint(root, state=None):
+    """Project inputs independent of the selected processing group."""
+    import copy
+    state = copy.deepcopy(state or _state(root))
+    state.setdefault('batch', {}).pop('product_ids', None)
+    return input_fingerprint(root, state)
+
+
+def upstream_versions(paths):
+    versions = {}
+    for name in ('index_titles.py', 'index_subtitles.py'):
+        source = paths.repo_root / 'scripts' / name
+        if not source.is_file():
+            source = Path(__file__).parent / name
+        dependencies = [source, *[Path(__file__).parent / helper for helper in
+                                 ('runtime_meta.py', 'runtime_paths.py', 'runtime_publication.py', 'project_registry.py')]]
+        if name == 'index_titles.py':
+            dependencies.extend(paths.repo_root / dep for dep in
+                                ('scripts/inspect_title_workbook.mjs', 'scripts/check_workbook_dependencies.mjs',
+                                 'package.json', 'workbook-dependencies.lock.json'))
+        versions[name] = hashlib.sha256(''.join(_sha256(dep) if dep.is_file() else 'missing'
+                                               for dep in dependencies).encode()).hexdigest()
+    return versions
 
 
 def input_fingerprint(root: Path | RuntimePaths, state: dict | None = None, *, subtitle_contents: dict | None = None) -> str:
@@ -129,7 +157,16 @@ def input_fingerprint(root: Path | RuntimePaths, state: dict | None = None, *, s
         "subtitles": [[str(path), _sha256(path) if subtitle_contents is None else hashlib.sha256(subtitle_contents[path]).hexdigest()] for path in subtitles],
         "videos": [[str(path), path.stat().st_size, path.stat().st_mtime_ns] for path in videos],
         "resolve": state.get("resolve") or {},
+        "batch_product_ids": (state.get("batch") or {}).get("product_ids") or [],
+        "batch_policy": {
+            "skip_blank_titles": (state.get("batch_overrides") or {}).get("skip_blank_titles", False),
+            "preserve_blank_row_indices": (state.get("batch_overrides") or {}).get("preserve_blank_row_indices", False),
+        },
     }
+    if not isinstance(payload["batch_policy"]["skip_blank_titles"], bool):
+        raise CacheIdentityError("skip_blank_titles_override_invalid")
+    if not isinstance(payload["batch_policy"]["preserve_blank_row_indices"], bool):
+        raise CacheIdentityError("preserve_blank_row_indices_override_invalid")
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -151,6 +188,15 @@ def rules_fingerprint(root: Path | RuntimePaths) -> str:
 def expected_identity(root: Path | RuntimePaths, state: dict | None = None, *, include_ranges: bool = True) -> dict:
     paths = _paths(root)
     state = _state(paths) if state is None else state
+    from project_registry import checked_project, is_registered, ProjectIdentityError
+    registered = is_registered(state)
+    if registered:
+        try:
+            config = checked_project(paths, state)
+        except ProjectIdentityError as exc:
+            raise CacheIdentityError(str(exc)) from exc
+        if include_ranges:
+            raise CacheIdentityError('registered_downstream_not_integrated: use checkpoint/upstream entry points; round 2 required')
     identity = {
         "schema_version": META_SCHEMA_VERSION,
         "pipeline_version": str(state["runtime"]["pipeline_version"]),
@@ -158,9 +204,16 @@ def expected_identity(root: Path | RuntimePaths, state: dict | None = None, *, i
         "input_fingerprint": input_fingerprint(paths, state),
         "rules_fingerprint": rules_fingerprint(paths),
     }
+    if registered:
+        identity.update({'schema_version': 2, 'identity_contract': 'project-resume-v2',
+                         'project_key': config['project_key'], 'config_digest': state['project_identity']['config_digest'],
+                         'upstream_fingerprint': upstream_fingerprint(paths, state),
+                         'upstream_versions': upstream_versions(paths)})
     if include_ranges:
         ranges = paths.cache_dir / "product_ranges.json"
         identity["range_snapshot"] = _sha256(ranges) if ranges.is_file() else None
+    if (state.get("batch_overrides") or {}).get("preserve_blank_row_indices") is True:
+        identity["preserve_blank_row_indices"] = True
     return identity
 
 
@@ -175,12 +228,19 @@ def make_metadata(root: Path, artifact: Path, producer: str, *, product_id: int 
     if not producer:
         raise CacheIdentityError("producer_missing")
     captured = identity or expected_identity(root)
+    from project_registry import is_registered
+    if is_registered(_state(root)) and captured.get('schema_version') != 2:
+        raise CacheIdentityError('registered_identity_downgrade_forbidden')
     meta = {
         **{key: value for key, value in captured.items() if key != "range_snapshot"},
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "producer": producer,
         "artifact_sha256": _sha256(artifact),
     }
+    if captured.get('schema_version') == 2:
+        if producer not in ('index_titles.py', 'index_subtitles.py') or product_id is not None:
+            raise CacheIdentityError('registered_producer_not_integrated')
+        meta.update({'scope': 'project_input', 'stage_version': captured['upstream_versions'][producer]})
     if product_id is not None:
         meta["product_id"] = int(product_id)
     if range_dependent(artifact, meta):
@@ -215,7 +275,16 @@ def read_metadata(artifact: Path) -> dict:
 
 
 def validate_metadata(meta: dict, expected: dict, *, product_id: int | None = None) -> None:
-    for key in ("schema_version", "pipeline_version", "batch_id", "input_fingerprint", "rules_fingerprint"):
+    keys = ("schema_version", "pipeline_version", "batch_id", "input_fingerprint", "rules_fingerprint")
+    if expected.get('schema_version') == 2:
+        if (meta.get('scope') != 'project_input' or meta.get('producer') not in expected['upstream_versions']
+                or meta.get('product_id') is not None or product_id is not None):
+            raise CacheIdentityError('registered_artifact_scope_invalid')
+        keys = ('schema_version', 'pipeline_version', 'identity_contract', 'project_key', 'config_digest',
+                'upstream_fingerprint', 'rules_fingerprint')
+        if meta.get('stage_version') != expected['upstream_versions'][meta['producer']]:
+            raise CacheIdentityError('stage_version_mismatch')
+    for key in keys:
         if meta.get(key) != expected[key]:
             raise CacheIdentityError(f"{key}_mismatch: cached={meta.get(key)!r}, current={expected[key]!r}")
     if not meta.get("producer") or not meta.get("created_at") or not meta.get("artifact_sha256"):
@@ -270,12 +339,15 @@ def checked_range_digest(root, expected):
 
 def _checked_bytes(root, artifact, *, product_id=None, expected=None):
     artifact = Path(artifact)
+    from project_registry import is_registered
+    if expected is not None and is_registered(_state(root)) and expected.get('schema_version') != 2:
+        raise CacheIdentityError('registered_identity_downgrade_forbidden')
     if invalidation_path(artifact).exists():
         raise CacheIdentityError(f"publication_incomplete: {artifact}")
     if not artifact.is_file():
         raise CacheIdentityError(f"artifact_missing: {artifact}")
     meta = read_metadata(artifact)
-    expected = expected or expected_identity(root)
+    expected = expected or expected_identity(root, include_ranges=artifact.name not in ('titles.json', 'subtitle_index.json'))
     validate_metadata(meta, expected, product_id=product_id)
     content = artifact.read_bytes()
     if meta["artifact_sha256"] != hashlib.sha256(content).hexdigest():
@@ -307,7 +379,9 @@ def validate_titles(value, meta):
     """Generator provenance/schema gate; not a signature against malicious edits."""
     if meta.get("producer") != "index_titles.py":
         raise CacheIdentityError("titles_producer_invalid")
-    if not isinstance(value, dict) or value.get("schema_version") != 2 or value.get("generator") != "index_titles.py:v2":
+    preserve_rows = meta.get("preserve_blank_row_indices") is True
+    expected_generator = "index_titles.py:v3" if preserve_rows else "index_titles.py:v2"
+    if not isinstance(value, dict) or value.get("schema_version") != 2 or value.get("generator") != expected_generator:
         raise CacheIdentityError("titles_schema_or_provenance_invalid")
     if any(not isinstance(value.get(key), str) or not value[key].strip() for key in ("source", "sheet")):
         raise CacheIdentityError("titles_source_or_sheet_invalid")
@@ -315,9 +389,12 @@ def validate_titles(value, meta):
     if not isinstance(products, list) or not products:
         raise CacheIdentityError("titles_products_invalid")
     seen = set()
-    for index, row in enumerate(products, 1):
-        if not isinstance(row, dict) or type(row.get("product_index")) is not int or row["product_index"] != index:
+    previous_index = 0
+    for row in products:
+        index = row.get("product_index") if isinstance(row, dict) else None
+        if type(index) is not int or index <= previous_index or (not preserve_rows and index != previous_index + 1):
             raise CacheIdentityError("titles_product_index_invalid")
+        previous_index = index
         encoding, title = row.get("encoding_id"), row.get("title")
         if not isinstance(encoding, str) or not encoding or encoding.strip() != encoding or encoding in seen:
             raise CacheIdentityError("titles_encoding_id_invalid")
@@ -338,7 +415,7 @@ def load_checked_json(
     expected: dict | None = None,
     artifact_schema_version: int | None = None,
 ) -> dict:
-    expected = expected or expected_identity(root)
+    expected = expected or expected_identity(root, include_ranges=Path(artifact).name not in ('titles.json', 'subtitle_index.json'))
     _, content = _checked_bytes(root, artifact, product_id=product_id, expected=expected)
     value = json.loads(content)
     if not isinstance(value, dict):

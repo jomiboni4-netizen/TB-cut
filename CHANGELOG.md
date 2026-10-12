@@ -66,3 +66,9 @@
 - Added semantic dependency closure rules.
 - Added >70% host-visible hard gate with local Apple/Qwen vision cascade.
 - Added raw-SRT context protection and cleanup tooling.
+
+## 2026-10-12 — 第 1 轮项目登记与断点基础
+- 项目配置只登记一次；新合同 project-resume-v2 用项目 UUID、目录身份和离线确认的 Resolve 稳定 ID，旧登记不自动认证。
+- 分离项目上游索引、批次路径、不可变商品阶段与当前方案/范围；新增带证据和版本的检查点、锁、revision 和失败标记。
+- 接入真实初始化、字幕/标题生成与状态更新；未迁移的下游拒绝新合同。真实状态/缓存未改动，剪辑硬规则未改变。
+- 合成测试覆盖双项目、跨窗口/批次、旧审核、新方案/范围、并发、中断、旧新版共存；私有工作簿依赖检查仍阻塞。

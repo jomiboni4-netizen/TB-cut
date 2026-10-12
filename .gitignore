@@ -1,6 +1,8 @@
 # Local runtime data and outputs
 /.cache/
 /PROJECT_STATE.json
+/PROJECT_CONFIG.json
+/PROJECT_CONFIG.json.invalid
 /reports/
 /plans/
 /exports/

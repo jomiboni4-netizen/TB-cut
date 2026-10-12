@@ -165,3 +165,24 @@ deleted, rebound or migrated by this upgrade. The expanded-request builder still
 requires a current base request; legacy bootstrapping/regeneration needs a
 separate authorized workflow, not automatic certification. This code-only change
 does not assert Runtime READY or revalidate any real human boundary decisions.
+
+## 第 1 轮：项目登记与断点基础（代码，尚未实测）
+
+本节优先于上文旧版固定路径说明；新合同标识为 `project-resume-v2`，登记与阶段记录 schema 为 2。原 pipeline `2.1` 的剪辑硬规则没有改变。版本记录见 `docs/PROJECT_RESUME_UPGRADE.json`。
+
+- `init_project.py` 首次需要明确的素材文件夹、稳定 Resolve ID（用户离线确认，不接受显示名称作唯一身份）、标题/字幕/视频来源、项目和时间线名、批次和商品清单。保存本地忽略的 `PROJECT_CONFIG.json` 与 `PROJECT_STATE.json`。项目 UUID、目录真实路径/设备/inode、Resolve ID 与配置摘要共同核验；新窗口只需同一 `--workspace`。输入更新需明确 `--force`，缺失标题可只补标题；`--force` 不能切换项目身份。登记只验证配置，不表示已核对真实 Resolve。
+- 新缓存目录为 `.cache/projects/<project_key>/batches/<batch_scope>/`；scope 包含批次 ID、商品清单与覆盖参数。reports/plans/exports 同样按项目和批次隔离。原固定文件名留在各自作用域，不回退查找旧根缓存。
+- 两个真实上游生成器 `index_subtitles.py`、`index_titles.py` 已接入 `.cache/projects/<project_key>/inputs/<digest>/`。摘要包括整个配置输入、规则与生成器/helper/工作簿解析依赖版本；元数据明确 `scope=project_input`，只允许这两个 producer 跨批次复用。批次商品集合与批次 ID 不影响上游命中；批次审核仍严格校验批次。范围、方案和审核不使用这个豁免。模型与切点参数不靠移除 batch 校验解决冲突。
+- 当前上游依赖粒度仍保守：一个源输入、全局规则或解析代码改变会生成新的项目索引命名空间；尚未做到单个源文件增量索引。视频仍用路径、大小和纳秒修改时间，无法识别刻意保持大小/时间的字节替换。没有声称所有计算缓存已精细迁移。
+- `product_checkpoints.py` 保存不可覆盖的商品/阶段/版本结果。阶段身份绑定项目、商品编号与 encoding ID、输入、规则、覆盖参数、代码版本、模型标识和父结果 SHA。计算开始前必须 `capture_stage`，发布时重新验同一 snapshot；同身份不同内容拒绝覆盖。candidate/plan 要求当前 range 的直接依赖；新 range 使旧方案链失效。新 plan 更新当前方案记录，使旧 FINAL_PASS 立即 BLOCKED；重放历史结果不能把它重新设为当前方案。
+- 检查点支持 `PENDING / IN_PROGRESS / REPAIRABLE / BLOCKED / FINAL_PASS / WRITTEN / EXPORT_VERIFIED`。FINAL_PASS 需要 final_plan 审核、当前方案摘要及 plan 依赖；WRITTEN 和 EXPORT_VERIFIED 需要逐级 VERIFIED 证据。选段 PASS 不能替代成片 PASS。记录器验证绑定关系，不运行语义/画面/时间线审核，不能凭人工填写 verdict 证明真实质量。
+- `update_batch_state.py --inspect` 只读恢复清单；普通运行从重新核验的检查点恢复状态与完成集合。`--status` 更新单个商品时需要编码、对应方案/证据和 `--expected-revision`；裸 `--completed/--failed/--recovered/--stage` 已阻塞。账本先保存、状态后同步，中断后重复同步不会重复计数。完成集合表示已 FINAL_PASS 或更高，写入和导出以各状态分开统计，不能据此宣称项目全部交付。
+- 登记、上游生成、阶段发布和检查点共用 workspace 目录锁，竞争者立即失败；检查点另有 revision 比较防止旧任务覆盖。JSON 使用独立临时文件、fsync 和原子 rename。登记双文件、方案/范围与当前记录是多次 rename，并非跨文件事务或断电持久性保证；中断标记阻塞读取，保留旧结果。标记只能通过后续明确恢复流程处理，本轮没有自动解除标记/认证旧产物。
+
+### 第 2 轮必须接入的消费者
+
+新登记模式下 `expected_identity(..., include_ranges=True)` 明确返回 `registered_downstream_not_integrated`，并拒绝降级传入 schema 1。已测试真实 refine 和 Resolve loader 在外部操作前停止；timeline snapshot、comparison、fingerprint 入口也先检查身份。旧 metadata 缺少新合同、旧原始状态、旧结果与新结果共存都不会自动认证。旧 schema 1 模式保留原有严格校验，不具备新断点能力；本轮不迁移真实工作区。
+
+尚未接入：范围发现/确认/覆盖（`locate_link_intros.py`、`publish_confirmed_ranges.py`、`apply_range_overrides_v2.py`）；候选与选段/修复（`build_expanded_codex_request.py`、`audit_mimo_v2.py`、`build_repair_request_v2.py`、`merge_repair_result_v2.py`、`drop_failed_variants_v2.py`、`enforce_v2_request_rules.py`、`promote_rough_selection.py`、`collect_post_audit_failures.py`、`local_semantic_review_v2.py`、`mimo_review_v2.py`）；物理和画面审核（`windowed_asr_v2.py`、`window_quality_v2.py`、`refine_plans_v2.py`、`person_coverage_audit_v2.py`、`approve_final_plans.py`、`review_compute_cache.py`）；写入/导出（`resolve_write_v2.py`、`validate_resolve_write_v2.py`、`inspect_timeline_for_export.py`、`export_marked_variants.py`、`verify_exports.py`、`compare_timeline_versions.py`）；维护（`workspace_preflight.py`、`migrate_runtime_layout.py`、`attest_runtime_cache.py`、`fingerprint_inputs.py`、`cleanup.py`）以及完整调度入口。
+
+这些入口需要接入不可变阶段记录与当前范围/方案依赖、计算复用、全项目进度和组间审核；尚不能把本轮登记模式用于真实完整流水线。Resolve 稳定 ID 的 API 回读、实际标记幂等性和全项目终审留待后轮及独立实测授权。本轮没有调用 MiMo、连接 Resolve、剪辑或导出。

@@ -15,6 +15,9 @@ from runtime_meta import CacheIdentityError, invalidation_path, load_checked_jso
 class RangeOverridesTests(unittest.TestCase):
     def setUp(self):
         fixtures.IndexTitlesTests.setUp(self)
+        # Confirmed-range consumers require an explicit selected product set.
+        self.state['batch']['product_ids'] = list(range(1, 31))
+        self.paths.state_path.write_text(json.dumps(self.state))
         self.paths.cache_dir.mkdir()
         self.output = self.paths.cache_dir / 'product_ranges.json'
         self.override = self.paths.cache_dir / 'synthetic_range_overrides.json'

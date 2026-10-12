@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse, hashlib, json
 from pathlib import Path
+from runtime_meta import expected_identity
 from runtime_paths import resolve_runtime_paths
 
 def sha256(path: Path, chunk=1024*1024):
@@ -19,6 +20,7 @@ def main():
     args = ap.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
+    expected_identity(paths)  # Registered downstream migration is required before I/O.
     state = json.loads((paths.state_path).read_text(encoding="utf-8"))
     input_paths = []
     if state.get("title_path"): input_paths.append(state["title_path"])

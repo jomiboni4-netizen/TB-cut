@@ -44,7 +44,7 @@ Treat phrases such as “这次 / 这一批 / 先” as batch-only:
 
 ## 4. Paths and project identity
 
-- User provides title/subtitle/video paths for each batch.
+- Register confirmed title/subtitle/video paths once per Resolve project; later windows and batches inherit the verified project configuration. Ask only for missing or changed inputs. Legacy state is not an authenticated registration.
 - Never hard-code old dates, old project names, or old media paths.
 - Resolve project/source timeline/target timeline must come from current state or explicit user instruction.
 - Missing path/state is a blocking configuration error; do not guess.

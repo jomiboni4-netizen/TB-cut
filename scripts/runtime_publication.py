@@ -11,6 +11,13 @@ from runtime_meta import CacheIdentityError, expected_identity, invalidation_pat
 
 @contextmanager
 def generator_lock(paths):
+    from project_registry import workspace_lock
+    if paths.registered_scope():
+        with workspace_lock(paths):
+            paths.cache_dir.mkdir(parents=True, exist_ok=True)
+            paths.upstream_cache_dir.mkdir(parents=True, exist_ok=True)
+            yield
+        return
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(paths.cache_dir, os.O_RDONLY)
     try:

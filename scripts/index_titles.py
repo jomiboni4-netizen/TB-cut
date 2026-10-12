@@ -15,6 +15,7 @@ import zipfile
 from runtime_meta import validate_cache, write_metadata
 from runtime_paths import resolve_runtime_paths
 from runtime_publication import BuildSnapshot, generator_lock, publish_pair
+from workbook_runtime import preferred_node
 
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
@@ -101,7 +102,8 @@ def encoding_string(value, numeric_evidence, address):
     raise TitlesError(f"encoding_id_number_format_ambiguous: {address}")
 
 
-def build_model(source: Path, parsed: dict, numeric_evidence: dict) -> dict:
+def build_model(source: Path, parsed: dict, numeric_evidence: dict, *, skip_blank_titles: bool = False,
+                preserve_blank_row_indices: bool = False) -> dict:
     if parsed.get("schema_version") != 1 or not isinstance(parsed.get("sheet"), str) or not parsed["sheet"]:
         raise TitlesError("parser_schema_invalid")
     rows = parsed.get("values")
@@ -111,12 +113,23 @@ def build_model(source: Path, parsed: dict, numeric_evidence: dict) -> dict:
     if any(headers.count(name) != 1 for name in ("编码 ID", "标题")):
         raise TitlesError("required_header_missing_or_duplicate")
     id_col, title_col = headers.index("编码 ID"), headers.index("标题")
-    products, seen = [], set()
+    products, placeholders, seen = [], [], set()
     for physical_row, row in enumerate(rows[1:], 2):
-        if all(blank(value) for value in row):
-            continue
         value = row[id_col] if id_col < len(row) else None
         title = row[title_col] if title_col < len(row) else None
+        if preserve_blank_row_indices and blank(title) and (skip_blank_titles or all(blank(v) for v in row)):
+            encoding = None if blank(value) else encoding_string(value, numeric_evidence, f"{column_name(id_col+1)}{physical_row}")
+            if encoding is not None:
+                if encoding in seen:
+                    raise TitlesError(f"duplicate_encoding_id: row {physical_row}")
+                seen.add(encoding)
+            placeholders.append({"product_index": physical_row - 1, "worksheet_row": physical_row,
+                                 "encoding_id": encoding, "reason": "blank_title", "cut": False})
+            continue
+        if all(blank(value) for value in row):
+            continue
+        if blank(title) and skip_blank_titles:
+            continue
         if blank(value) or blank(title):
             raise TitlesError(f"required_product_field_empty: row {physical_row}")
         if not isinstance(title, str):
@@ -125,10 +138,14 @@ def build_model(source: Path, parsed: dict, numeric_evidence: dict) -> dict:
         if encoding in seen:
             raise TitlesError(f"duplicate_encoding_id: row {physical_row}")
         seen.add(encoding)
-        products.append({"product_index": len(products)+1, "encoding_id": encoding, "title": title})
+        product_index = physical_row - 1 if preserve_blank_row_indices else len(products) + 1
+        products.append({"product_index": product_index, "encoding_id": encoding, "title": title})
     if not products:
         raise TitlesError("titles_has_no_products")
-    return {"schema_version": 2, "generator": "index_titles.py:v2", "source": str(source), "sheet": parsed["sheet"], "products": products}
+    model = {"schema_version": 2, "generator": "index_titles.py:v2", "source": str(source), "sheet": parsed["sheet"], "products": products}
+    if preserve_blank_row_indices:
+        model["placeholders"] = placeholders
+    return model
 
 
 def parse_workbook(source: Path, repo: Path, node: str) -> dict:
@@ -148,11 +165,27 @@ def _generate_locked(paths, node):
     if not isinstance(raw_source, str) or not raw_source:
         raise TitlesError("title_path_missing")
     source = Path(raw_source).expanduser().resolve()
+    output = paths.upstream_cache_dir / 'titles.json'
+    if snapshot.identity.get('schema_version') == 2 and output.exists():
+        validate_cache(paths, output, expected=snapshot.identity)
+        snapshot.check()
+        return output
     parsed = parse_workbook(source, paths.repo_root, node)
-    model = build_model(source, parsed, workbook_guards(source, parsed.get("sheet")))
+    overrides = snapshot.state.get("batch_overrides") or {}
+    skip_blank_titles = overrides.get("skip_blank_titles", False)
+    if not isinstance(skip_blank_titles, bool):
+        raise TitlesError("skip_blank_titles_override_invalid")
+    preserve_blank_row_indices = overrides.get("preserve_blank_row_indices", False)
+    if not isinstance(preserve_blank_row_indices, bool):
+        raise TitlesError("preserve_blank_row_indices_override_invalid")
+    model = build_model(source, parsed, workbook_guards(source, parsed.get("sheet")),
+                        skip_blank_titles=skip_blank_titles,
+                        preserve_blank_row_indices=preserve_blank_row_indices)
+    if preserve_blank_row_indices:
+        model["generator"] = "index_titles.py:v3"
     content = (json.dumps(model, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    output = paths.cache_dir / "titles.json"
-    with tempfile.TemporaryDirectory(prefix=".titles-", dir=paths.cache_dir) as temporary:
+    output = paths.upstream_cache_dir / "titles.json"
+    with tempfile.TemporaryDirectory(prefix=".titles-", dir=paths.upstream_cache_dir) as temporary:
         staged = Path(temporary) / "titles.json"
         staged.write_bytes(content)
         staged_meta = write_metadata(paths, staged, "index_titles.py", identity=snapshot.identity)
@@ -165,7 +198,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
     parser.add_argument("--workspace")
-    parser.add_argument("--node", default="node", help="Node executable with the existing artifact-tool dependency available")
+    parser.add_argument("--node", default=preferred_node(), help="Node executable with the locked artifact-tool distribution")
     args = parser.parse_args()
     generate(resolve_runtime_paths(args.root, args.workspace), args.node)
     print("titles index generated and identity validated")

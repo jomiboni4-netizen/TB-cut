@@ -38,7 +38,7 @@ class WorkbookDependencyTests(unittest.TestCase):
                     modified = dict(lock)
                     if fault != 'module':
                         link = root / 'node_modules'
-                        if not link.exists():
+                        if not link.exists() and not link.is_symlink():
                             link.symlink_to((ROOT / 'node_modules').resolve(), target_is_directory=True)
                         modified[fault] = 'wrong'
                     (root / 'workbook-dependencies.lock.json').write_text(json.dumps(modified))

@@ -1,43 +1,64 @@
 #!/usr/bin/env python3
-"""Update compact batch progress in PROJECT_STATE.json."""
-
-from __future__ import annotations
-
+"""Resume validated product checkpoints; bare completion flags cannot grant PASS."""
 import argparse
 import json
-from pathlib import Path
 from runtime_paths import resolve_runtime_paths
+from project_registry import atomic_json, checked_project, workspace_lock
+from product_checkpoints import read_ledger, resume, update_checkpoint
+from runtime_meta import CacheIdentityError
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--workspace")
-    parser.add_argument("--completed", default="")
-    parser.add_argument("--failed", default="")
-    parser.add_argument("--recovered", default="")
-    parser.add_argument("--stage")
+def reconcile(paths):
+    with workspace_lock(paths):
+        state_bytes = paths.state_path.read_bytes()
+        state = json.loads(state_bytes)
+        checked_project(paths, state)
+        rows = resume(paths)
+        batch = state['batch']
+        batch['completed_product_ids'] = sorted(pid for pid, row in rows.items()
+                                               if row['status'] in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED'))
+        batch['failed_product_ids'] = sorted(pid for pid, row in rows.items() if row['status'] == 'BLOCKED')
+        batch['checkpoint_status_counts'] = {status: sum(r['status'] == status for r in rows.values())
+                                             for status in sorted({r['status'] for r in rows.values()})}
+        state.setdefault('runtime', {})['checkpoint_revision'] = read_ledger(paths)['revision']
+        def check():
+            if paths.state_path.read_bytes() != state_bytes or resume(paths) != rows:
+                raise CacheIdentityError('progress_inputs_changed_before_state_publication')
+            if read_ledger(paths)['revision'] != state['runtime']['checkpoint_revision']:
+                raise CacheIdentityError('checkpoint_revision_conflict')
+        atomic_json(paths.state_path, state, before_commit=check)
+        return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', default='.')
+    parser.add_argument('--workspace')
+    for flag in ('completed', 'failed', 'recovered', 'stage'):
+        parser.add_argument('--' + flag)
+    parser.add_argument('--product', type=int)
+    parser.add_argument('--encoding-id')
+    parser.add_argument('--status')
+    parser.add_argument('--plan')
+    parser.add_argument('--evidence')
+    parser.add_argument('--expected-revision', type=int)
+    parser.add_argument('--reason')
+    parser.add_argument('--inspect', action='store_true', help='Read-only restart status')
     args = parser.parse_args()
-    root = Path(args.root).resolve()
-    paths = resolve_runtime_paths(root, args.workspace)
-    path = paths.state_path
-    state = json.loads(path.read_text(encoding="utf-8"))
-    batch = state.setdefault("batch", {})
-    completed = set(int(value) for value in batch.get("completed_product_ids") or [])
-    failed = set(int(value) for value in batch.get("failed_product_ids") or [])
-    completed.update(int(value) for value in args.completed.split(",") if value.strip())
-    failed.update(int(value) for value in args.failed.split(",") if value.strip())
-    recovered = {int(value) for value in args.recovered.split(",") if value.strip()}
-    failed -= recovered
-    completed.update(recovered)
-    completed -= failed
-    batch["completed_product_ids"] = sorted(completed)
-    batch["failed_product_ids"] = sorted(failed)
-    if args.stage:
-        state.setdefault("runtime", {})["last_successful_stage"] = args.stage
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"批次状态：完成{len(completed)} 失败{len(failed)}")
+    if any(getattr(args, f) is not None for f in ('completed', 'failed', 'recovered', 'stage')):
+        raise CacheIdentityError('unverified_progress_flags_blocked_use_checkpoint_evidence')
+    paths = resolve_runtime_paths(args.root, args.workspace)
+    if args.inspect:
+        rows = resume(paths)
+    else:
+        if args.status:
+            update_checkpoint(paths, product_id=args.product, encoding_id=args.encoding_id,
+                              status=args.status, plan_ref=args.plan, evidence_ref=args.evidence,
+                              expected_revision=args.expected_revision, reason=args.reason)
+        rows = reconcile(paths)
+    for pid, row in sorted(rows.items()):
+        print(f"{pid}: {row['status']}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

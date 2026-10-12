@@ -115,11 +115,14 @@ def _generate_locked(paths):
     if input_fingerprint(paths, state, subtitle_contents=buffered) != snapshot.identity['input_fingerprint']:
         raise CacheIdentityError('inputs_changed_during_generation')
     snapshot.check()
-    output = paths.cache_dir / "subtitle_index.json"
-    if output.exists() and state.get("runtime", {}).get("subtitle_index_fingerprint") == fingerprint:
+    output = paths.upstream_cache_dir / "subtitle_index.json"
+    if output.exists() and (snapshot.identity.get('schema_version') == 2
+                            or state.get("runtime", {}).get("subtitle_index_fingerprint") == fingerprint):
         try:
             validate_cache(paths, output, expected=snapshot.identity)
         except CacheIdentityError as exc:
+            if snapshot.identity.get('schema_version') == 2:
+                raise
             print(f"字幕索引身份无效，将从原始输入重建：{exc}")
         else:
             snapshot.check()
@@ -144,7 +147,7 @@ def _generate_locked(paths):
         })
         global_offset += duration
 
-    with tempfile.TemporaryDirectory(prefix=".subtitles-", dir=paths.cache_dir) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".subtitles-", dir=paths.upstream_cache_dir) as temporary:
         staged = Path(temporary) / output.name
         staged.write_text(json.dumps({
             "schema_version": 1, "generator": "index_subtitles.py:v2", "fingerprint": fingerprint,

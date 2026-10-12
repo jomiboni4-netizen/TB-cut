@@ -94,6 +94,21 @@ class IndexTitlesTests(unittest.TestCase):
         with self.assertRaisesRegex(titles.TitlesError, 'required_product_field_empty'):
             self.model([self.rows[0], [None, 'Title']])
 
+    def test_blank_title_placeholders_preserve_workbook_identity(self):
+        rows = [self.rows[0], ['a', 'One'], ['0002', None], [], ['b', 'Four']]
+        model = titles.build_model(self.source, self.parsed(rows), {},
+                                   skip_blank_titles=True, preserve_blank_row_indices=True)
+        self.assertEqual([(p['product_index'], p['encoding_id']) for p in model['products']], [(1, 'a'), (4, 'b')])
+        self.assertEqual([(p['product_index'], p['worksheet_row'], p['encoding_id'], p['cut'])
+                          for p in model['placeholders']], [(2, 3, '0002', False), (3, 4, None, False)])
+
+    def test_placeholder_encoding_cannot_alias_an_active_product(self):
+        for rows in ([self.rows[0], ['id', None], ['id', 'Title']],
+                     [self.rows[0], ['id', 'Title'], ['id', None]]):
+            with self.subTest(rows=rows), self.assertRaisesRegex(titles.TitlesError, 'duplicate_encoding_id'):
+                titles.build_model(self.source, self.parsed(rows), {},
+                                   skip_blank_titles=True, preserve_blank_row_indices=True)
+
     def test_missing_title_fails(self):
         for row in (['id', None], [None, None, 0]):
             with self.subTest(row=row), self.assertRaisesRegex(titles.TitlesError, 'required_product_field_empty'):

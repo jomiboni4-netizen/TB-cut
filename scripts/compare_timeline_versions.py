@@ -7,6 +7,7 @@ import json
 import re
 import argparse
 from pathlib import Path
+from runtime_meta import expected_identity
 from runtime_paths import RuntimePaths, resolve_runtime_paths
 
 
@@ -80,6 +81,7 @@ def main() -> None:
     parser.add_argument("--workspace")
     args = parser.parse_args()
     paths = resolve_runtime_paths(args.root, args.workspace)
+    expected_identity(paths)  # Registered downstream migration is required before I/O.
     snapshot = json.loads((paths.cache_dir / "current_timeline_snapshot.json").read_text(encoding="utf-8"))
     fps = float(snapshot["fps"])
     current = current_by_product(snapshot)
