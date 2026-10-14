@@ -38,24 +38,23 @@ class AutomaticBoundaryTests(unittest.TestCase):
 
     def test_missing_middle_blocks_full_set(self):
         result = self.suggest([(1, 10), (3, 120)])
-        self.assertEqual(result['status'], 'BLOCKED')
-        self.assertEqual(result['unresolved_products'], [2])
+        self.assertEqual(result['status'], 'PRODUCT_UNCERTAIN')
+        self.assertEqual(result['unresolved_products'], [1, 2, 3])
         self.assertEqual(result['range_suggestions'], [])
-        self.assertEqual(result['products'][1]['boundary_status'], 'missing_or_low_confidence')
+        self.assertEqual(result['products'][1]['boundary_status'], 'PRODUCT_UNCERTAIN')
 
     def test_ambiguous_anchor_keeps_diagnostics_and_blocks(self):
         result = self.suggest([(1, 10), (1, 120)], count=1)
-        self.assertEqual(result['products'][0]['boundary_status'], 'ambiguous')
-        self.assertEqual(len(result['products'][0]['candidates']), 2)
+        self.assertEqual(result['products'][0]['boundary_status'], 'PRODUCT_UNCERTAIN')
+        self.assertEqual(len(result['products'][0]['link_mentions']), 2)
         self.assertEqual(result['range_suggestions'], [])
 
     def test_actual_live_order_and_inference_not_confirmation(self):
         result = self.suggest([(3, 10), (1, 70), (2, 140)])
-        self.assertEqual([r['product_index'] for r in result['range_suggestions']], [3, 1, 2])
+        self.assertEqual(result['range_suggestions'], [])
         self.assertFalse(result['ready_for_cutting'])
-        self.assertEqual(result['status'], 'REQUIRES_CONFIRMATION')
-        self.assertTrue(all(r['boundary_provenance']['end'] == 'inferred_next_anchor_or_stream_end'
-                            for r in result['range_suggestions']))
+        self.assertEqual(result['status'], 'PRODUCT_UNCERTAIN')
+        self.assertEqual(result['authority'], 'NOT_AUTHENTICATED_NOT_FOR_CUTTING')
 
     def test_old_order_helper_does_not_impose_product_order(self):
         products = [{'candidates': [{'score': 10, 'global_start': time}]} for time in [130, 10]]
@@ -71,7 +70,7 @@ class AutomaticBoundaryTests(unittest.TestCase):
                 marker.write_text('existing invalid marker')
                 before = self.pair(), marker.read_bytes()
                 result = locator.generate(self.paths)
-                self.assertEqual(result['status'], 'BLOCKED')
+                self.assertEqual(result['status'], 'PRODUCT_UNCERTAIN')
                 self.assertEqual((self.pair(), marker.read_bytes()), before)
                 self.assertFalse((self.paths.cache_dir/'link_intros.json').exists())
 

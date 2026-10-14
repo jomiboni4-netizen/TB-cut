@@ -133,7 +133,7 @@ def upstream_versions(paths):
         if name == 'index_titles.py':
             dependencies.extend(paths.repo_root / dep for dep in
                                 ('scripts/inspect_title_workbook.mjs', 'scripts/check_workbook_dependencies.mjs',
-                                 'package.json', 'workbook-dependencies.lock.json'))
+                                 'package.json', 'workbook-dependencies.lock.json', 'config/workbook-runtime-v4.lock.json'))
         versions[name] = hashlib.sha256(''.join(_sha256(dep) if dep.is_file() else 'missing'
                                                for dep in dependencies).encode()).hexdigest()
     return versions

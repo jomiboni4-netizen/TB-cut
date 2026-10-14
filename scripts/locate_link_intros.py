@@ -13,6 +13,7 @@ import tempfile
 from runtime_meta import CacheIdentityError, load_checked_json, write_metadata, validate_cache
 from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 from apply_range_overrides_v2 import number, source_map, split_range, validate_range, signature
+from semantic_evidence import semantic_windows
 
 
 DIGITS = "零一二三四五六七八九"
@@ -86,86 +87,28 @@ def complete_product_range(start_anchor: float, next_anchor: float | None, strea
 
 def build_suggestions(index, titles):
     source_map(index)
+    result = semantic_windows(index, titles)
     cues = index["cues"]
-    results: list[dict] = []
-    for product in titles:
-        product_index = int(product["product_index"])
-        pattern = link_pattern(product_index)
-        mentions: list[dict] = []
-        for cue_index, cue in enumerate(cues):
-            if not pattern.search(cue["text"]):
-                continue
-            nearby = [
-                row for row in cues[max(0, cue_index - 6): cue_index + 7]
-                if row["source_stem"] == cue["source_stem"]
-                and abs(float(row["global_start"]) - float(cue["global_start"])) <= 22
-            ]
-            context = "".join(row["text"] for row in nearby)
-            score, reasons = score_context(context, pattern)
-            mentions.append({
-                "source_stem": cue["source_stem"],
-                "start": cue["start"],
-                "end": cue["end"],
-                "global_start": cue["global_start"],
-                "score": score,
-                "reasons": reasons,
-            })
-
-        clusters: list[list[dict]] = []
-        for mention in mentions:
-            if not clusters or mention["global_start"] - clusters[-1][-1]["global_start"] > 90:
-                clusters.append([])
-            clusters[-1].append(mention)
-        candidates: list[dict] = []
-        for cluster in clusters:
-            best = max(cluster, key=lambda row: (row["score"], -row["global_start"]))
-            candidates.append({
-                **best,
-                "cluster_start": cluster[0]["global_start"],
-                "cluster_end": cluster[-1]["global_start"],
-                "mention_count": len(cluster),
-            })
-        candidates.sort(key=lambda row: (-row["score"], row["global_start"]))
-        selected = candidates[0] if candidates else None
-        confidence = "high" if selected and selected["score"] >= 7 else "low"
-        results.append({
-            "product_index": product_index,
-            "encoding_id": product.get("encoding_id"),
-            "title_present": bool(product.get("title")),
-            "confidence": confidence,
-            "selected": selected,
-            "candidates": candidates,
-        })
-
-    anchors = []
-    for row in results:
-        status, selected = classify_anchor(row)
-        row["boundary_status"] = status
-        row["ordered_selected"] = selected
-        if selected is not None:
-            anchors.append((row, selected))
-    unresolved = [row["product_index"] for row in results if row["boundary_status"] != "confirmed"]
-    # Missing positions cannot be placed on the live timeline safely. Block the
-    # complete set rather than guessing which confirmed anchors they lie between.
-    suggestions = []
-    if not unresolved:
-        anchors.sort(key=lambda pair: pair[1]["global_start"])
-        for position, (row, anchor) in enumerate(anchors):
-            next_anchor = anchors[position + 1][1]["global_start"] if position + 1 < len(anchors) else None
-            suggested = {"product_index": row["product_index"],
-                         "boundary_provenance": {"start": "automatic_anchor", "end": "inferred_next_anchor_or_stream_end"},
-                         "status": "REQUIRES_CONFIRMATION"}
-            try:
-                start, end = complete_product_range(anchor["global_start"], next_anchor, index["sources"][-1]["global_end"])
-                suggested.update(global_start=start, global_end=end, ranges=split_range(start, end, index["sources"]))
-                validate_range(suggested, source_map(index))
-            except ValueError as exc:
-                suggested["status"] = "BLOCKED"
-                suggested["blocker"] = str(exc)
-            suggestions.append(suggested)
-    return {"schema_version": 1, "generator": "locate_link_intros.py:suggestions-v1",
-            "ready_for_cutting": False, "status": "BLOCKED" if unresolved or any(r["status"] == "BLOCKED" for r in suggestions) else "REQUIRES_CONFIRMATION",
-            "unresolved_products": unresolved, "products": results, "range_suggestions": suggestions}
+    for row, product in zip(result["products"], titles):
+        pattern = link_pattern(int(product["product_index"]))
+        # Link-number mentions are diagnostics only. They never rank, create,
+        # start, or end a product window.
+        row["link_mentions"] = [
+            {"source_stem": cue["source_stem"], "start": cue["start"],
+             "global_start": cue["global_start"], "role": "AUXILIARY_ONLY"}
+            for cue in cues if pattern.search(str(cue.get("text") or ""))
+        ]
+        row["boundary_status"] = row["status"]
+    unresolved = [row["product_index"] for row in result["products"]
+                  if row["status"] == "PRODUCT_UNCERTAIN"]
+    result.update({
+        "generator": "locate_link_intros.py:semantic-windows-v2",
+        "ready_for_cutting": False,
+        "status": "PRODUCT_UNCERTAIN" if unresolved else "ROUGH_CANDIDATES_REVIEW_REQUIRED",
+        "unresolved_products": unresolved,
+        "range_suggestions": [],
+    })
+    return result
 
 
 def generate(paths):

@@ -152,7 +152,16 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
         if window is None:
             def compute():
                 with span('asr_transcription', job['end']-job['start']):
-                    words = transcribe_window(Path(sources[job['source_file']]['video_path']), job['start'], job['end'], model)
+                    if weights.get('runtime_python'):
+                        from asr_runtime import request
+                        result = request({'operation': 'transcribe', 'model': model_name,
+                                          'media': sources[job['source_file']]['video_path'], 'start': job['start'], 'end': job['end']})
+                        expected_weights = {k:v for k,v in weights.items() if k not in ('runtime_python','runtime_sha256')}
+                        if result['model'] != expected_weights:
+                            raise CacheIdentityError('asr_worker_model_changed')
+                        words = result['words']
+                    else:
+                        words = transcribe_window(Path(sources[job['source_file']]['video_path']), job['start'], job['end'], model)
                     return {**job, 'window_start': job['start'], 'window_end': job['end'], 'words': words}
             window, _ = cached(paths, expected, compute)
         windows.append(window)

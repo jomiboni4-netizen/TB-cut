@@ -9,7 +9,7 @@ from codex_worker import verify_receipt
 from audit_mimo_v2 import FORBIDDEN, semantic_duplicate
 from build_expanded_codex_request import FORBIDDEN as CANDIDATE_FORBIDDEN
 
-CONTRACT = 'final-gate-v4-host-strata'
+CONTRACT = 'final-gate-v5-person-subject-strata'
 
 
 def plan_errors(plan):

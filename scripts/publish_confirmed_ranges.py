@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preflight or explicitly publish a complete human-confirmed range manifest."""
+"""Preflight or explicitly publish human-confirmed ranges for the active batch."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 from runtime_meta import (CacheIdentityError, expected_identity, load_checked_json, invalidation_path,
-                          metadata_path, read_metadata, validate_cache, write_metadata)
+                          metadata_path, read_metadata, validate_cache, validate_metadata, write_metadata)
 from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 from apply_range_overrides_v2 import (RangeOverrideError, global_time, source_map,
                                       split_range, validate_global_ranges, validate_range)
@@ -49,17 +49,20 @@ def verify_confirmation(row: dict) -> bool:
     return row.get("boundary_provenance",{}).get("start",{}).get("kind")=="human_confirmed" and row.get("boundary_provenance",{}).get("end",{}).get("kind")=="human_confirmed"
 
 
-def validate_confirmed_document(document: dict, titles: list[dict], index: dict) -> None:
+def validate_confirmed_document(document: dict, titles: list[dict], index: dict, product_ids=None) -> None:
     rows=document.get("products")
-    if not isinstance(rows,list) or len(rows)!=len(titles):
+    title_by_id={r["product_index"]:r for r in titles}
+    expected_ids=set(title_by_id) if product_ids is None else set(product_ids)
+    if not expected_ids or not expected_ids.issubset(title_by_id):
+        raise RangeOverrideError("human_range_product_ids_invalid")
+    if not isinstance(rows,list) or len(rows)!=len(expected_ids):
         raise RangeOverrideError("human_ranges_incomplete_product_set")
-    title_ids=[r["product_index"] for r in titles]
     indexes=[r.get("product_index") for r in rows]
-    if len(set(indexes))!=len(indexes) or set(indexes)!=set(title_ids):
+    if len(set(indexes))!=len(indexes) or set(indexes)!=expected_ids:
         raise RangeOverrideError("human_ranges_product_set_mismatch")
     if any(not verify_confirmation(row) for row in rows):
         raise RangeOverrideError("human_confirmation_proof_missing_or_invalid")
-    sources=source_map(index);title_by_id={r["product_index"]:r for r in titles}
+    sources=source_map(index)
     for row in rows:
         if any(row.get(k)!=title_by_id[row["product_index"]].get(k) for k in ("encoding_id","title")):
             raise RangeOverrideError("human_range_title_identity_mismatch")
@@ -73,15 +76,18 @@ def validate_confirmed_document(document: dict, titles: list[dict], index: dict)
     validate_global_ranges(rows)
 
 
-def build_confirmed_ranges(manifest: dict,index: dict,titles_doc: dict) -> dict:
+def build_confirmed_ranges(manifest: dict,index: dict,titles_doc: dict,product_ids=None) -> dict:
     titles=titles_doc.get("products")
     if not isinstance(titles,list) or not titles:
         raise RangeOverrideError("authenticated_titles_missing")
     sources=source_map(index);title_by_id={r["product_index"]:r for r in titles}
+    expected_ids=set(title_by_id) if product_ids is None else set(product_ids)
+    if not expected_ids or not expected_ids.issubset(title_by_id):
+        raise RangeOverrideError("human_range_product_ids_invalid")
     decisions=manifest.get("products")
     if not isinstance(decisions,list):
         raise RangeOverrideError("human_manifest_products_must_be_list")
-    if len(decisions)!=len(titles) or {d.get("product_index") for d in decisions}!=set(title_by_id):
+    if len(decisions)!=len(expected_ids) or {d.get("product_index") for d in decisions}!=expected_ids:
         raise RangeOverrideError("human_ranges_incomplete_product_set")
     rows=[];seen_decisions=set()
     for decision in decisions:
@@ -114,13 +120,11 @@ def build_confirmed_ranges(manifest: dict,index: dict,titles_doc: dict) -> dict:
     validate_global_ranges(rows)
     result={"schema_version":1,"products":sorted(rows,key=lambda r:r["product_index"]),
             "human_confirmation_manifest_sha256":canonical_hash(manifest)}
-    validate_confirmed_document(result,titles,index)
+    validate_confirmed_document(result,titles,index,expected_ids)
     return result
 
 
 def publish_or_preflight(paths,manifest_path:Path,*,publish=False,replace_confirmed=False):
-    if replace_confirmed and not publish:
-        raise RangeOverrideError("replace_requires_publish")
     with generator_lock(paths):
         snapshot=BuildSnapshot(paths);identity=expected_identity(paths)
         output=paths.cache_dir/"product_ranges.json"
@@ -135,21 +139,39 @@ def publish_or_preflight(paths,manifest_path:Path,*,publish=False,replace_confir
         manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
         index=load_checked_json(paths,input_paths[1],expected=identity,artifact_schema_version=1)
         titles_doc=load_checked_json(paths,input_paths[2],expected=identity)
-        model=build_confirmed_ranges(manifest,index,titles_doc)
+        selected_ids=snapshot.state.get("batch",{}).get("product_ids") or []
+        model=build_confirmed_ranges(manifest,index,titles_doc,selected_ids)
         existing=None
+        replace_stale=False
         if output.exists() or metadata_path(output).exists():
             if not output.is_file() or not metadata_path(output).is_file():
                 raise CacheIdentityError("existing_product_ranges_pair_incomplete")
-            existing=load_checked_json(paths,output,expected=identity,artifact_schema_version=1)
             old_meta=read_metadata(output)
             if old_meta.get("producer")!="publish_confirmed_ranges.py":
                 raise RangeOverrideError("existing_ranges_provenance_unverified")
-            validate_confirmed_document(existing,titles_doc["products"],index)
+            old_bytes=output.read_bytes()
+            if old_meta.get("artifact_sha256")!=hashlib.sha256(old_bytes).hexdigest():
+                raise CacheIdentityError("existing_ranges_sha256_mismatch")
+            try:
+                existing=json.loads(old_bytes)
+            except json.JSONDecodeError as exc:
+                raise CacheIdentityError("existing_ranges_json_invalid") from exc
+            if not isinstance(existing,dict) or existing.get("schema_version")!=1:
+                raise CacheIdentityError("existing_ranges_schema_invalid")
+            try:
+                validate_metadata(old_meta,identity)
+            except CacheIdentityError:
+                # A verified previous-batch publication is replaceable only with
+                # the explicit --replace-confirmed authorization below.
+                replace_stale=True
+            if not replace_stale:
+                validate_confirmed_document(existing,titles_doc["products"],index,selected_ids)
             if not replace_confirmed:
                 raise RangeOverrideError("existing_human_ranges_require_explicit_replacement")
         if not publish:
             return {"status":"PREFLIGHT_PASS","product_count":len(model["products"]),
-                    "will_create":existing is None,"would_replace":existing is not None}
+                    "will_create":existing is None,"would_replace":existing is not None,
+                    "replacing_stale_batch":replace_stale}
         def check_inputs():
             snapshot.check()
             if not invalidation_path(output).exists() and expected_identity(paths).get("range_snapshot")!=identity.get("range_snapshot"):

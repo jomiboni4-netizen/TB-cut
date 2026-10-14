@@ -4,5 +4,17 @@
   "labels": ["host_visible", "clothes_closeup", "no_person", "uncertain"],
   "count_as_host": ["host_visible"],
   "do_not_count_as_host": ["clothes_closeup", "no_person", "uncertain"],
-  "cascade": ["apple_vision", "qwen_4b_vision", "qwen_8b_vision"]
+  "person_subject": {
+    "body_confidence": 0.5,
+    "body_height": 0.34,
+    "body_area": 0.08,
+    "body_aspect_min": 0.22,
+    "body_aspect_max": 1.5,
+    "face_confidence": 0.5,
+    "face_height": 0.07,
+    "face_area": 0.004,
+    "pose_points": 6,
+    "pose_height": 0.3,
+    "pose_area": 0.075
+  }
 }

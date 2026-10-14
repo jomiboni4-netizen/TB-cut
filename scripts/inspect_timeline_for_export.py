@@ -5,35 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
+from resolve_connection import connect
 from runtime_meta import expected_identity
 from runtime_paths import resolve_runtime_paths
 
 
-API = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting"
-MOD = API + "/Modules"
-LIB = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"
-
-
-def connect():
-    os.environ.setdefault("RESOLVE_SCRIPT_API", API)
-    os.environ.setdefault("RESOLVE_SCRIPT_LIB", LIB)
-    sys.path.insert(0, MOD)
-    import DaVinciResolveScript as dvr
-    resolve = dvr.scriptapp("Resolve")
-    if resolve is not None:
-        return resolve
-    address = os.environ.get("RESOLVE_HOST")
-    if not address:
-        for interface in ("en0", "en1"):
-            result = subprocess.run(["ipconfig", "getifaddr", interface], capture_output=True, text=True, check=False)
-            address = result.stdout.strip()
-            if address:
-                break
-    return dvr.scriptapp("Resolve", address) if address else None
 
 
 def item_row(item) -> dict:

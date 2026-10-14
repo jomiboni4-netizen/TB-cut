@@ -30,9 +30,10 @@ class WorkbookDependencyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'scripts').mkdir()
+            (root / 'config').mkdir()
             script = root / 'scripts/check_workbook_dependencies.mjs'
             shutil.copyfile(ROOT / 'scripts/check_workbook_dependencies.mjs', script)
-            lock = json.loads((ROOT / 'workbook-dependencies.lock.json').read_text())
+            lock = json.loads((ROOT / 'config/workbook-runtime-v4.lock.json').read_text())
             for fault in ('module', 'node', 'artifactTool', 'treeSha256'):
                 with self.subTest(fault=fault):
                     modified = dict(lock)
@@ -41,10 +42,15 @@ class WorkbookDependencyTests(unittest.TestCase):
                         if not link.exists() and not link.is_symlink():
                             link.symlink_to((ROOT / 'node_modules').resolve(), target_is_directory=True)
                         modified[fault] = 'wrong'
-                    (root / 'workbook-dependencies.lock.json').write_text(json.dumps(modified))
+                    (root / 'config/workbook-runtime-v4.lock.json').write_text(json.dumps(modified))
                     result = subprocess.run([node, str(script)], capture_output=True, text=True)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('workbook_dependency_check_failed', result.stderr)
+                    if fault != 'module':
+                        self.assertNotIn('ENOENT', result.stderr)
+            (root / 'config/workbook-runtime-v4.lock.json').write_text(json.dumps(lock))
+            valid = subprocess.run([node, str(script)], capture_output=True, text=True)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
 
     def test_doctor_missing_node_is_an_error(self):
         with patch.object(sys, 'argv', ['doctor', '--root', str(self.root)]), patch.object(project_doctor.subprocess, 'run', side_effect=FileNotFoundError), patch('sys.stdout', new_callable=io.StringIO) as output:

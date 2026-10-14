@@ -8,16 +8,16 @@
 | fingerprint | `fingerprint_inputs.py` | `PROJECT_STATE.json` 的标题/字幕/视频路径 | `.cache/input_fingerprints.json` | 仅单文件计算 SHA-256；目录记录存在但 `sha256=null`，无人将此文件作为强制门槛 | subtitle index；身份 helper 另从配置输入直接计算指纹 |
 | subtitle index | `index_subtitles.py` | `PROJECT_STATE.json`，SRT，与 SRT 同名的 MP4，`ffprobe` | `.cache/subtitle_index.json` + meta；更新本地状态中的字幕指纹/阶段 | SRT 内容指纹；新增批次、输入、规则、pipeline、meta schema、文件摘要检查；旧索引在再次运行本 stage 时从原始输入重建 | product ranges、expanded candidates |
 | title index | `index_titles.py` → `inspect_title_workbook.mjs --json` | 当前 state 的 `title_path`；已有 Node 与 `@oai/artifact-tool`；Python 标准库 | `.cache/titles.json` + meta | 唯一可见 sheet、第一行表头、无损 ID、空行/缺字段/重复检查；当前 identity | product ranges、Resolve write |
-| boundary suggestions / accepted ranges | `locate_link_intros.py`, `publish_confirmed_ranges.py`, `apply_range_overrides_v2.py` | authenticated subtitle index/titles; complete source-local human manifest or authenticated override | locator: `boundary_suggestions.json`; publisher or explicit override: `product_ranges.json` | unresolved anchors block suggestions; human publisher validates all rows and overlap before explicit publish; locator never writes accepted ranges | expanded requests and windowed ASR |
-| expanded candidates | `build_expanded_codex_request.py` | 已验证的 `product_ranges.json`、`subtitle_index.json`、**已有 `R/mimo_request.json`** | `R/codex_expanded_request.json` + meta | 输入身份、商品 ID、范围/索引 schema；候选按禁用词过滤，无时长上限 | MiMo review |
-| MiMo review | `mimo_review_v2.py` | 已验证的 request JSON，环境变量 `MIMO_API_KEY`；远端 MiMo | 指定响应 JSON + meta，另有旧式 `_meta.json` 请求摘要/状态和临时 lock | 请求身份；已有响应必须有有效 meta 且请求摘要相同才命中，遗留响应不自动重发或覆盖 | semantic audit |
-| semantic audit | `audit_mimo_v2.py` | 已验证的 request 与 MiMo 响应 | 指定 selection/audit JSON + meta | 输入身份；检查候选边界、禁用内容、语义闭合、时长、重叠、语义重复；不通过仍写审核供返修 | repair 或粗选批准 |
+| boundary suggestions / accepted ranges | `locate_link_intros.py`, `publish_confirmed_ranges.py`, `apply_range_overrides_v2.py` | authenticated subtitle index/titles; source-local human manifest for exactly current `batch.product_ids`, or authenticated override | locator: `boundary_suggestions.json`; publisher or explicit override: `product_ranges.json` | locator builds wide semantic windows from title attributes over continuous subtitle text; Excel row/encoding identify the catalog item but not its live time, and link mentions are auxiliary-only. Ambiguous evidence remains `PRODUCT_UNCERTAIN`. Rough windows are never accepted ranges; human publisher validates explicitly before physical editing | expanded requests and windowed ASR |
+| expanded candidates | `build_expanded_codex_request.py` | 已验证的 `product_ranges.json`、`subtitle_index.json`、**已有 `R/mimo_request.json`** | `R/codex_expanded_request.json` + meta | 输入身份、商品 ID、范围/索引 schema；禁用话术按句内子句剔除，混合句保留有效部分、原始来源引用及切点复核标记；无时长上限 | MiMo semantic stage A |
+| MiMo semantic stages | `mimo_review_v2.py`, `product_semantic_preview.py` | 每商品单独的本地预清洗标题、候选句群、时间引用；`MIMO_API_KEY`；MiMo v2.6 Pro | ignored per-product request/response/metrics and Markdown/JSON preview | A only assigns product ownership, extracts exact cited complete groups and relations; B only assembles from A-validated groups. Request fingerprint reuse; no video/audio or whole SRT. `closure_check` is untrusted | local hard audit, independent Codex review |
+| semantic audit | `audit_mimo_v2.py` | 已验证的 request 与 MiMo 响应 | 指定 selection/audit JSON + meta | 输入身份；不使用 MiMo 的 `closure_check` 作证据；检查候选边界、禁用内容、时长、物理/语义重叠。硬规则通过但无独立 Codex 记录时标记 `REVIEW_PENDING` | repair or final quality gate |
 | repair | `build_repair_request_v2.py`、`mimo_review_v2.py`、`merge_repair_result_v2.py`、`audit_mimo_v2.py`；后期失败可用 `collect_post_audit_failures.py`，必要时 `drop_failed_variants_v2.py` | 已验证的请求、selection、audit、返修响应；后期失败还需已验证的终审/人物审计；`drop` 还需 `EXHAUSTED` 证明 | 返修请求、响应、合并响应、复审/失败摘要及 meta | 返修上限、锁定通过版本、候选池剩余量；仅 `EXHAUSTED` 且证明完整搜索才可减条数 | `promote_rough_selection.py` |
 | rough approval | `promote_rough_selection.py` | 已验证的 selection 与 PASS audit | `R/rough_selection.approved.json`、`R/rough_audit.approved.json` + meta | 仅 PASS 可提升，身份校验阻止串批次 | windowed ASR |
 | windowed ASR | `windowed_asr_v2.py` | `PROJECT_STATE.json` 视频路径；已验证的 product ranges、粗选批准文件、现有 request；本机 `faster_whisper`、FFmpeg | `.cache/asr_windows/.../*.json`、`R/window_asr.json` + meta | 范围/粗选/request 身份；复用窗口时验证身份与模型名；只对选段附近转写 | `window_quality_v2.py`、refine plans |
 | window quality | `window_quality_v2.py` | `PROJECT_STATE.json` 视频路径、已验证的 `R/window_asr.json`、FFmpeg | `R/window_quality.json` + meta | ASR 身份；FFmpeg 失败会报错 | refine plans |
 | refine plans | `refine_plans_v2.py` | `PROJECT_STATE.json` 时间线名；已验证的粗选批准、expanded/base request、`window_asr.json`、`window_quality.json` | `W/cut_plan_variant_*.json`、`W/generated_plans.json`、`W/final_plan_audit.json` + meta | 输入身份；本地词/帧切点、时长、语义重复、源帧重叠、连续片段合并 | person coverage、final approval |
-| person coverage | `person_coverage_audit_v2.py`、本地 `person_coverage_probe` | `PROJECT_STATE.json` 视频路径；默认已验证的 `W/approved_plans.json`，`--generated` 时读已验证的 `generated_plans.json`；各方案 | `.cache/person_coverage_audit.json` + meta | 方案身份与摘要；主播可见占比严格 `>70%`。有旧 approved 清单时默认优先读取，想查新生成方案需 `--generated` | final approval、Resolve write |
+| person coverage | `project_scheduler.py` → `registered_pipeline.vision_audit()` → `person_coverage_audit_v2.registered_vision()` → `adaptive_vision.py` + `apple_frame_probe.swift` | Exact final physical plan, registered source media, current detector binary and `config/vision_rules.json` | Sealed `vision` checkpoint, per-frame physical cache and exact-plan digest | v4 geometry frame classifier plus v5 record-time engineering score; prominent body, face or pose can independently count. No host identity registry, face matching, tracking or Qwen requirement. Initial 16 stratified points/minute, up to five distinct passes; strictly `>70%`. The score is a conservative sampling heuristic, not framewise certification; uncertain samples and detector errors block PASS. Scoring changes cannot reinterpret old v4 audit snapshots, while unchanged v4 frame evidence can be reused. | final quality gate, checkpoint approval, Resolve preflight |
 | final approval | `approve_final_plans.py` | 已验证的 `W/final_plan_audit.json`、`W/generated_plans.json`、所列方案 | `W/approved_plans.json` + meta | audit 仅 PASS/EXHAUSTED；过滤失败版本；方案时长严格 `>45s`、`<60s` | Resolve write |
 | Resolve write | `resolve_write_v2.py` | `PROJECT_STATE.json`；已验证的 `.cache/titles.json`、人物审核、每款粗审/终审/批准清单/方案；Resolve 当前项目、源与目标时间线 | `.cache/backups/*.drp`；目标时间线追加音视频和标记；`.cache/resolve_write_report.json` + meta | **连接 Resolve 之前**先验证所有缓存身份、schema 与原有剪辑硬门槛；然后项目/时间线核对、备份、写后帧/音频/标记核对 | Resolve validation |
 | Resolve validation | `validate_resolve_write_v2.py` | 已验证的写入报告、Resolve 当前时间线 | `.cache/resolve_write_validation.json` + meta | 报告 V2.1、项目名、源入出点 1 帧容差、音频及标记 | export |
@@ -40,7 +40,7 @@
 
 元数据放在 `<artifact>.meta.json`，不改原 JSON 的业务内容。核心字段：`schema_version=1`（**metadata 格式版本**）、`pipeline_version`、`batch_id`、`input_fingerprint`、`rules_fingerprint`、`created_at`、`producer`、`artifact_sha256`；商品级文件另有 `product_id`。调用方若知道原 JSON 的 schema，另检查原文件 `schema_version`。错误包含 `legacy_cache_missing_metadata`、`batch_id_mismatch`、`input_fingerprint_mismatch`、`pipeline_version_mismatch`、`schema_version_mismatch`、`rules_fingerprint_mismatch` 和 `artifact_sha256_mismatch`。
 
-`input_fingerprint` 对标题与 SRT 文件内容取 SHA-256；视频用路径、大小和纳秒修改时间，避免重复读取大视频；还包含 Resolve 项目/时间线配置。它不包含 `project_root`，便于将 runtime workspace 物理分离。`rules_fingerprint` 使用 `runtime-rules-v2` 算法标识，覆盖 `PROJECT_RULES.md` 中影响 runtime 的内容及全部 `config/*.json` 的文件名和内容。仅排除三个明确的二级章节：`Working communication`、`Git and public repository workflow`、`Temporary public review report`。其余内容（包括未知章节）默认参与指纹；代码块内的标题不作为章节边界，未闭合代码块会拒绝处理。剪辑硬规则不得放入这些纯流程章节。这能识别常见输入/规则变化，但视频若在大小和修改时间完全不变的情况下被替换，单靠该指纹无法识别；若未来需要抵御这种情况，再引入视频内容摘要。
+`input_fingerprint` 对标题与 SRT 文件内容取 SHA-256；视频用路径、大小和纳秒修改时间，避免重复读取大视频；还包含 Resolve 项目/时间线配置、当前批次商品编号和批次策略。它不包含 `project_root`，便于将 runtime workspace 物理分离。`rules_fingerprint` 使用 `runtime-rules-v2` 算法标识，覆盖 `PROJECT_RULES.md` 中影响 runtime 的内容及全部 `config/*.json` 的文件名和内容。仅排除三个明确的二级章节：`Working communication`、`Git and public repository workflow`、`Temporary public review report`。其余内容（包括未知章节）默认参与指纹；代码块内的标题不作为章节边界，未闭合代码块会拒绝处理。剪辑硬规则不得放入这些纯流程章节。这能识别常见输入/规则变化，但视频若在大小和修改时间完全不变的情况下被替换，单靠该指纹无法识别；若未来需要抵御这种情况，再引入视频内容摘要。
 
 此前 `runtime-rules-v2` 修复仅改变身份计算范围，不改剪辑规则、pipeline 版本或 metadata schema。新算法不兼容旧全文件指纹：旧 metadata 仍会 fail closed，不自动认证、改写或接受旧摘要。此前新增标题编号规则也改变了规则摘要；本轮不改 PROJECT_RULES.md/config，真实 runtime 仍须在后续单独授权的恢复阶段重建。titles 已从 attest 白名单移除；摘要检查及拒绝覆盖已有 metadata 的行为保留。
 
@@ -69,7 +69,7 @@
 
 正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。Node 和 `@oai/artifact-tool` 必须符合下述固定分发约定；缺失或版本/摘要不符直接失败，不更换 XLSX parser，不使用旧缓存兜底。
 
-Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。输出保留 `source`、`sheet`、`products`，新增 `schema_version=2` 和 `generator=index_titles.py:v2`；采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
+Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。仅当本批状态显式设置 `batch_overrides.skip_blank_titles=true` 时，空标题行跳过且不占商品编号；该策略进入输入指纹。输出保留 `source`、`sheet`、`products`，新增 `schema_version=2` 和 `generator=index_titles.py:v2`；采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
 
 两个生成器从开始到完成持有同一 cache 目录锁；并发调用立即失败。开始时固定 state bytes、expected identity 和完整 rules/config 摘要。subtitle 解析使用固定的 SRT bytes，并确认这些 bytes 与固定 input identity 一致；视频身份仍为路径、大小、纳秒修改时间，不是视频内容摘要。artifact/meta 在临时目录生成。发布前及发布各步骤之间重查 state、SRT、标题、视频身份和规则，变化则失败，发布前变化不写 artifact/meta/state。
 
@@ -79,9 +79,9 @@ Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作
 
 ## Pinned workbook dependencies
 
-`package.json` 固定 Node **24.19.0**、`@oai/artifact-tool` **2.8.59**。该 module 是私有、带 bundled dependencies 的分发包，不能声称公开 `npm ci` 可安装。`workbook-dependencies.lock.json` 锁定 Codex primary runtime **26.909.12148 / darwin arm64** 的完整 artifact-tool 文件树摘要（包含全部传递依赖）；它是分发锁，不是 npm package-lock。取得授权的同版 bundle，将其中 `node_modules` 链接到仓库，使用其中 Node；不得用其他 XLSX parser 替代，也不要复制真实业务工作簿到审核环境。其他平台或拿不到相同私有 bundle 的审核环境仍有依赖 blocker，必须如实报告。
+`package.json` 固定 Node **24.19.0**、`@oai/artifact-tool` **2.8.93**。`workbook-dependencies.lock.json` 与实际检查使用的 `config/workbook-runtime-v4.lock.json` 一致，锁定 Codex primary runtime **26.1011.11113 / darwin arm64** 的完整 artifact-tool 文件树摘要（包含全部传递依赖）。该 module 是私有、带 bundled dependencies 的分发包；这些锁是分发锁，不是 npm package-lock，不能声称公开 `npm ci` 可安装。使用该 bundle 中的 Node 和模块；不得用其他 XLSX parser 替代，也不要复制真实业务工作簿到审核环境。其他平台或拿不到相同 bundle 的审核环境仍有依赖 blocker，必须如实报告。
 
-只读依赖检查：`<node-executable> scripts/check_workbook_dependencies.mjs`。检查 Node/平台/module 版本、完整文件树摘要及 workbook API 可导入性，不加载工作簿；正式 parser 同样强制检查。`project_doctor.py --root . --node <node-executable>` 执行相同检查，失败返回非零。完整 synthetic suite：`TB_CUT_TEST_NODE=<node-executable> python3 -B -m unittest discover -s tests -v`。单独真实 Node→Python synthetic integration：`TB_CUT_TEST_NODE=<node-executable> PYTHONPATH=tests python3 -B -m unittest test_index_titles.IndexTitlesTests.test_node_machine_parser_and_real_generator_on_synthetic_workbook -v`。不能通过跳过 integration 来宣称依赖通过。
+只读依赖检查：`<node-executable> scripts/check_workbook_dependencies.mjs`。检查 Node/平台/module 版本、完整文件树摘要及 workbook API 可导入性，不加载工作簿；正式 parser 同样强制检查。Project Doctor 和标题索引默认优先使用 `~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node`，也可用 `--node` 显式指定；依赖检查失败返回非零。完整 synthetic suite：`TB_CUT_TEST_NODE=<node-executable> python3 -B -m unittest discover -s tests -v`。单独真实 Node→Python synthetic integration：`TB_CUT_TEST_NODE=<node-executable> PYTHONPATH=tests python3 -B -m unittest test_index_titles.IndexTitlesTests.test_node_machine_parser_and_real_generator_on_synthetic_workbook -v`。不能通过跳过 integration 来宣称依赖通过。
 
 ## Recovery authorization boundary
 
@@ -209,7 +209,7 @@ ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需�
 
 独立终审命令：`final_quality_gate.py --workspace <workspace> --plan <stage-ref>` 默认只生成 REVIEW_PENDING；同时提供 `--vision <exact-plan-stage-ref> --receipt <sealed-Codex-receipt-ref>` 才能严格导入、重算门禁并更新 FINAL_PASS。直接人工写 verdict、粗选 PASS、旧 closure_check 或旧 final_audit 都不能更新新 FINAL_PASS。原 `approve_final_plans.py` 的登记模式现校验该链并发布不可变 approved 阶段；原 Resolve `load_products` 接入此审核读取，`resolve_write_v2.py --check-only` 可只读验证全项目，绝不连接 Resolve。登记模式真实写入仍显式 BLOCKED。
 
-人物接口 `person_coverage_audit_v2.registered_vision` 对精确方案收集真实 detector 输出；现有 Swift 只有任意人物样本数，无法证明主播身份及全方案覆盖，故明确 UNCERTAIN，不能拿 >70% 样本数强行 PASS。门禁要求同方案全部版本、已验证主播、完整覆盖及严格 >70% 的保守比例。合成测试的视觉执行边界替身不代表该真实检测器已通过，也未修改抽样算法。
+人物接口 `person_coverage_audit_v2.registered_vision` 对精确方案调用 `adaptive_vision.audit`。分类对象是“人物是否为明显画面主体”；`HOST_VISIBLE` 是兼容标签，不验证主播身份。Apple Vision 的人体框、面部框和姿态关键点按 `config/vision_rules.json` 的独立几何充分条件分类；小范围人物信号是 UNCERTAIN，空镜/无明显人物主体不计入。协议和阈值进入检测器指纹；精确方案摘要及封存仍由统一门禁校验。合成测试与真实素材质量分别报告。
 
 ### 项目完成与统计
 
@@ -234,7 +234,7 @@ ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需�
 - ASR 重叠/相邻任务仍用既有 merge_windows；相同或被已验证窗口包含的请求共享完整词窗口，保留更大上下文，当前 ASR 阶段另绑定粗选依赖。模型加载只在 miss；权重本机解析 local_files_only，不下载。模型权重文件 SHA 与实际 Whisper/CT2 版本入身份，进程内按文件 stat 复用权重 SHA。模型/参数更新在许可和 cursor 中复核，重建受影响方案及终审。
 - compute_metrics 记录候选、选择/终审/项目审核请求等待、ASR 加载/转写/VAD、音频解码/RMS、视频抽帧/Vision、质量与检查点、cache/签名/clock，统计次数、单位量、hits、失效原因、错误和重试。Qwen/MiMo 未调用计零。时长为包含子阶段的墙钟，不能相加宣称总耗时；ASR/VAD 内置一体，未声称拆出独立 VAD 耗时。
 
-接入但环境 BLOCKED：可信主播身份/主体分类模型尚无；Apple 仅 generic person，Qwen 没有已验证且授权的本地模型；默认 Python 无 faster_whisper；私有 workbook doctor 不通过。需要授权后验证指定 ASR 环境、真实模型质量及统计风险。
+真实环境状态按本轮实际记录更新。未完成的 workbook、ASR、Resolve 写入与回读门禁仍需分别验证；主播身份库、Qwen 或人物追踪不属于人物占比的依赖。
 
 未编码/未迁移：真实 Resolve 写入/回读/幂等恢复与导出验证、精确 VFR、完整自动语义返修；旧固定路径候选/范围覆盖、window_quality/ASR/refine batch CLI、旧粗选/语义/repair、validate/export/attest/migration/preflight/cleanup 仍不作为新登记链消费者。保留第 2 轮阻塞，不宣称全面迁移。统一批准和 Resolve loader/check-only 使用新门禁，实际写入入口仍拒绝。
 

@@ -1,4 +1,5 @@
-"""Deterministic physical-frame strata and conservative host evidence, not an IID guarantee."""
+"""Deterministic source-frame sampling with versioned record-time scoring."""
+import ast
 import hashlib
 import hmac
 import json
@@ -11,12 +12,27 @@ from project_registry import digest
 from runtime_meta import CacheIdentityError, _sha256
 from compute_store import media_signature, identity, cached, check_media
 from compute_metrics import span, count
+from vision_record_score_v5 import CONTRACT, POLICY, estimate
 
-CONTRACT = 'host-strata-v3'
-POLICY = {'points_per_minute': 16, 'max_rounds': 5, 'correlation_seconds': 2.0,
-          'z_reference': 1.645, 'threshold_exclusive': 0.70, 'seed': 'tbcut-physical-v3'}
+FRAME_CACHE_PROTOCOL = 'person-subject-strata-v4'
+# The v4 frame adapter has not changed. Scoring-only edits must reuse its frame evidence.
+_V4_ADAPTER_SHA256 = '464bb0bae7b7cbc46bd996174f0d747b7d3c21e7e4deabb84f6713d292234c5d'
+_V4_CLASSIFIER_AST_SHA256 = 'e61b0e6bf0972a660516580b94f94708c89ce0eada81adcc21e938fd20ddb646'
+_CLASSIFIER_FUNCTIONS = {'decoder_identity', 'subject_thresholds', 'classify_observations',
+                         'classify_frame', 'validate_classification'}
 LABELS = {'HOST_VISIBLE', 'CLOTHING_CLOSEUP', 'OTHER_PERSON', 'NO_PERSON', 'UNCERTAIN', 'DETECTOR_ERROR'}
 _decoders = {}
+
+
+def classifier_adapter_digest():
+    source = Path(__file__).read_text(encoding='utf-8')
+    nodes = [ast.dump(node, include_attributes=False) for node in ast.parse(source).body
+             if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name in _CLASSIFIER_FUNCTIONS)
+             or (isinstance(node, ast.Assign) and any(
+                 isinstance(target, ast.Name) and target.id == 'LABELS' for target in node.targets))]
+    current = hashlib.sha256('\n'.join(nodes).encode()).hexdigest()
+    return _V4_ADAPTER_SHA256 if current == _V4_CLASSIFIER_AST_SHA256 else current
 
 
 def decoder_identity():
@@ -41,12 +57,14 @@ def frame_clock(media):
             '-show_frames', '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(media)],
             text=True, capture_output=True, check=True)
         times = [float(f['best_effort_timestamp_time']) for f in json.loads(result.stdout)['frames']]
-        if len(times) < 2 or not all(math.isfinite(t) for t in times) or abs(times[0]) > 1e-6:
+        if len(times) < 2 or not all(math.isfinite(t) for t in times):
             raise CacheIdentityError('source_frame_clock_unproven')
         delta = (times[-1]-times[0])/(len(times)-1)
-        if delta <= 0 or any(abs(t-i*delta) > 2e-6 for i, t in enumerate(times)):
+        origin = times[0]
+        if delta <= 0 or any(abs(t-origin-i*delta) > 2e-6 for i, t in enumerate(times)):
             raise CacheIdentityError('vfr_exact_mapping_not_integrated')
-        return {'fps': 1/delta, 'frame_count': len(times), 'pts_digest': digest(times), 'mapping': 'decoded-cfr-v3'}
+        return {'fps': 1/delta, 'frame_count': len(times), 'pts_digest': digest(times),
+                'video_first_pts': origin, 'mapping': 'decoded-cfr-with-origin-v4'}
 
 
 def classifier_identity(detector):
@@ -54,18 +72,52 @@ def classifier_identity(detector):
     if not detector.is_file():
         raise CacheIdentityError('host_detector_missing')
     return {'detector_path': str(detector), 'binary_sha256': _sha256(detector),
-            'adapter_sha256': _sha256(Path(__file__)),
+            'adapter_sha256': classifier_adapter_digest(),
             'decoder': decoder_identity(),
-            'runtime': {'os': platform.platform(), 'macos': platform.mac_ver()[0],
-                        'apple_weights': 'private_unverified_never_host_authority'},
-            'protocol': 'apple-frame-v3', 'host_reference': None,
-            'parameters': {'human_confidence': 0.5, 'qwen': 'disabled_no_verified_authorized_model'}}
+            'runtime': {'os': platform.platform(), 'macos': platform.mac_ver()[0]},
+            'protocol': 'apple-frame-v4-person-subject',
+            'parameters': subject_thresholds()}
+
+
+def subject_thresholds():
+    config = Path(__file__).resolve().parents[1] / 'config' / 'vision_rules.json'
+    value = json.loads(config.read_text(encoding='utf-8'))
+    return value['person_subject']
+
+
+def classify_observations(obs, thresholds=None):
+    thresholds = thresholds or subject_thresholds()
+    if not isinstance(obs, dict):
+        raise CacheIdentityError('detector_observations_invalid')
+    bodies = obs.get('body_candidates') or [obs.get('best_body') or {}]
+    faces = obs.get('face_candidates') or [obs.get('best_face') or {}]
+    poses = obs.get('pose_candidates') or [obs.get('best_pose') or {}]
+    t = thresholds
+    body_ok = any(b.get('confidence', 0) >= t['body_confidence']
+                  and b.get('height', 0) >= t['body_height']
+                  and b.get('area', 0) >= t['body_area']
+                  and t['body_aspect_min'] <= b.get('width', 0) / max(b.get('height', 1), 1e-9)
+                  <= t['body_aspect_max'] for b in bodies)
+    face_ok = any(f.get('confidence', 0) >= t['face_confidence']
+                  and f.get('height', 0) >= t['face_height']
+                  and f.get('area', 0) >= t['face_area'] for f in faces)
+    pose_ok = any(p.get('points', 0) >= t['pose_points']
+                  and p.get('height', 0) >= t['pose_height']
+                  and p.get('area', 0) >= t['pose_area'] for p in poses)
+    if body_ok or face_ok or pose_ok:
+        return {'label': 'HOST_VISIBLE', 'subject_evidence': True,
+                'reason': 'prominent_person_geometry',
+                'evidence': {'body': body_ok, 'face': face_ok, 'pose': pose_ok}}
+    any_person = bool(obs.get('has_person_signal'))
+    return {'label': 'UNCERTAIN' if any_person else 'NO_PERSON',
+            'subject_evidence': False,
+            'reason': 'partial_or_small_person' if any_person else 'no_prominent_person'}
 
 
 def proven_clock(paths, media, signature=None):
     signature = signature or media_signature(media)
     expected = identity(paths, 'clock', signature, clock_model_identity(),
-                        {'protocol': 'decoded-cfr-v3'}, 'all_frames')
+                        {'protocol': 'decoded-cfr-with-origin-v4'}, 'all_frames')
     return cached(paths, expected, lambda: frame_clock(media))[0]
 
 
@@ -73,39 +125,41 @@ def clock_model_identity():
     return {'ffprobe': _sha256(Path('/opt/homebrew/bin/ffprobe'))}
 
 
-def classify_frame(media, frame, detector):
-    """Generic Apple Vision has no verified host identity. No automatic Qwen download/fallback."""
+def classify_frame(media, frame, detector, *, fps=None):
+    """Classify a prominent person in frame; identity matching is not part of this task."""
     try:
         with tempfile.TemporaryDirectory(prefix='tbcut-frame-') as folder:
             image = Path(folder)/'frame.png'
             with span('video_decode', 1):
-                subprocess.run(['/opt/homebrew/bin/ffmpeg', '-v', 'error', '-i', str(media), '-vf',
-                    f'select=eq(n\\,{frame})', '-frames:v', '1', '-vsync', '0', str(image)],
-                    capture_output=True, check=True)
+                command = ['/opt/homebrew/bin/ffmpeg', '-v', 'error']
+                if fps:
+                    command += ['-ss', f'{frame / fps:.9f}']
+                command += ['-i', str(media)]
+                if not fps:
+                    command += ['-vf', f'select=eq(n\\,{frame})']
+                command += ['-frames:v', '1', '-vsync', '0', str(image)]
+                subprocess.run(command, capture_output=True, check=True)
                 if not image.is_file():
                     raise CacheIdentityError('frame_decode_empty')
             with span('apple_vision', 1):
+                thresholds = subject_thresholds()
                 result = subprocess.run([str(detector), '--frame', str(image)], text=True,
                                         capture_output=True, check=True)
                 value = json.loads(result.stdout)
-            if value.get('protocol') != 'apple-frame-v3' or type(value.get('person_present')) is not bool:
+            if value.get('protocol') != 'apple-frame-v4' or not isinstance(value.get('observations'), dict):
                 raise CacheIdentityError('detector_frame_protocol_missing')
-            # Even an executable's self-declared HOST_VISIBLE cannot authorize host classification.
-            return {'label': 'UNCERTAIN' if value['person_present'] else 'NO_PERSON',
-                    'host_verified': False, 'main_subject_verified': False,
-                    'reason': 'host_identity_and_subject_model_unavailable' if value['person_present'] else 'generic_no_person'}
+            return classify_observations(value['observations'], thresholds)
     except Exception as exc:
         detail = getattr(exc, 'stderr', '') or str(exc)
         if isinstance(detail, bytes): detail = detail.decode('utf-8', errors='replace')
-        return {'label': 'DETECTOR_ERROR', 'host_verified': False, 'main_subject_verified': False,
+        return {'label': 'DETECTOR_ERROR', 'subject_evidence': False,
                 'reason': type(exc).__name__, 'diagnostic': detail[:500]}
 
 
 def validate_classification(value):
     if (not isinstance(value, dict) or value.get('label') not in LABELS
-            or value['label'] == 'HOST_VISIBLE' and
-            (value.get('host_verified') is not True or value.get('main_subject_verified') is not True)):
-        raise CacheIdentityError('unproven_host_classification')
+            or value['label'] == 'HOST_VISIBLE' and value.get('subject_evidence') is not True):
+        raise CacheIdentityError('unproven_person_subject_classification')
     return value
 
 
@@ -149,7 +203,7 @@ def next_frames(clip, budget, previous, seed):
     return new
 
 
-def estimate(clips, samples):
+def estimate_v4(clips, samples):
     durations = [(c['source_end_frame']-c['source_start_frame'])/c['fps'] for c in clips]
     total = sum(durations)
     lower = ratio = 0.0
@@ -182,7 +236,7 @@ def estimate(clips, samples):
     status = ('BLOCKED' if errors else 'UNCERTAIN' if uncertain or not coverage else
               'PASS' if lower > POLICY['threshold_exclusive'] else 'REPAIRABLE' if ratio <= 0.70 else 'UNCERTAIN')
     return {'host_visible_ratio_estimate': ratio, 'host_visible_ratio_lower_bound': lower,
-            'full_plan_coverage': coverage, 'host_identity_verified': not uncertain and not errors,
+            'full_plan_coverage': coverage, 'person_subject_classified': not uncertain and not errors,
             'status': status, 'statistical_claim': 'temporal-block-capped heuristic; no IID/video confidence guarantee'}
 
 
@@ -197,7 +251,8 @@ def audit(paths, plan, sources, detector):
         clips = variant['clips']
         for c in clips:
             clock = clocks[c['source_file']]
-            if (clock.get('mapping') != 'decoded-cfr-v3' or abs(clock['fps']-c['fps']) > 1e-5
+            if (clock.get('mapping') not in ('decoded-cfr-v3', 'decoded-cfr-with-origin-v4')
+                    or abs(clock['fps']-c['fps']) > 1e-5
                     or c['source_start_frame'] < 0 or c['source_end_frame'] > clock['frame_count']):
                 raise CacheIdentityError('plan_source_frame_clock_mismatch')
         budgets = allocation(clips)
@@ -210,10 +265,10 @@ def audit(paths, plan, sources, detector):
                 for frame in new:
                     name = clip['source_file']
                     expected = identity(paths, 'vision_frame', signatures[name], classifier,
-                                        {'protocol': CONTRACT}, frame)
+                                        {'protocol': FRAME_CACHE_PROTOCOL}, frame)
                     def compute(n=name, f=frame):
                         with span('frame_classification', 1):
-                            value = validate_classification(classify_frame(sources[n], f, detector))
+                            value = validate_classification(classify_frame(sources[n], f, detector, fps=clip['fps']))
                             if value['label'] == 'DETECTOR_ERROR':
                                 # Failure is evidence, never a reusable valid cached classification.
                                 raise CacheIdentityError('detector_error: '+str(value.get('diagnostic') or value.get('reason') or 'unclassified')[:500])

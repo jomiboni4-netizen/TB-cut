@@ -2,6 +2,7 @@
 import argparse, json, shutil, subprocess
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
+from workbook_runtime import preferred_node
 
 REQUIRED = ["AGENTS.md", "PROJECT_RULES.md", "config/content_rules.json", "config/vision_rules.json"]
 
@@ -9,7 +10,7 @@ def main():
     ap = argparse.ArgumentParser(description="Check TB Cut V2 project health")
     ap.add_argument("--root", default=".")
     ap.add_argument("--workspace")
-    ap.add_argument("--node", default="node")
+    ap.add_argument("--node", default=None)
     args = ap.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
@@ -32,7 +33,7 @@ def main():
     for cmd in ("python3", "ffmpeg", "ffprobe"):
         if shutil.which(cmd) is None: warnings.append(f"command not found: {cmd}")
     try:
-        result = subprocess.run([args.node, str(root / "scripts/check_workbook_dependencies.mjs")],
+        result = subprocess.run([args.node or preferred_node(), str(root / "scripts/check_workbook_dependencies.mjs")],
                                 capture_output=True, text=True, timeout=60)
         if result.returncode:
             errors.append("workbook dependency check failed: " + result.stderr.strip())

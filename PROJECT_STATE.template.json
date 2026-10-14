@@ -31,5 +31,8 @@
       "local_model_weights"
     ]
   },
-  "batch_overrides": {}
+  "batch_overrides": {
+    "skip_blank_titles": true,
+    "preserve_blank_row_indices": true
+  }
 }

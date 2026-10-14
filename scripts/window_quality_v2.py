@@ -40,8 +40,13 @@ def main() -> None:
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
     state = json.loads((paths.state_path).read_text(encoding="utf-8"))
-    video_dirs = [Path(path) for path in state.get("video_paths") or [] if Path(path).is_dir()]
-    media_by_name = {path.name: path for directory in video_dirs for path in directory.glob("*.mp4")}
+    video_inputs = [Path(path) for path in state.get("video_paths") or []]
+    media_by_name = {
+        media.name: media
+        for item in video_inputs
+        for media in (item.glob("*.mp4") if item.is_dir() else [item])
+        if media.is_file() and media.suffix.lower() == ".mp4"
+    }
     for product_index in [int(value) for value in args.products.split(",") if value.strip()]:
         product_dir = paths.cache_dir / f"product_{product_index:02d}_rough"
         asr = load_checked_json(paths, product_dir / "window_asr.json", product_id=product_index, expected=identity)

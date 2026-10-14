@@ -15,8 +15,8 @@ from final_quality_gate import final_task, import_final_review
 def synthetic_vision(fps=10, classifier=None):
     """Replace decode/classification boundaries, run the real sampler/cache/gate."""
     import adaptive_vision
-    def host(*args):
-        return {'label': 'HOST_VISIBLE', 'host_verified': True, 'main_subject_verified': True,
+    def host(*args, **kwargs):
+        return {'label': 'HOST_VISIBLE', 'subject_evidence': True,
                 'reason': 'synthetic transport only'}
     with patch.object(adaptive_vision, 'frame_clock', return_value={
             'fps': fps, 'frame_count': 100000, 'pts_digest': digest(['synthetic pts', fps]), 'mapping': 'decoded-cfr-v3'}), \

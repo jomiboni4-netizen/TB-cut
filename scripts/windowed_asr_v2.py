@@ -8,11 +8,18 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
 from runtime_meta import expected_identity, load_checked_json, write_metadata
 
+from review_compute_cache import LazyModel
+
+
+def load_model(name):
+    from faster_whisper import WhisperModel
+    return WhisperModel(name, device="cpu", compute_type="int8", local_files_only=True)
 
 
 def fingerprint(path: Path) -> str:
@@ -30,20 +37,8 @@ def merge_windows(rows: list[dict]) -> list[dict]:
     return merged
 
 
-def load_model(name):
-    from faster_whisper import WhisperModel
-    return WhisperModel(name, device="cpu", compute_type="int8", local_files_only=True)
-
-def merge_windows(rows: list[dict]) -> list[dict]:
-    merged: list[dict] = []
-    for row in sorted(rows, key=lambda item: (item["source_file"], item["start"])):
-        if merged and merged[-1]["source_file"] == row["source_file"] and row["start"] <= merged[-1]["end"]:
-            merged[-1]["end"] = max(merged[-1]["end"], row["end"])
-        else:
-            merged.append(dict(row))
-    return merged
-
 def main() -> None:
+    started = time.perf_counter()
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")
     parser.add_argument("--workspace")
@@ -55,8 +50,13 @@ def main() -> None:
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
     state = json.loads((paths.state_path).read_text(encoding="utf-8"))
-    video_dirs = [Path(path) for path in state.get("video_paths") or [] if Path(path).is_dir()]
-    media_by_name = {path.name: path for directory in video_dirs for path in directory.glob("*.mp4")}
+    video_inputs = [Path(path) for path in state.get("video_paths") or []]
+    media_by_name = {
+        media.name: media
+        for item in video_inputs
+        for media in (item.glob("*.mp4") if item.is_dir() else [item])
+        if media.is_file() and media.suffix.lower() == ".mp4"
+    }
     ranges = {
         int(row["product_index"]): row
         for row in load_checked_json(paths, paths.cache_dir / "product_ranges.json", expected=identity, artifact_schema_version=1)["products"]
@@ -88,8 +88,8 @@ def main() -> None:
                 })
         jobs_by_product[product_index] = merge_windows(jobs)
 
-    from faster_whisper import WhisperModel
-    model = WhisperModel(args.model, device="cpu", compute_type="int8", local_files_only=True)
+    model = LazyModel(lambda: load_model(args.model))
+    cache_hits = computed = 0
     cache_root = paths.cache_dir / "asr_windows"
     for product_index, jobs in jobs_by_product.items():
         output_windows: list[dict] = []
@@ -104,6 +104,7 @@ def main() -> None:
                 if cached.get("model") != args.model:
                     raise SystemExit(f"局部ASR模型缓存不匹配：{cache_path}")
                 output_windows.append(cached)
+                cache_hits += 1
                 continue
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(suffix=".wav") as wav:
@@ -112,7 +113,7 @@ def main() -> None:
                     "-ss", str(job["start"]), "-i", str(media), "-t", str(job["end"] - job["start"]),
                     "-vn", "-ac", "1", "-ar", "16000", "-y", wav.name,
                 ], check=True)
-                segments_iter, _ = model.transcribe(
+                segments_iter, _ = model.get().transcribe(
                     wav.name,
                     language="zh",
                     beam_size=5,
@@ -146,6 +147,7 @@ def main() -> None:
             cache_path.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
             write_metadata(paths, cache_path, "windowed_asr_v2.py", identity=identity)
             output_windows.append(result)
+            computed += 1
         product_dir = paths.cache_dir / f"product_{product_index:02d}_rough"
         asr_path = product_dir / "window_asr.json"
         asr_path.write_text(
@@ -154,6 +156,12 @@ def main() -> None:
         )
         write_metadata(paths, asr_path, "windowed_asr_v2.py", product_id=product_index, identity=identity)
         print(f"商品{product_index} 局部ASR完成：{len(output_windows)} 个窗口")
+    elapsed = round(time.perf_counter() - started, 3)
+    stats_path = paths.cache_dir / "windowed_asr_compute_stats.json"
+    stats_path.write_text(json.dumps({"cache_hits": cache_hits, "computed_windows": computed,
+                                     "elapsed_seconds": elapsed, "compute_policy_version": 1}) + "\n", encoding="utf-8")
+    write_metadata(paths, stats_path, "windowed_asr_v2.py", identity=identity)
+    print(f"局部ASR缓存复用={cache_hits}，新计算={computed}，耗时={elapsed}秒")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,14 @@
 """Round 3 real sampler/cache/gate consumers with synthetic external execution boundaries."""
 import copy
+import hashlib
+import hmac
 import json
 from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import adaptive_vision as vision
 import registered_pipeline as pipeline
@@ -23,14 +26,22 @@ from compute_metrics import Metrics, scope
 
 
 def classification(label):
-    return {'label': label, 'host_verified': label == 'HOST_VISIBLE',
-            'main_subject_verified': label == 'HOST_VISIBLE', 'reason': 'synthetic boundary'}
+    return {'label': label, 'subject_evidence': label == 'HOST_VISIBLE', 'reason': 'synthetic boundary'}
 
 
 class AdaptiveVisionTests(unittest.TestCase):
     setUp = fixtures.ProjectResumeTests.setUp
     register = fixtures.ProjectResumeTests.register
     plan_ref = fixtures.ProjectResumeTests.plan
+
+    def test_frame_clock_accepts_proven_constant_pts_origin(self):
+        frames = {'frames': [{'best_effort_timestamp_time': f'{0.162+i/25:.3f}'}
+                             for i in range(10)]}
+        with patch.object(vision.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(frames))):
+            clock = vision.frame_clock(Path('synthetic.mp4'))
+        self.assertEqual(clock['mapping'], 'decoded-cfr-with-origin-v4')
+        self.assertAlmostEqual(clock['video_first_pts'], 0.162)
+        self.assertAlmostEqual(clock['fps'], 25)
 
     def audit(self, plan=None, classify=None, paths=None, fps=10):
         plan = plan or valid_plan()
@@ -41,18 +52,19 @@ class AdaptiveVisionTests(unittest.TestCase):
             body = vision.audit(paths, plan, {'001.mp4': self.video}, detector)
         return body, boundary.call_count
 
-    def test_one_minute_initial_sixteen_and_early_pass(self):
+    def test_one_minute_initial_sixteen_then_coverage_rounds(self):
         plan = valid_plan(); plan['variants'][0]['clips'][0]['source_end_frame'] = 600
         body, calls = self.audit(plan)
         row = body['variants'][0]
         self.assertEqual(row['rounds'][0]['new_points'], 16)
-        self.assertEqual(calls, 16)
+        self.assertGreater(calls, 16)
+        self.assertLessEqual(calls, 16*vision.POLICY['max_rounds'])
         self.assertEqual(row['status'], 'PASS')
         validate_vision(plan, body, self.paths)
 
     def test_near_seventy_percent_not_pass_and_five_distinct_rounds(self):
         count = [0]
-        def mixed(*args):
+        def mixed(*args, **kwargs):
             count[0] += 1
             return classification('HOST_VISIBLE' if count[0] % 10 < 7 else 'NO_PERSON')
         body, calls = self.audit(classify=mixed)
@@ -63,9 +75,20 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertEqual(len({s['frame'] for s in row['samples']}), calls)
 
     def test_low_coverage_adds_samples_then_repairable(self):
-        body, calls = self.audit(classify=lambda *args: classification('NO_PERSON'))
+        body, calls = self.audit(classify=lambda *args, **kwargs: classification('NO_PERSON'))
         self.assertEqual(calls, 70)
         self.assertEqual(body['variants'][0]['status'], 'REPAIRABLE')
+
+    def test_exactly_seventy_percent_is_not_pass(self):
+        clip = valid_plan()['variants'][0]['clips'][0]
+        clip['source_end_frame'] = 100
+        frames = [0, *range(10, 100, 10), 99]
+        samples = [{'clip_index': 0, 'frame': frame,
+                    'classification': classification('HOST_VISIBLE' if 1 <= i <= 7 else 'NO_PERSON')}
+                   for i, frame in enumerate(frames)]
+        result = vision.estimate([clip], samples)
+        self.assertAlmostEqual(result['host_visible_ratio_estimate'], .70)
+        self.assertEqual(result['status'], 'REPAIRABLE')
 
     def test_long_closeup_short_host_duration_weight(self):
         plan = valid_plan()
@@ -74,7 +97,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         long['source_end_frame'] = 490
         short['source_start_frame'], short['source_end_frame'] = 700, 710
         plan['variants'][0]['clips'] = [long, short]
-        body, _ = self.audit(plan, lambda media, frame, detector: classification('HOST_VISIBLE' if frame >= 700 else 'CLOTHING_CLOSEUP'))
+        body, _ = self.audit(plan, lambda media, frame, detector, **kwargs: classification('HOST_VISIBLE' if frame >= 700 else 'CLOTHING_CLOSEUP'))
         self.assertAlmostEqual(body['variants'][0]['host_visible_ratio_estimate'], 0.02)
         self.assertNotEqual(body['variants'][0]['status'], 'PASS')
 
@@ -82,22 +105,64 @@ class AdaptiveVisionTests(unittest.TestCase):
         for label in ('OTHER_PERSON', 'CLOTHING_CLOSEUP'):
             detector = self.material/'frame-detector'
             detector.write_text(label)
-            body, _ = self.audit(classify=lambda *args: classification(label))
+            body, _ = self.audit(classify=lambda *args, **kwargs: classification(label))
             self.assertEqual(body['variants'][0]['host_visible_ratio_estimate'], 0)
             self.assertEqual(body['variants'][0]['status'], 'REPAIRABLE')
 
     def test_error_blocks_and_is_not_reusable_cache(self):
-        body, first = self.audit(classify=lambda *args: classification('DETECTOR_ERROR'))
+        body, first = self.audit(classify=lambda *args, **kwargs: classification('DETECTOR_ERROR'))
         self.assertEqual(body['variants'][0]['status'], 'BLOCKED')
         self.assertEqual(list(directory(self.paths, 'vision_frame').glob('*.json')), [])
-        _, second = self.audit(classify=lambda *args: classification('DETECTOR_ERROR'))
+        _, second = self.audit(classify=lambda *args, **kwargs: classification('DETECTOR_ERROR'))
         self.assertEqual(first, second)
 
-    def test_qwen_unavailable_keeps_uncertain_no_fake_host(self):
-        body, _ = self.audit(classify=lambda *args: classification('UNCERTAIN'))
+    def test_no_identity_registry_or_qwen_is_required(self):
+        body, _ = self.audit(classify=lambda *args, **kwargs: classification('UNCERTAIN'))
         self.assertEqual(body['variants'][0]['status'], 'UNCERTAIN')
-        self.assertEqual(body['classifier']['parameters']['qwen'], 'disabled_no_verified_authorized_model')
-        with self.assertRaises(CacheIdentityError): validate_vision(valid_plan(), body, self.paths)
+        self.assertNotIn('host_reference', body['classifier'])
+        self.assertNotIn('qwen', body['classifier']['parameters'])
+
+    def test_frame_geometry_classifies_prominent_body_face_and_pose(self):
+        from unittest.mock import Mock
+        payloads = [
+            {'best_body': {'confidence': .95, 'height': .6, 'width': .35, 'area': .25}, 'best_face': {}, 'best_pose': {}, 'has_person_signal': True},
+            {'best_body': {}, 'best_face': {'confidence': .9, 'height': .12, 'area': .01}, 'best_pose': {}, 'has_person_signal': True},
+            {'best_body': {}, 'best_face': {}, 'best_pose': {'points': 12, 'height': .55, 'area': .2}, 'has_person_signal': True},
+            {'best_body': {'confidence': .9, 'height': .12, 'width': .08, 'area': .02}, 'best_face': {}, 'best_pose': {}, 'has_person_signal': True},
+            {'best_body': {}, 'best_face': {}, 'best_pose': {}, 'has_person_signal': False},
+        ]
+        expected = ['HOST_VISIBLE', 'HOST_VISIBLE', 'HOST_VISIBLE', 'UNCERTAIN', 'NO_PERSON']
+        detector = self.material/'feature-detector'; detector.write_text('synthetic')
+        for observations, label in zip(payloads, expected):
+            def run(command, **kwargs):
+                if command[0].endswith('ffmpeg'):
+                    Path(command[-1]).write_bytes(b'frame')
+                    return Mock(stdout='', stderr='')
+                return Mock(stdout=json.dumps({'protocol':'apple-frame-v4','observations':observations}), stderr='')
+            with patch.object(vision.subprocess, 'run', side_effect=run):
+                result = vision.classify_frame(self.video, 0, detector)
+            self.assertEqual(result['label'], label)
+            self.assertEqual(result.get('subject_evidence', False), label == 'HOST_VISIBLE')
+
+    def test_different_people_require_no_identity_match(self):
+        body, _ = self.audit(classify=lambda *args, **kwargs: classification('HOST_VISIBLE'))
+        self.assertEqual(body['variants'][0]['status'], 'PASS')
+
+    def test_missing_identity_fields_never_block_visible_person(self):
+        self.assertTrue(vision.validate_classification(classification('HOST_VISIBLE'))['subject_evidence'])
+        with self.assertRaisesRegex(CacheIdentityError, 'unproven_person_subject'):
+            vision.validate_classification({'label': 'HOST_VISIBLE', 'host_verified': False})
+
+    def test_old_classifier_contract_cannot_validate_as_current(self):
+        from codex_worker import key
+        body, _ = self.audit()
+        for old_contract in ('host-strata-v3', 'person-subject-strata-v4'):
+            legacy = copy.deepcopy(body)
+            legacy['contract'] = old_contract
+            legacy['seal'] = hmac.new(key(self.paths), digest({k: v for k, v in legacy.items() if k != 'seal'}).encode(),
+                                      hashlib.sha256).hexdigest()
+            with self.assertRaisesRegex(CacheIdentityError, 'contract_or_plan_changed'):
+                validate_vision(valid_plan(), legacy, self.paths)
 
     def test_cut_change_invalidates_sealed_vision(self):
         body, _ = self.audit()
@@ -123,7 +188,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         body, calls = self.audit()
         original = vision.classifier_identity
         def changed(detector):
-            value = original(detector); value['parameters']['human_confidence'] = .9
+            value = original(detector); value['parameters']['body_area'] = .9
             return value
         with patch.object(vision, 'classifier_identity', side_effect=changed):
             _, new_calls = self.audit()
@@ -167,7 +232,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         c['fps'] = 25; c['source_end_frame'] = 1250
         self.video.write_bytes(b'synthetic different 25fps media')
         body, _ = self.audit(plan, fps=25)
-        self.assertEqual(body['variants'][0]['samples'][-1]['frame'], 1249)
+        self.assertEqual(max(s['frame'] for s in body['variants'][0]['samples']), 1249)
 
     def test_vfr_or_mismatched_frame_clock_blocks(self):
         detector = self.material/'frame-detector'; detector.write_text('synthetic')

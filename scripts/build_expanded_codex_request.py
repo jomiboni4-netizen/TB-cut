@@ -17,28 +17,25 @@ from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 from runtime_meta import metadata_path
 from apply_range_overrides_v2 import signature, source_map, validate_global_ranges, validate_range
 from publish_confirmed_ranges import validate_confirmed_document
-
-
-FORBIDDEN = re.compile(
-    r"价格|价位|售价|到手价|成交价|优惠券|优惠|补贴|满减|立减|券后|平台券|红包|抽奖|"
-    r"福袋|倒计时|库存|关注|点赞|\d+\s*(?:元|块钱|号链接)|几号链接|上车|拍下|"
-    r"欢迎.{0,12}(?:来到|进入|宝宝|姐妹)|主播.{0,12}(?:后台|操作)|后台|流程|对焦|镜头|摄像头"
-)
+from semantic_evidence import FORBIDDEN, clean_cue
 
 
 def build_wide_candidates(cues: list[dict], stem: str, title: str) -> tuple[list[dict], list[dict]]:
-    """Keep every useful continuous run; impose no duration bound."""
+    """Keep useful clauses from mixed cues; preserve source references for audit."""
     kept_runs: list[list[dict]] = []
     removed: list[dict] = []
     current: list[dict] = []
-    for cue in cues:
-        if FORBIDDEN.search(str(cue.get("text") or "")):
+    for index, cue in enumerate(cues):
+        cue_ref = f"{stem}:{index + 1}"
+        kept, excluded = clean_cue(cue, cue_ref)
+        removed.extend({**row, "text": cue.get("text"), "source_stem": stem} for row in excluded)
+        if not kept:
             if current:
                 kept_runs.append(current)
                 current = []
-            removed.append({"start": cue["start"], "end": cue["end"], "text": cue["text"], "reason": "forbidden_content"})
             continue
-        current.append(cue)
+        for part in kept:
+            current.append({**cue, **part, "source_stem": stem})
     if current:
         kept_runs.append(current)
 
@@ -54,7 +51,10 @@ def build_wide_candidates(cues: list[dict], stem: str, title: str) -> tuple[list
             "asr_text": text,
             "local_title_matches": [term for term in title_terms if term in text],
             "subtitle": [
-                {"start": float(row["start"]), "end": float(row["end"]), "text": str(row["text"])}
+                {"start": float(row["start"]), "end": float(row["end"]), "text": str(row["text"]),
+                 "cue_ref": row.get("cue_ref"),
+                 "needs_cutpoint_check": bool(row.get("needs_cutpoint_check")),
+                 "source_cue_ref": row.get("source_cue_ref")}
                 for row in run
             ],
             "semantic_boundary": {
@@ -67,13 +67,13 @@ def build_wide_candidates(cues: list[dict], stem: str, title: str) -> tuple[list
     return candidates, removed
 
 
-def validate_accepted_ranges(document, meta, titles, index):
+def validate_accepted_ranges(document, meta, titles, index, product_ids):
     producer=meta.get("producer")
     if producer=="publish_confirmed_ranges.py":
-        validate_confirmed_document(document,titles,index)
+        validate_confirmed_document(document,titles,index,product_ids)
     elif producer=="apply_range_overrides_v2.py":
         rows=document.get("products")
-        if not isinstance(rows,list) or {r.get("product_index") for r in rows}!={r["product_index"] for r in titles}:
+        if not isinstance(rows,list) or {r.get("product_index") for r in rows}!=set(product_ids):
             raise CacheIdentityError("range_authority_unverified")
         sources=source_map(index)
         for row in rows:
@@ -103,7 +103,7 @@ def expanded_request(product, candidates, removed, range_digest):
              "仅 MiMo 负责语义选择；不得修改商品范围、决定物理切点或控制 Resolve"]}
     pool_duration=round(sum(float(r["time_range"]["end"])-float(r["time_range"]["start"]) for r in candidates),3)
     return {"schema_version":1,"pipeline_version":"2.1","product_index":product["product_index"],
-            "rules":rules,"model":"mimo-v2.5-pro","product_range":{"start":product["global_start"],
+            "rules":rules,"model":"mimo-v2.6-pro","product_range":{"start":product["global_start"],
             "end":product["global_end"],"duration":duration,"basis":product.get("range_basis")},
             "product_range_sha256":range_digest,"candidates":candidates,"local_forbidden_cues":removed,
             "candidate_pool_summary":{"segment_count":len(candidates),"duration":pool_duration,
@@ -122,12 +122,12 @@ def build_requests(paths, product_ids):
         range_meta=read_metadata(range_path)
         titles_doc=load_checked_json(paths,titles_path,expected=identity)
         index=load_checked_json(paths,index_path,expected=identity,artifact_schema_version=1)
-        validate_accepted_ranges(ranges_doc,range_meta,titles_doc["products"],index)
+        batch_ids=snapshot.state.get("batch",{}).get("product_ids") or []
+        validate_accepted_ranges(ranges_doc,range_meta,titles_doc["products"],index,batch_ids)
         ranges={int(r["product_index"]):r for r in ranges_doc["products"]}
         title_by_id={int(r["product_index"]):r for r in titles_doc["products"]}
-        if set(ranges)!=set(title_by_id):raise CacheIdentityError("accepted_range_product_set_incomplete")
+        if set(ranges)!=set(batch_ids):raise CacheIdentityError("accepted_range_product_set_incomplete")
         if not requested.issubset(ranges):raise ValueError("unknown_or_missing_product_range")
-        if len(ranges)!=len(title_by_id):raise CacheIdentityError("accepted_range_product_set_incomplete")
         source_rows={r["source_stem"]:r for r in index["sources"]}
 
         cues=index["cues"];by_source={}

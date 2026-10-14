@@ -18,6 +18,7 @@ If a current user instruction conflicts with a persistent rule, obey the current
 
 ## 1. Role boundaries
 
+- Resolve 连接统一走 `scripts/resolve_connection.py`；只读入口为 `scripts/resolve_connection_doctor.py`。遵循 `PROJECT_RULES.md` 的沙盒外运行、自动网络回退和重连诊断要求；不要另写仅测试本机的临时连接脚本。
 - Codex is the orchestrator and exception handler, not the default worker for bulk subtitle/media analysis.
 - Prefer local scripts/models whenever they can complete a task reliably.
 - MiMo is an authorized semantic reviewer/selector, not the main conversation model and not the final hard-rule authority.

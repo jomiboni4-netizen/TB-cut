@@ -14,13 +14,6 @@ from runtime_paths import resolve_runtime_paths
 from runtime_meta import expected_identity, load_checked_json, write_metadata
 
 
-REQUIRED_CLOSURE = (
-    "enumerations_resolved",
-    "references_resolved",
-    "independent_opening",
-    "complete_ending",
-    "forbidden_content_absent",
-)
 ALLOWED_ROLES = {"product_intro", "selling_point", "evidence", "experience", "closing"}
 FORBIDDEN = re.compile(r"价格|价位|售价|到手价|成交价|优惠券|优惠|补贴|满减|立减|券后|平台券|红包|抽奖|\d+\s*(?:元|块钱|号链接)")
 CONNECTOR_OPENING = re.compile(r"^(?:嗯|呃|啊|对|好|那)*(?:然后|所以|但是|而且|另外|接着|因为|同时)")
@@ -117,10 +110,8 @@ def main() -> None:
     normalized_variants: list[dict] = []
     for variant in variants:
         variant_id = str(variant["variant_id"])
+        # MiMo's closure_check is retained as an untrusted annotation only.
         closure = variant.get("closure_check") or {}
-        for key in REQUIRED_CLOSURE:
-            if closure.get(key) is not True:
-                errors.append({"variant_id": variant_id, "code": "CLOSURE_FAILED", "field": key})
         timeline = variant.get("timeline")
         if not isinstance(timeline, list) or not timeline:
             errors.append({"variant_id": variant_id, "code": "EMPTY_TIMELINE"})
@@ -199,8 +190,11 @@ def main() -> None:
         "schema_version": 2,
         "pipeline_version": "2.1",
         "product_index": request.get("product_index"),
-        "passed": not errors,
-        "status": audit_status(errors),
+        "hard_rules_passed": not errors,
+        "passed": False,
+        "status": "REPAIRABLE" if errors else "REVIEW_PENDING",
+        "independent_codex_review": "REVIEW_PENDING",
+        "mimo_closure_check_used_as_evidence": False,
         "variant_statuses": {row["variant_id"]: row["status"] for row in normalized_variants},
         "variant_count": len(normalized_variants),
         "durations": [row["duration"] for row in normalized_variants],
@@ -208,7 +202,9 @@ def main() -> None:
     }
     paths.runtime_argument(args.audit).write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_metadata(paths, paths.runtime_argument(args.audit), "audit_mimo_v2.py", product_id=request.get("product_index"), identity=identity)
-    print(f"商品{request.get('product_index')} 粗审={'通过' if not errors else '失败'} 方案={len(normalized_variants)} 错误={len(errors)}")
+    print(f"商品{request.get('product_index')} 结构门禁={'通过' if not errors else '需返修'} "
+          f"独立语义审核={'待Codex' if not errors else '未通过'} "
+          f"方案={len(normalized_variants)} 错误={len(errors)}")
     if errors:
         raise SystemExit(2)
 

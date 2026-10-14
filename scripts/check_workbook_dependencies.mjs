@@ -6,7 +6,9 @@ import { createHash } from 'node:crypto';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 export async function checkDependencies() {
-  const lock = JSON.parse(await fs.readFile(new URL('../workbook-dependencies.lock.json', import.meta.url), 'utf8'));
+  // Explicit reviewed upgrade profile; never infer or bless whichever package happens to be installed.
+  const profile = new URL('../config/workbook-runtime-v4.lock.json', import.meta.url);
+  const lock = JSON.parse(await fs.readFile(profile, 'utf8'));
   if (process.version !== `v${lock.node}`) throw new Error('workbook_node_version_mismatch');
   if (process.platform !== lock.platform || process.arch !== lock.arch) throw new Error('workbook_platform_mismatch');
   const entry = fileURLToPath(import.meta.resolve('@oai/artifact-tool'));

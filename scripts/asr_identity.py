@@ -1,5 +1,6 @@
 """Local weights and actual inference settings; never download on identity lookup."""
 from pathlib import Path
+import os
 from runtime_meta import CacheIdentityError, _sha256
 from project_registry import digest
 from compute_metrics import span
@@ -12,6 +13,16 @@ PARAMETERS = {'language': 'zh', 'beam_size': 5, 'vad_filter': True, 'word_timest
 
 
 def model_identity(name):
+    try:
+        import faster_whisper
+    except ImportError:
+        if os.environ.get('TB_CUT_ASR_WORKER') == '1':
+            raise CacheIdentityError('local_asr_model_weights_unavailable')
+        from asr_runtime import remote_identity
+        try:
+            return remote_identity(name)
+        except (CacheIdentityError, OSError) as exc:
+            raise CacheIdentityError('local_asr_model_weights_unavailable') from exc
     try:
         from faster_whisper.utils import download_model
         folder = Path(name) if Path(name).is_dir() else Path(download_model(name, local_files_only=True))

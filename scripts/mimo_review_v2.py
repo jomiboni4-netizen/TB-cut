@@ -58,20 +58,110 @@ def compact_request(document: dict) -> dict:
         },
     }
     if document.get("task") == "repair_failed_variants":
+        candidates = document.get("remaining_candidate_pool") or candidates
         compact.update({
             "task": "repair_failed_variants",
             "repair_variants": document.get("repair_variants") or [],
             "failed_reasons": document.get("failed_reasons") or {},
             "locked_variants": document.get("locked_variants") or [],
             "previous_variants": document.get("previous_variants") or [],
-            "remaining_candidate_pool": document.get("remaining_candidate_pool") or [],
+            "remaining_candidate_pool": candidates,
             "repair_attempt": document.get("repair_attempt"),
             "repair_limit": document.get("repair_limit"),
         })
     return compact
 
 
-def prompt(document: dict) -> str:
+def understanding_prompt(document: dict) -> str:
+    compact = {
+        "stage": "A_understand_and_extract",
+        "product_title": document.get("product_title"),
+        "windows": document.get("windows") or [],
+        "required_output": {
+            "product_identity": {"match": "MATCH|PRODUCT_UNCERTAIN|MISMATCH", "evidence": [], "conflicts": []},
+            "windows": [{"window_id": "w01", "role": "formal_explanation|teaser|outfit_mention|return_supplement|uncertain",
+                         "evidence": "", "sentence_groups": [{"group_id": "g01", "refs": ["q0001"],
+                         "text": "must exactly match cited cleaned source text", "selling_point_category": "",
+                         "claim": "", "relations": [], "standalone": True,
+                         "needs_context": [], "product_attribution": "MATCH|OTHER_PRODUCT|PRODUCT_UNCERTAIN"}]}],
+            "excluded": [{"refs": [], "reason": "other_product|low_value|duplicate|promotion"}],
+            "insufficient_reason": "",
+        },
+    }
+    return (
+        "只输出JSON。你只做阶段A：理解商品归属并提取字幕句群，不组装视频、不选物理切点。"
+        "Excel商品标题/编号用于标识商品；链接号只是辅助线索。按口播品类、面料、版型、颜色、结构和上下文判断。"
+        "events中的link_announcement只说明该时刻有人报链接号，数字已遮蔽；不得由此认定商品或切换边界。"
+        "区分提前预告、搭配提及、正式讲解和回头补充；不同商品描述相似时标PRODUCT_UNCERTAIN并写冲突。"
+        "逐窗口检查独立商品特征和反证；不能因相邻、同一模特搭配或先前报链接就自动归属。"
+        "每个句群必须引用输入中的原始refs，text须为这些来源的逐字拼接，不得改写或补造。"
+        "提取卖点类别、具体主张、原文、引用时间、因果/转折/列举/指代关系、能否独立使用及需保留上下文。"
+        "链接号不能决定范围；窗口是粗略候选，可以多个、不连续且较宽。被标记需切点检查的句子不能声称可直接剪。"
+        "输入已经本地去除了促销禁用子句；不得推测被删内容。" +
+        json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def assembly_prompt(document: dict) -> str:
+    compact_groups = []
+    for group in document.get("verified_groups") or []:
+        refs = group.get("actual_refs") or group.get("source_refs") or []
+        by_source = {}
+        for ref in refs:
+            source = str(ref.get("source_alias") or ref.get("source") or ref.get("source_stem") or "")
+            start = ref.get("local_start", ref.get("start"))
+            end = ref.get("local_end", ref.get("end"))
+            if source and isinstance(start, (int, float)) and isinstance(end, (int, float)) and end > start:
+                by_source.setdefault(source, []).append((float(start), float(end)))
+        spans = []
+        for source, intervals in sorted(by_source.items()):
+            intervals.sort()
+            left, right = intervals[0]
+            for start, end in intervals[1:]:
+                if start <= right:
+                    right = max(right, end)
+                else:
+                    spans.append([source, round(left, 3), round(right, 3)])
+                    left, right = start, end
+            spans.append([source, round(left, 3), round(right, 3)])
+        compact_groups.append({
+            "group_id": group.get("group_id"),
+            "text": group.get("text", ""),
+            "category": group.get("selling_point_category", group.get("category", "")),
+            "claim": group.get("claim", ""),
+            "relations": group.get("relations", []),
+            "standalone": group.get("standalone", True),
+            "needs_context": group.get("needs_context", []),
+            "spans": spans,
+        })
+    compact = {
+        "stage": "B_assemble_from_verified_sentence_groups",
+        "product_title": document.get("product_title"),
+        "verified_groups": compact_groups,
+        "locked_variants": document.get("locked_variants") or [],
+        "repair_variants": document.get("repair_variants") or [],
+        "failed_reasons": document.get("failed_reasons") or {},
+        "required_output": {"selected_variants": [{"variant_id": "variant_1",
+                          "group_ids": ["g01", "g02"], "focus": "简短卖点组合"}],
+                          "insufficient_reason": "", "duplicate_remove": []},
+    }
+    return (
+        "只输出JSON。阶段A已核验商品、原文和来源，不要重判、复述或改写。"
+        "仅用完整句群，按顺序输出group_ids及简短focus；时长按spans估算。"
+        "最多三版；允许零版并给insufficient_reason，不凑数。每版严格>45s且<60s；版本间不得复用句群或重叠spans。"
+        "遵守relations/needs_context中的因果、转折和指代，不机械保留‘因为’。模型自报closure不作为审核证据。"
+        "不得生成字幕、时间或来源；音频切点、同步、人物比例及最终语义须本地审核。" +
+        json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def prompt(document: dict, stage: str = "assemble") -> str:
+    if stage == "understand":
+        return understanding_prompt(document)
+    if stage == "assemble" and "verified_groups" in document:
+        return assembly_prompt(document)
+    if stage not in {"assemble", "repair"}:
+        raise ValueError("unknown_mimo_semantic_stage")
     compact = compact_request(document)
     repair = document.get("task") == "repair_failed_variants"
     task_rule = (
@@ -98,6 +188,7 @@ def main() -> None:
     parser.add_argument("--request", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument("--stage", choices=("understand", "assemble", "repair"), default="assemble")
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--workspace")
     args = parser.parse_args()
@@ -130,8 +221,8 @@ def main() -> None:
         os.write(descriptor, request_digest.encode())
         os.close(descriptor)
         payload = {
-            "model": "mimo-v2.5-pro",
-            "input": prompt(document),
+            "model": "mimo-v2.6-pro",
+            "input": prompt(document, args.stage),
             "temperature": 0.1,
         }
         meta_path.write_text(json.dumps({"request_digest": request_digest, "status": "in_progress"}, indent=2) + "\n", encoding="utf-8")

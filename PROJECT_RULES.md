@@ -3,6 +3,7 @@
 ## Working communication
 
 - Report progress in Chinese.
+- 成片按每组三个商品执行“检查 + 修复”：发现问题或重点复核项后直接核实并修复，全部硬审核通过后写入达芬奇目标时间线，回读验证后发送 Mac 系统通知；不得只报告待修问题就结束本组。
 - Keep advancing through safe, in-scope steps without pausing; stop only for required authorization or a hard blocker.
 
 ## Git and public repository workflow
@@ -27,10 +28,13 @@
 
 ## 标题数据与商品编号
 
+
+
 - 标题来源仅为当前 `PROJECT_STATE.json.title_path` 指定的工作簿；正式生成器不以旧 `titles.json` 为输入。
 - 当前生成路径要求工作簿恰有一个可见工作表；第一行必须各有一个精确命名的“编码 ID”和“标题”表头。`sheet` 保存实际读取的工作表名，不使用历史缓存名称。
-- 工作簿中第一个有效商品数据行定义为 `product_index=1`，对应 1号链接；其后按有效商品行顺序连续递增，不使用 Excel 物理行号。
-- 仅完全空白行跳过且不占编号。非空行缺少编码 ID 或标题时，整个生成过程失败，不允许静默跳过或跳号。编码 ID 必须唯一，标题必须为非空文本。
+- 第一行是表头，商品编号按工作簿原数据行位置确定：`product_index=Excel物理行号-1`，不得因空标题而压缩编号。
+- 空标题行不剪辑，但必须记录原编号、工作表行号及可用编码 ID 的占位；完全空白数据行也保留编号占位。有标题但缺少编码 ID 时生成失败；所有非空编码 ID 必须唯一。
+- 默认启用 `batch_overrides.skip_blank_titles=true` 和 `batch_overrides.preserve_blank_row_indices=true`，两项均纳入输入身份指纹。占位不进入剪辑商品列表。旧压缩编号成果按编码 ID 对照原行号，禁止直接用旧编号匹配；旧编号派生方案须标记过期后重新核验。
 - `encoding_id` 保持字符串语义。文本编码原样保留，前导零不得丢失；拒绝编码前后空白。数字编码仅接受可无损表示的非负整数（少于 16 位），允许 General、文本格式或纯零填充格式；按零填充宽度保留前导零。精度、格式或类型不明确时拒绝生成，不猜测业务 ID。
 - 为避免隐式取值，当前生成器拒绝合并单元格、公式及隐藏行列，不自动展开或忽略这些结构。
 - 标题工作簿顺序定义商品编号，但不定义直播中的商品时间边界；范围定位仍以真实链接锚点和时间轴规则为准。
@@ -43,6 +47,7 @@
 
 - Target: up to 3 finished variants per product.
 - Normal expectation is 3; if only 2 or 1 can pass all hard rules, output fewer.
+- Stage B must examine the full verified sentence-group pool once and jointly allocate content and nonoverlapping source time toward 3 distinct variants; finding the first valid variant does not end the search. If fewer than 3 survive, record a concrete reason for each missing variant. Zero variants are allowed when none pass.
 - Never fabricate a third variant by repetition or filler.
 - Each final variant must be strictly `> 45.0s` and `< 60.0s`.
 - Recommended internal assembly target: roughly 48–56s to leave cut-point margin.
@@ -53,10 +58,13 @@
 - Candidate segments have no minimum or maximum duration.
 - A candidate may be a few seconds or longer than 60 seconds.
 - Candidate selection asks only: “Is there useful product-selling or wearing-experience content here?”
-- MiMo may select only the most meaningful subrange from a long candidate and discard the rest.
+- Codex performs all semantic review and selection, including choosing the most meaningful subranges from long candidates. Do not call MiMo or local semantic-review models for this work unless the user explicitly changes this default.
+- When the user explicitly authorizes MiMo semantic review, use `mimo-v2.6-pro`; it replaces the deprecated `mimo-v2.5-pro` identifier in project requests.
 - Do not force candidate blocks to resemble final duration.
-- Build the pool only after locating the complete product range. Title matches and link announcements are anchors, never the product range itself.
-- The complete range runs from the current high-confidence product start to the next real high-confidence product start or boundary; title-sheet row order is supporting evidence, not live-order truth.
+- For text analysis, first scan continuous subtitles for product attributes and create one or more broad semantic windows. Exact product start/end seconds are not required for this rough locator, and no rough window is a `product_ranges.json` certification.
+- Excel product number and encoding identify the catalog item; they do not identify its live position. Link numbers are auxiliary mentions only and have zero boundary/ranking authority. Use category, fabric, cut, color, structure and surrounding speech to locate formal explanations, teasers, outfit mentions and later supplements.
+- Compare title, spoken claims and current product evidence. If similar products, stale links, multi-SKU pages, or outfit references conflict, retain candidate products and mark `PRODUCT_UNCERTAIN`; do not auto-admit those sentences to a product pool. A confirmed range for physical editing remains a separate, explicitly validated artifact.
+- Accepted ranges and human boundary manifests cover exactly the current batch's `batch.product_ids`; each selected product still needs human-confirmed source-local start and end points. Other title rows are outside the batch and do not block it.
 - Apply clear banned-content cleaning across the complete range, then admit remaining useful content broadly. Candidate pool is wide-in; final output is strict-out.
 
 ## Allowed content
@@ -111,16 +119,19 @@ For variants of the same product:
 
 ## Visual/person rule
 
-- Final `host_visible_duration / final_duration` must be strictly greater than 70%.
-- The visible person is normally the host.
-- Clothing/product close-up without the host as the main visible subject does not count.
-- No-person shots do not count.
+- Final `host_visible_duration / final_duration` must be strictly greater than 70%. `HOST_VISIBLE` remains a compatibility label meaning a prominent visible person subject; it does not mean a registered or identity-verified host.
+- Count a clear full-body or half-body person in front of the camera, whether standing or seated, when they present clothing or explain the product. A sufficiently clear, prominent face or body pose can independently establish the person as a visible subject; identity consistency across shots is irrelevant.
+- Clothing/product close-ups without a prominent person, empty shots, and isolated hands/arms or other small body parts do not count. Use `UNCERTAIN` when the person-subject decision cannot be made reliably. Never require a face registry, person tracking, a host identity match, or Qwen to count a visible person.
+- Apple Vision human rectangles, face rectangles, and pose points feed the configurable geometry thresholds in `config/vision_rules.json`. A positive human signal below all subject thresholds remains non-counting and uncertain; detector execution errors are `BLOCKED`, never no-person evidence.
+- Sample each final physical plan with 16 initial points per minute, stratified over time and clips; add distinct samples for up to five passes. Weight by covered source time and apply the conservative lower-bound gate. `PASS` requires that lower bound to be strictly above 70%; after the cap, a measured ratio at or below 70% is `REPAIRABLE`, unresolved samples are `UNCERTAIN`, and decode/model/runtime failures are `BLOCKED`. Do not rescan forever or lower the threshold.
+- Classifier protocol, geometry configuration, detector binary, media identity, and exact final plan are part of the evidence identity. A change to cut points or the classifier invalidates the prior audit. Old classifier results cannot be reused as current evidence.
 - Long close-up/no-person sections should be removed when they are not required for semantic continuity.
 
-Local visual model order:
-1. Apple local Vision/model as primary classifier.
-2. Qwen 4B Vision only for low-confidence/uncertain samples.
-3. Qwen 8B Vision only if still uncertain.
+Local visual classifier:
+1. Use Apple Vision person, face and pose geometry to classify whether a prominent person is visibly in frame.
+2. Identity recognition and Qwen are not part of this audit. Unresolved visual evidence remains `UNCERTAIN`; do not escalate it to an identity check.
+
+Apple Vision person detection must run outside the Codex filesystem sandbox on this Mac. An ANE model-load failure or CoreVideo `-6662` / `CVPixelBuffer` allocation failure is an execution-environment error, not a no-person result; stop the audit and rerun outside the sandbox. Rebuild the cached probe whenever its Swift source is newer, and fail closed with the underlying Vision error instead of recording zero-person samples.
 
 Suggested labels:
 - `host_visible`
@@ -132,14 +143,19 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 ## Audio/cut-point rule
 
-- MiMo chooses semantic ranges; local tools choose final physical cut points.
+- Codex chooses semantic ranges; local tools choose final physical cut points.
 - Use SRT + local ASR/VAD + pauses/energy + frame boundaries for clean starts/ends.
 - Never hard-cut a half word or half sentence.
 - Local ASR should be windowed around selected ranges, not full-media retranscription by default.
-- MiMo timecodes are rough semantic bounds. If a natural sentence ending lies after the rough end, extend to the sentence boundary first; if this would exceed 60 seconds, remove or replace another low-value complete segment. Never meet duration by cutting a sentence tail.
+- Semantic timecodes are rough bounds. If a natural sentence ending lies after the rough end, extend to the sentence boundary first; if this would exceed 60 seconds, remove or replace another low-value complete segment. Never meet duration by cutting a sentence tail.
 - Tail closure risks include unfinished cause, condition, contrast, enumeration, reference, promise, and speech that continues as the same sentence for the next 1–3 seconds.
 
 ## Repair and exhaustion
+
+- 成片检查提速默认顺序：先用派生字幕索引和轻量硬规则确定语义修复方案，再集中进行局部 ASR 与画面复核；明显将被替换的片段不提前做昂贵检测。失败后只重新计算受影响的素材窗口，最终所有硬审核仍须通过。
+- 局部 ASR 合并同素材重叠窗口，每批仅使用一个按需加载的模型实例；缓存齐全时不加载模型，不通过降低识别质量提速。
+- 人物检测可复用 `scripts/review_compute_cache.py` 的物理范围缓存，键必须包含素材身份、大小/修改时间、精确检测范围及检测器内容指纹。说明、语义角色和时间线位置变化不要求重复计算相同源画面，但必须重算当前方案审核与完整方案摘要；缓存检测数据不代表写入授权。旧无指纹缓存不可直接提升为新缓存。
+- 每轮记录新计算量、缓存命中量和阶段耗时；只报告实测整轮提速，不将减少窗口数量当作实际耗时降幅。
 
 - Variant states are `PASS`, `REPAIRABLE`, and `EXHAUSTED`.
 - Duration misses, incomplete openings/endings, closure gaps, 65–70% host visibility, overlap, duplication, poor visuals, weak seams, and low-value blocks are repairable by default.
@@ -153,9 +169,14 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 ## Resolve
 
+- 所有连接、检查、写入和导出入口统一使用 `scripts/resolve_connection.py`，不得临时只调用 `scriptapp("Resolve")` 后就宣布未连接。Codex 在此 Mac 上直接于沙盒外运行 `python3 scripts/resolve_connection_doctor.py --root .` 做只读检查，再判断项目是否就绪。
+- 重连每次重新获取 API 对象并检查可读性；默认依次尝试本机、回环地址和当次 `en0` / `en1` 地址，最多四轮，不固定旧 IP。设置 `RESOLVE_HOST` 时尊重明确主机，不回退到其他网络主机。不得缓存跨达芬奇进程生命周期的对象。
+- 达芬奇关闭时无法连接；打开但尚未就绪时自动重试。检查进程默认二十秒超时；连接成功后仍验证当前项目、源/目标时间线。仅重试连接，绝不自动重放时间线写入。
+- 连接诊断保存在忽略的 `.cache/resolve_connection_status.json`。重连失败时先区分程序未运行、API 不可用、项目未打开或不匹配、检查超时，再说明实际阻塞；未经完整回退尝试不得要求用户改偏好设置或找旧记录。新窗口以本规则和统一脚本为准。
 - Automatically write only after all hard audits pass.
 - Source timeline is read-only.
 - Resolve project/source timeline/target timeline are user-specified per project/batch state.
+- During finished-variant repair, if a complete ending would collide with the following finished variant, the user authorizes shifting the subsequent finished clips later as one synchronized block, with their associated markers shifted by the same frame offset. Preserve clip order, source ranges, inter-variant gaps, audio/video synchronization, and properties; back up before writing and verify the shifted clips and markers afterward. Recheck pending placement plans against the latest timeline under this policy.
 - Validate before write, back up when appropriate, write, then validate after write.
 - Final reports include product-range and candidate-pool coverage, repair attempts/status, duration, host ratio, closure, overlap/duplication, meaningless-cut count, and seam-tail risk count.
 
@@ -168,7 +189,7 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 - P0: Favor preserving independently intelligible cause/effect sentences over mechanically retaining or deleting words such as “因为/所以”. Removing “因为” or a redundant lead-in may be appropriate only if the remaining speech is naturally complete and the actual audio cut has no eaten syllables; check meaning rather than keyword presence.
 - P1: Codex is the default semantic decision-maker for this correction effort. Treat MiMo as an optional, explicitly authorized comparison/assistive service, not as a proven replacement for final semantic review. Record failure cases using privacy-safe synthetic or locally approved excerpts; do not attribute quality differences to a model without matched-input evaluation.
 - P1: Optimize elapsed time using measured per-stage timing, repeated-input caching, batched/localized ASR and cut review, and adaptive person sampling; report baseline and after timings, quality regressions and cache hit counts rather than assuming most time is text processing.
-- P1: Replace the fixed 0.5-second person-detection cadence with stratified, adaptive sampling on final clip duration (initial default N=16 points per 60 seconds, proportional for shorter/longer clips). Additional disjoint N-point rounds focus on uncertain/near-threshold results, with up to five sampling passes and a conservative pass gate strictly over 70%. Never count vision exceptions/uncertain frames as confirmed host visibility, and never treat an inconclusive sample as PASS. Sample across all constituent clips, record points and detector version, and bind results to the exact final plan. Local Apple Vision first; Qwen assistance only on uncertain cases if actually installed and authorized. Validate on synthetic edge cases and separately on authorized real material before replacing a proven production detector.
+- P1: Replace the fixed 0.5-second person-detection cadence with stratified, adaptive sampling on final clip duration (initial default N=16 points per 60 seconds, proportional for shorter/longer clips). Additional disjoint N-point rounds focus on uncertain/near-threshold results, with up to five sampling passes and a conservative pass gate strictly over 70%. Never count vision exceptions/uncertain frames as confirmed visible-person time, and never treat an inconclusive sample as PASS. Sample across all constituent clips, record points and detector version, and bind results to the exact final plan. Validate synthetic edge cases and separately report authorized local real-frame observations. No identity model is required.
 
 ## One Resolve project, one path registration and isolated resumable processing (2026-10-12)
 

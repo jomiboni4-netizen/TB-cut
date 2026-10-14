@@ -23,6 +23,10 @@ def targets(paths):
     titles, _ = inputs(paths)
     values = [{'product_id': p['product_index'], 'encoding_id': p['encoding_id']} for p in titles['products']]
     state = json.loads(paths.state_path.read_text())
+    if state.get('trial'):
+        from trial_session import validate_trial
+        selected = set(validate_trial(paths)['products'])
+        values = [v for v in values if v['product_id'] in selected]
     if sorted(p['product_id'] for p in values) != sorted(state['batch']['product_ids']):
         raise CacheIdentityError('whole_project_target_set_not_registered_use_explicit_whole_project_init')
     return values
@@ -38,6 +42,9 @@ def schedule(paths, size=3):
     titles, _ = inputs(paths)
     complete_ids = sorted(p['product_index'] for p in titles['products'])
     state = json.loads(paths.state_path.read_text())
+    if state.get('trial'):
+        from trial_session import validate_trial
+        complete_ids = validate_trial(paths)['products']
     if sorted(state['batch']['product_ids']) != complete_ids:
         from init_project import initialize
         initialize(paths, products=complete_ids)  # Inherit confirmed project paths; groups never change this set.

@@ -9,6 +9,7 @@ from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
 from runtime_meta import expected_identity, load_checked_json, write_metadata
+from semantic_evidence import subtract_used_intervals
 
 
 def main() -> None:
@@ -41,6 +42,7 @@ def main() -> None:
     }
     previous = []
     locked = []
+    locked_intervals = []
     for variant in selection.get("variants", []):
         compact = {
             "variant_id": variant["variant_id"],
@@ -52,8 +54,14 @@ def main() -> None:
         previous.append(compact)
         if variant["variant_id"] not in failed:
             locked.append(compact)
-    used = {clip["source"] for variant in previous for clip in variant["timeline"] if clip.get("source")}
-    remaining = [row for row in request.get("candidates", []) if row.get("candidate_id") not in used]
+            for clip in variant.get("timeline", []):
+                candidate = next((row for row in request.get("candidates", [])
+                                  if row.get("candidate_id") == clip.get("source")), None)
+                if candidate:
+                    locked_intervals.append({"source_file": candidate.get("source_file"),
+                                             "start": clip.get("start"), "end": clip.get("end"),
+                                             "variant_id": variant["variant_id"]})
+    remaining = subtract_used_intervals(request.get("candidates", []), locked_intervals)
     request.update({
         "task": "repair_failed_variants",
         "repair_variants": failed,
@@ -61,6 +69,8 @@ def main() -> None:
         "locked_variants": locked,
         "previous_variants": previous,
         "remaining_candidate_pool": remaining,
+        "locked_source_intervals": locked_intervals,
+        "full_candidate_pool_scanned": bool(request.get("candidate_pool_complete", False)),
         "repair_attempt": attempt,
         "repair_limit": limit,
         "repair_log": list(request.get("repair_log") or []) + [{
@@ -70,6 +80,8 @@ def main() -> None:
             "removed_segments": [],
             "added_segments": [],
             "remaining_candidate_pool_count": len(remaining),
+            "locked_source_interval_count": len(locked_intervals),
+            "full_candidate_pool_scanned": bool(request.get("candidate_pool_complete", False)),
             "audit_result": audit.get("status", "REPAIRABLE"),
         }],
     })
