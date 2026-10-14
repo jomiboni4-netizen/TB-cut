@@ -98,6 +98,15 @@ class ColdStartContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'local_review_required'):
             require_complete_stage_b_pool(withheld)
 
+    def test_no_automatic_clean_fragment_still_requires_local_disposition(self):
+        row=dict(self.rows[0],text='点三号链接下单这件羊毛穿着柔软')
+        unit=dict(self.unit,unit_id='mixed',text=row['text'],rows=[row])
+        _,withheld=eligible_for_stage_b([unit])
+        self.assertEqual(withheld[0]['local_clean_candidates'],[])
+        self.assertEqual(withheld[0]['original_text'],row['text'])
+        with self.assertRaisesRegex(ValueError,'local_review_required'):
+            require_complete_stage_b_pool(withheld)
+
     def test_stage_A_outbound_preclean_and_product_gate(self):
         rows=[dict(self.rows[0],text='这件夹克用羊毛。点链接下单'),self.rows[1]]
         paragraph=dict(self.paragraph,rows=rows)

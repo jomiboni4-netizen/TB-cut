@@ -372,7 +372,7 @@ def eligible_for_stage_b(units):
 
 
 def require_complete_stage_b_pool(withheld):
-    if any(row['local_clean_candidates'] for row in withheld):
+    if withheld:
         raise ValueError('stage_B_mixed_unit_local_review_required_before_global_allocation')
 
 
