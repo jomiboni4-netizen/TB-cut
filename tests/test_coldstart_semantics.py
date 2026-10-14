@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from coldstart_semantics import (validate_unit, frame_append_spec, validate_selection,
                                  stage_a_payload, stage_b_payload, restore_b_aliases, require_product_match)
-from coldstart_semantics import eligible_for_stage_b
+from coldstart_semantics import eligible_for_stage_b, require_complete_stage_b_pool
 from semantic_evidence import FORBIDDEN
 
 
@@ -64,11 +64,26 @@ class ColdStartContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'missing_reason_for_underfilled'):
             validate_selection(selection,[unit],self.run)
         self.assertEqual(len(validate_selection(dict(selection,insufficient_reason='其余内容不足'),[unit],self.run)),1)
-        with self.assertRaisesRegex(ValueError,'outbound_metadata'):
-            stage_b_payload({'title':'测试商品'},[dict(unit,claim='点链接下单')],self.run)
+        metadata_payload=stage_b_payload({'title':'测试商品'},[dict(unit,claim='点链接下单')],self.run)
+        self.assertNotIn('点链接下单',metadata_payload['input'])
         kept,excluded=eligible_for_stage_b([unit,dict(unit,unit_id='bad',text='点链接下单')])
         self.assertEqual(len(kept),1)
-        self.assertEqual(excluded,[{'unit_id':'bad','reason':'raw_unit_contains_forbidden_content'}])
+        self.assertEqual(excluded[0]['unit_id'],'bad')
+        self.assertEqual(excluded[0]['reason'],'raw_unit_contains_forbidden_content')
+        self.assertEqual(excluded[0]['edit_status'],'PENDING_LOCAL_SEMANTIC_AND_AUDIO_REVIEW')
+
+    def test_mixed_unit_retains_clean_contiguous_raw_cues_locally(self):
+        rows=[dict(self.rows[0],text='点三号链接'),dict(self.rows[1],text='羊毛材质，'),dict(self.rows[2],text='穿着柔软。')]
+        unit=dict(self.unit,unit_id='mixed',text=''.join(r['text'] for r in rows),rows=rows)
+        kept,withheld=eligible_for_stage_b([unit])
+        self.assertEqual(kept,[])
+        self.assertEqual(len(withheld[0]['clean_full_cue_runs']),1)
+        candidate=withheld[0]['clean_full_cue_runs'][0]
+        self.assertEqual(candidate['source_ids'],['q1','q2'])
+        self.assertEqual(candidate['text'],'羊毛材质，穿着柔软。')
+        self.assertEqual(candidate['status'],'LOCAL_SEMANTIC_AND_CUTPOINT_REVIEW_REQUIRED')
+        with self.assertRaisesRegex(ValueError,'local_review_required'):
+            require_complete_stage_b_pool(withheld)
 
     def test_stage_A_outbound_preclean_and_product_gate(self):
         rows=[dict(self.rows[0],text='这件夹克用羊毛。点链接下单'),self.rows[1]]
@@ -85,7 +100,8 @@ class ColdStartContractTests(unittest.TestCase):
         require_product_match({'product_identity':{'match':'MATCH'},'units':[]})
 
     def test_chinese_number_prices_and_link_numbers_are_not_sent(self):
-        for text in ('九十九块，羊毛材质。','三号链接，羊毛材质。','一百元，羊毛材质。'):
+        for text in ('九十九块，羊毛材质。','三号链接，羊毛材质。','一百元，羊毛材质。',
+                     '九十九块八，羊毛材质。','199块8，羊毛材质。','满一百减三十，羊毛材质。'):
             self.assertIsNotNone(FORBIDDEN.search(text))
             row=dict(self.rows[0],text=text)
             payload=stage_a_payload(dict(self.paragraph,rows=[row]),{'title':'测试商品'},self.run)

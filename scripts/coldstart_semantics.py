@@ -317,7 +317,9 @@ def stage_b_payload(product, units, run, proposal=None):
           'target_variant_count':3,
           'global_nonoverlap_starting_point': public_proposal(proposal),
           'units':[{'unit_id':aliases[g['unit_id']],'text':g['text'],'source':g['source_alias'],'start':g['start'],'end':g['end'],
-                    'category':g['category'],'claim':g['claim'],'needs_context':g['needs_context'],
+                    'category':g['category'] if not FORBIDDEN.search(str(g['category'])) else '',
+                    'claim':g['claim'] if not FORBIDDEN.search(str(g['claim'])) else '',
+                    'needs_context':g['needs_context'] if not FORBIDDEN.search(json.dumps(g['needs_context'],ensure_ascii=False)) else [],
                     'visual_dependency':g.get('visual_dependency'),'local_review':'KEEP'} for g in units],
           'output_schema':{'selected_variants':[{'unit_ids':[],'focus':''}],'insufficient_reason':''}}
     if FORBIDDEN.search(json.dumps(body,ensure_ascii=False)):
@@ -330,16 +332,37 @@ def stage_b_payload(product, units, run, proposal=None):
             'reasoning':{'effort':'low'},'max_output_tokens':6000,'stream':True}
 
 
+def local_clean_source_runs(unit):
+    runs=[];current=[]
+    for row in unit.get('rows',[]):
+        cleaned=''.join(part['text'] for part in clean_cue(row,row['source_id'])[0])
+        if cleaned==row['text'] and not FORBIDDEN.search(row['text']):
+            current.append(row)
+        elif current:
+            runs.append(current);current=[]
+    if current:runs.append(current)
+    return [{'source_ids':[r['source_id'] for r in rows], 'source_stem':rows[0]['source_stem'],
+             'start':rows[0]['start'],'end':rows[-1]['end'],
+             'text':''.join(r['text'] for r in rows),
+             'status':'LOCAL_SEMANTIC_AND_CUTPOINT_REVIEW_REQUIRED'} for rows in runs]
+
+
 def eligible_for_stage_b(units):
-    kept=[];excluded=[]
+    kept=[];withheld=[]
     for g in units:
-        reason=None
-        if FORBIDDEN.search(g['text']):reason='raw_unit_contains_forbidden_content'
-        elif FORBIDDEN.search(json.dumps({k:g.get(k) for k in ('category','claim','needs_context')},ensure_ascii=False)):
-            reason='review_metadata_needs_local_cleaning'
-        if reason:excluded.append({'unit_id':g['unit_id'],'reason':reason})
+        if FORBIDDEN.search(g['text']):
+            withheld.append({'unit_id':g['unit_id'],'reason':'raw_unit_contains_forbidden_content',
+                             'original_source_ids':g['source_ids'],'original_text':g['text'],
+                             'original_claim':g.get('claim'),'original_product_attribution':g.get('product_attribution'),
+                             'clean_full_cue_runs':local_clean_source_runs(g),
+                             'edit_status':'PENDING_LOCAL_SEMANTIC_AND_AUDIO_REVIEW'})
         else:kept.append(g)
-    return kept,excluded
+    return kept,withheld
+
+
+def require_complete_stage_b_pool(withheld):
+    if any(row['clean_full_cue_runs'] for row in withheld):
+        raise ValueError('stage_B_mixed_unit_local_review_required_before_global_allocation')
 
 
 def restore_b_aliases(response, units):
@@ -385,11 +408,13 @@ def main():
         document=json.loads((paths.cache_dir/'candidate_paragraphs.json').read_text())
         local=json.loads((paths.cache_dir/'local_A_review.json').read_text())
         if local['run_id']!=run['run_id']:raise ValueError('local_A_wrong_run')
-        eligible,excluded=eligible_for_stage_b(local['kept_units'])
-        atomic_json(paths.cache_dir/'stage_B_outbound_exclusions.json',{'run_id':run['run_id'],'excluded':excluded})
+        eligible,withheld=eligible_for_stage_b(local['kept_units'])
+        atomic_json(paths.cache_dir/'stage_B_outbound_withheld_local_review.json',{'run_id':run['run_id'],
+                    'withheld_from_external_request':withheld,'editing_candidates_retained_locally':True})
+        require_complete_stage_b_pool(withheld)
         if not eligible:raise ValueError('stage_B_no_precleaned_units')
         proposal_file=paths.cache_dir/'stage_B_candidate_allocation.json'
-        proposal=json.loads(proposal_file.read_text())['variants'] if proposal_file.exists() and not excluded else None
+        proposal=json.loads(proposal_file.read_text())['variants'] if proposal_file.exists() and not withheld else None
         response=restore_b_aliases(request_once(paths,'B',stage_b_payload(document['product'],eligible,run,proposal),1),eligible)
         atomic_json(paths.cache_dir/'stage_B_selection.json',response)
         variants=validate_selection(response,eligible,run)

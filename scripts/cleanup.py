@@ -23,27 +23,33 @@ PROTECTED_NAMES = {
 
 def load_protected_paths(root: Path, workspace: Path | None = None):
     protected = {root / x for x in PROTECTED_NAMES}
-    state = (workspace or root) / "PROJECT_STATE.json"
-    protected.add(state)
-    if state.exists():
+    states = {root / 'PROJECT_STATE.json', (workspace or root) / 'PROJECT_STATE.json'}
+    for state in states:
+        protected.add(state)
+        if not state.exists():
+            continue
         try:
             s = json.loads(state.read_text(encoding="utf-8"))
             vals = []
             vals.append(s.get("title_path"))
-            vals.extend(s.get("subtitle_paths") or [])
-            vals.extend(s.get("video_paths") or [])
+            for field in ('subtitle_paths', 'video_paths'):
+                entries = s.get(field) or []
+                if not isinstance(entries, list):
+                    raise ValueError(f'invalid_{field}')
+                vals.extend(entries)
             for v in vals:
                 if v:
                     protected.add(Path(v).expanduser().resolve())
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"Cannot establish cleanup protection from {state}") from exc
     return protected
 
 def safe_target(root: Path, rel: str, protected):
+    root = root.resolve()
     p = (root / rel).resolve()
     if root not in p.parents and p != root:
         raise RuntimeError(f"Unsafe target outside root: {p}")
-    if p in protected:
+    if any(p == q or p in q.parents for q in (Path(item).resolve() for item in protected)):
         raise RuntimeError(f"Protected path: {p}")
     return p
 
