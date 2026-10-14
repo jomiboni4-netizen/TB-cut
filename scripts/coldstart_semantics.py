@@ -25,7 +25,7 @@ from mimo_responses import create_response, ResponseAPIError, MODEL
 from product_semantic_preview import parse_response
 
 
-VERSION = 'cold-continuous-v2-preclean'
+VERSION = 'cold-continuous-v3-local-mixed-review'
 MAX_A_REQUESTS = 16
 MAX_A_SECONDS = 1800
 
@@ -335,16 +335,27 @@ def stage_b_payload(product, units, run, proposal=None):
 def local_clean_source_runs(unit):
     runs=[];current=[]
     for row in unit.get('rows',[]):
-        cleaned=''.join(part['text'] for part in clean_cue(row,row['source_id'])[0])
+        parts,_=clean_cue(row,row['source_id'])
+        cleaned=''.join(part['text'] for part in parts)
         if cleaned==row['text'] and not FORBIDDEN.search(row['text']):
             current.append(row)
-        elif current:
-            runs.append(current);current=[]
+            continue
+        if current:runs.append(current);current=[]
     if current:runs.append(current)
-    return [{'source_ids':[r['source_id'] for r in rows], 'source_stem':rows[0]['source_stem'],
+    candidates=[{'source_ids':[r['source_id'] for r in rows], 'source_stem':rows[0]['source_stem'],
              'start':rows[0]['start'],'end':rows[-1]['end'],
              'text':''.join(r['text'] for r in rows),
              'status':'LOCAL_SEMANTIC_AND_CUTPOINT_REVIEW_REQUIRED'} for rows in runs]
+    for row in unit.get('rows',[]):
+        parts,_=clean_cue(row,row['source_id'])
+        if ''.join(part['text'] for part in parts)==row['text'] and not FORBIDDEN.search(row['text']):continue
+        for part in parts:
+            if part['text'] and not FORBIDDEN.search(part['text']):
+                candidates.append({'source_ids':[row['source_id']],'source_stem':row['source_stem'],
+                                   'start':row['start'],'end':row['end'],'text':part['text'],
+                                   'source_time_is_full_cue_envelope':True,
+                                   'status':'PARTIAL_CUE_AUDIO_CUTPOINT_UNVERIFIED'})
+    return candidates
 
 
 def eligible_for_stage_b(units):
@@ -354,14 +365,14 @@ def eligible_for_stage_b(units):
             withheld.append({'unit_id':g['unit_id'],'reason':'raw_unit_contains_forbidden_content',
                              'original_source_ids':g['source_ids'],'original_text':g['text'],
                              'original_claim':g.get('claim'),'original_product_attribution':g.get('product_attribution'),
-                             'clean_full_cue_runs':local_clean_source_runs(g),
+                             'local_clean_candidates':local_clean_source_runs(g),
                              'edit_status':'PENDING_LOCAL_SEMANTIC_AND_AUDIO_REVIEW'})
         else:kept.append(g)
     return kept,withheld
 
 
 def require_complete_stage_b_pool(withheld):
-    if any(row['clean_full_cue_runs'] for row in withheld):
+    if any(row['local_clean_candidates'] for row in withheld):
         raise ValueError('stage_B_mixed_unit_local_review_required_before_global_allocation')
 
 

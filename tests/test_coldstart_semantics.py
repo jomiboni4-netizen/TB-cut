@@ -77,11 +77,24 @@ class ColdStartContractTests(unittest.TestCase):
         unit=dict(self.unit,unit_id='mixed',text=''.join(r['text'] for r in rows),rows=rows)
         kept,withheld=eligible_for_stage_b([unit])
         self.assertEqual(kept,[])
-        self.assertEqual(len(withheld[0]['clean_full_cue_runs']),1)
-        candidate=withheld[0]['clean_full_cue_runs'][0]
+        self.assertEqual(len(withheld[0]['local_clean_candidates']),1)
+        candidate=withheld[0]['local_clean_candidates'][0]
         self.assertEqual(candidate['source_ids'],['q1','q2'])
         self.assertEqual(candidate['text'],'羊毛材质，穿着柔软。')
         self.assertEqual(candidate['status'],'LOCAL_SEMANTIC_AND_CUTPOINT_REVIEW_REQUIRED')
+        with self.assertRaisesRegex(ValueError,'local_review_required'):
+            require_complete_stage_b_pool(withheld)
+
+    def test_mixed_single_cue_keeps_useful_clause_but_cannot_auto_cut(self):
+        row=dict(self.rows[0],text='羊毛穿着柔软，三号链接下单')
+        unit=dict(self.unit,unit_id='mixed',text=row['text'],rows=[row])
+        kept,withheld=eligible_for_stage_b([unit])
+        self.assertEqual(kept,[])
+        candidate=withheld[0]['local_clean_candidates'][0]
+        self.assertEqual(candidate['source_ids'],['q0'])
+        self.assertIn('羊毛穿着柔软',candidate['text'])
+        self.assertEqual(candidate['status'],'PARTIAL_CUE_AUDIO_CUTPOINT_UNVERIFIED')
+        self.assertTrue(candidate['source_time_is_full_cue_envelope'])
         with self.assertRaisesRegex(ValueError,'local_review_required'):
             require_complete_stage_b_pool(withheld)
 
@@ -101,7 +114,8 @@ class ColdStartContractTests(unittest.TestCase):
 
     def test_chinese_number_prices_and_link_numbers_are_not_sent(self):
         for text in ('九十九块，羊毛材质。','三号链接，羊毛材质。','一百元，羊毛材质。',
-                     '九十九块八，羊毛材质。','199块8，羊毛材质。','满一百减三十，羊毛材质。'):
+                     '九十九块八，羊毛材质。','199块8，羊毛材质。','满一百减三十，羊毛材质。',
+                     '九十九块八毛，羊毛材质。','今天八折，羊毛材质。','买二送一，羊毛材质。'):
             self.assertIsNotNone(FORBIDDEN.search(text))
             row=dict(self.rows[0],text=text)
             payload=stage_a_payload(dict(self.paragraph,rows=[row]),{'title':'测试商品'},self.run)
