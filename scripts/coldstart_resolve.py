@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 
 from coldstart_semantics import load_run
+from adaptive_vision import verify as verify_person_audit
 from project_registry import atomic_json, digest
 from runtime_meta import _sha256
 from resolve_connection import connect
@@ -92,6 +93,48 @@ def media_items(folder):
     return result
 
 
+def verify_source_fingerprints(run, state, clips):
+    recorded={str(Path(row['path']).resolve()):row for row in run['inputs']}
+    paths=[str(Path(path).resolve()) for path in state['video_paths']]
+    if len({Path(path).name for path in paths})!=len(paths):
+        raise ValueError('ambiguous_source_basename')
+    selected={clip['source_file'] for clip in clips}
+    if not selected.issubset({Path(path).name for path in paths}):
+        raise ValueError('source_not_in_registered_inputs')
+    for path in paths:
+        if Path(path).name not in selected:continue
+        row=recorded.get(path)
+        if not row:raise ValueError('source_not_in_run_fingerprint')
+        before=Path(path).stat()
+        if before.st_size!=row['bytes'] or before.st_mtime_ns!=row['mtime_ns'] or _sha256(Path(path))!=row['sha256']:
+            raise ValueError('source_changed_since_run_init')
+        after=Path(path).stat()
+        if (before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns):
+            raise ValueError('source_changed_while_hashing')
+
+
+def verify_visual_provenance(paths, plan, visual):
+    audit_file=paths.cache_dir/'v5_person_audit.json'
+    if visual.get('audit_sha256')!=_sha256(audit_file):
+        raise ValueError('person_audit_digest_mismatch')
+    audit=json.loads(audit_file.read_text())
+    verify_person_audit(paths,plan,audit,require_pass=False)
+    if visual.get('contract')!=audit['contract'] or visual.get('quality_threshold_exclusive')!=.70 or visual.get('strict_framewise_certified') is not False:
+        raise ValueError('person_gate_policy_mismatch')
+    rows={row['variant_id']:row for row in audit['variants']}
+    assessed=visual.get('variant_results',[])
+    if len(assessed)!=len(rows) or {r['variant_id'] for r in assessed}!=set(rows):
+        raise ValueError('person_gate_variant_coverage_mismatch')
+    for row in assessed:
+        sealed=rows[row['variant_id']]
+        if (row.get('status')!=sealed['status'] or
+                row.get('visible_ratio_lower_bound')!=sealed['host_visible_ratio_lower_bound'] or
+                row.get('visible_ratio_estimate')!=sealed['host_visible_ratio_estimate'] or
+                row.get('sample_count')!=len(sealed['samples']) or
+                row.get('evidence_level')!=sealed['evidence_level']):
+            raise ValueError('person_gate_not_derived_from_sealed_audit')
+
+
 def main():
     # Resolve's native bridge can switch the process locale to C/ASCII.
     if not sys.flags.utf8_mode:
@@ -105,6 +148,7 @@ def main():
         raise ValueError('resolve_project_identity_mismatch')
     timelines=[project.GetTimelineByIndex(i) for i in range(1,project.GetTimelineCount()+1)]
     pool=project.GetMediaPool();sources={Path(v).name:v for v in state['video_paths']};items=media_items(pool.GetRootFolder())
+    if len(sources)!=len(state['video_paths']):raise ValueError('ambiguous_source_basename')
     if args.operation=='inspect':
         current={'project_id':stable_id(project),'project_name':project.GetName(),'project_settings':project.GetSetting(),
                  'protected':{stable_id(t):snapshot(t) for t in timelines},
@@ -121,6 +165,7 @@ def main():
     if visual['plan_sha256']!=_sha256(paths.cache_dir/'physical_plan.json') or visual['status'] not in ('PASS','PARTIAL_PASS','PARTIAL_PASS_WITH_USER_REQUESTED_PREVIEW'):
         raise ValueError('person_gate_not_passed')
     if plan['run_id']!=run['run_id'] or len(plan['variants'])>3 or not plan['variants']:raise ValueError('invalid_run_plan_scope')
+    verify_visual_provenance(paths,plan,visual)
     validate_physical_overlap(plan['variants'])
     eligible=set(visual.get('eligible_variant_ids') or [v['variant_id'] for v in plan['variants']])
     preview=set(visual.get('user_requested_preview_variant_ids') or [])
@@ -133,12 +178,15 @@ def main():
                         (uid in preview and assessments.get(uid,{}).get('status')=='UNCERTAIN'))
                    for uid in eligible)):
         raise ValueError('person_gate_selected_variant_not_passed')
-    before={stable_id(t):snapshot(t) for t in timelines}
-    if {uid:before.get(uid) for uid in pre['protected']}!=pre['protected']:
-        raise ValueError('protected_timeline_changed_since_preflight')
-    names={t.GetName() for t in timelines};folder=paths.workspace_root/'resolve_transactions';folder.mkdir(exist_ok=True)
+    folder=paths.workspace_root/'resolve_transactions';folder.mkdir(exist_ok=True)
     result=[]
     with project_lock(paths,stable_id(project)):
+        timelines=[project.GetTimelineByIndex(i) for i in range(1,project.GetTimelineCount()+1)]
+        before={stable_id(t):snapshot(t) for t in timelines}
+        if before!=pre['protected']:
+            raise ValueError('protected_timeline_changed_since_preflight')
+        names={t.GetName() for t in timelines}
+        verify_source_fingerprints(run,state,[c for v in plan['variants'] if v['variant_id'] in eligible for c in v['clips']])
         backup=paths.workspace_root/'backups'/f"{run['run_id']}.drp";backup.parent.mkdir(exist_ok=True)
         if not backup.exists():
             if not pm.ExportProject(project.GetName(),str(backup)):raise ValueError('project_backup_failed')
@@ -157,7 +205,7 @@ def main():
                 target=next((t for t in timelines if stable_id(t)==prior['timeline_id']),None)
                 if not target or snapshot(target)!=prior['actual']:raise ValueError('existing_run_timeline_changed')
                 result.append(prior);continue
-            assert_new_name(name,names)
+            assert_new_name(name,{project.GetTimelineByIndex(i).GetName() for i in range(1,project.GetTimelineCount()+1)})
             fps=plan['timeline_fps'];clips=variant['clips'];total=sum(c['record_duration_frames'] for c in clips)
             if not 45<total/fps<60:raise ValueError('actual_frame_plan_duration_outside_gate')
             if any(abs(c['fps']-fps)>1e-6 for c in clips):raise ValueError('native_cross_fps_mapping_not_certified')
@@ -184,6 +232,9 @@ def main():
                 if not media:raise ValueError('original_media_not_in_pool')
                 append.append({'mediaPoolItem':media,'startFrame':clip['source_start_frame'],'endFrame':append_endpoint(clip['source_end_frame'],protocol['mode']),'recordFrame':position,'trackIndex':1})
                 position+=clip['record_duration_frames']
+            if {stable_id(t):snapshot(t) for t in timelines}!=before:
+                raise ValueError('protected_timelines_changed_before_append')
+            verify_source_fingerprints(run,state,clips)
             created=pool.AppendToTimeline(append)
             if not created:raise ValueError('native_append_failed')
             actual=snapshot(target)

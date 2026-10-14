@@ -1,8 +1,11 @@
+import json
 import sys
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from coldstart_semantics import validate_unit, frame_append_spec, validate_selection, stage_b_payload
+from coldstart_semantics import (validate_unit, frame_append_spec, validate_selection,
+                                 stage_a_payload, stage_b_payload, restore_b_aliases, require_product_match)
+from coldstart_semantics import eligible_for_stage_b
 
 
 class ColdStartContractTests(unittest.TestCase):
@@ -51,10 +54,34 @@ class ColdStartContractTests(unittest.TestCase):
         self.assertEqual(payload['model'],'mimo-v2.6-pro')
         self.assertIn('"target_variant_count":3',payload['input'])
         self.assertIn('不得找到第一条合格方案就停止',payload['input'])
+        self.assertNotIn(self.run['run_id'],payload['input'])
+        self.assertNotIn(unit['unit_id'],payload['input'])
+        self.assertIn('"unit_id":"u001"',payload['input'])
+        restored=restore_b_aliases({'selected_variants':[{'unit_ids':['u001']}]},[unit])
+        self.assertEqual(restored['selected_variants'][0]['unit_ids'],[unit['unit_id']])
         selection={'selected_variants':[{'unit_ids':[unit['unit_id']],'focus':'材质'}]}
         with self.assertRaisesRegex(ValueError,'missing_reason_for_underfilled'):
             validate_selection(selection,[unit],self.run)
         self.assertEqual(len(validate_selection(dict(selection,insufficient_reason='其余内容不足'),[unit],self.run)),1)
+        with self.assertRaisesRegex(ValueError,'outbound_metadata'):
+            stage_b_payload({'title':'测试商品'},[dict(unit,claim='点链接下单')],self.run)
+        kept,excluded=eligible_for_stage_b([unit,dict(unit,unit_id='bad',text='点链接下单')])
+        self.assertEqual(len(kept),1)
+        self.assertEqual(excluded,[{'unit_id':'bad','reason':'raw_unit_contains_forbidden_content'}])
+
+    def test_stage_A_outbound_preclean_and_product_gate(self):
+        rows=[dict(self.rows[0],text='这件夹克用羊毛。点链接下单'),self.rows[1]]
+        paragraph=dict(self.paragraph,rows=rows)
+        payload=stage_a_payload(paragraph,{'title':'测试商品'},self.run)
+        self.assertNotIn('点链接',payload['input'])
+        self.assertNotIn(self.run['run_id'],payload['input'])
+        self.assertNotIn(self.run['project_key'],payload['input'])
+        self.assertIn('local_cutpoint_review_required',payload['input'])
+        with self.assertRaisesRegex(ValueError,'local_cutpoint_review'):
+            validate_unit(dict(self.unit,source_ids=['q0'],text=rows[0]['text']),paragraph,self.run,1)
+        with self.assertRaisesRegex(ValueError,'product_identity_not_MATCH'):
+            require_product_match({'product_identity':{'match':'UNCERTAIN'},'units':[]})
+        require_product_match({'product_identity':{'match':'MATCH'},'units':[]})
 
     def test_inclusive_api_end_and_exclusive_record_do_not_make_black_frame(self):
         a=frame_append_spec(0,10.28,25,0)

@@ -299,7 +299,7 @@ def audit(paths, plan, sources, detector):
     return body
 
 
-def verify(paths, plan, body):
+def verify(paths, plan, body, *, require_pass=True):
     from codex_worker import key
     unsigned = {k: v for k, v in body.items() if k != 'seal'}
     secret_path = paths.project_records_dir/'worker_seal.key'
@@ -326,5 +326,5 @@ def verify(paths, plan, body):
                 if sample['source_file'] != c['source_file'] or not c['source_start_frame'] <= sample['frame'] < c['source_end_frame']:
                     raise CacheIdentityError('vision_sample_outside_plan')
         evaluation = estimate(clips, samples)
-        if any(row.get(k) != v for k, v in evaluation.items()) or evaluation['status'] != 'PASS':
+        if any(row.get(k) != v for k, v in evaluation.items()) or (require_pass and evaluation['status'] != 'PASS'):
             raise CacheIdentityError('vision_unverified_uncertain_or_below_threshold')

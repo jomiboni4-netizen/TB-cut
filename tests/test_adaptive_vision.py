@@ -73,6 +73,9 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertEqual(len(row['rounds']), 5)
         self.assertEqual(calls, 70)  # 50s => ceil(16*50/60)=14, five rounds.
         self.assertEqual(len({s['frame'] for s in row['samples']}), calls)
+        vision.verify(self.paths, valid_plan(), body, require_pass=False)
+        with self.assertRaises(CacheIdentityError):
+            vision.verify(self.paths, valid_plan(), body)
 
     def test_low_coverage_adds_samples_then_repairable(self):
         body, calls = self.audit(classify=lambda *args, **kwargs: classification('NO_PERSON'))

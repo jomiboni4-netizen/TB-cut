@@ -19,13 +19,13 @@ from index_titles import parse_workbook, workbook_guards, build_model
 from project_registry import atomic_json, digest, folder_identity, workspace_lock
 from runtime_paths import resolve_runtime_paths
 from runtime_meta import _sha256
-from semantic_evidence import semantic_windows
+from semantic_evidence import FORBIDDEN, clean_cue, semantic_windows
 from workbook_runtime import preferred_node
 from mimo_responses import create_response, ResponseAPIError, MODEL
 from product_semantic_preview import parse_response
 
 
-VERSION = 'cold-continuous-v1'
+VERSION = 'cold-continuous-v2-preclean'
 MAX_A_REQUESTS = 16
 MAX_A_SECONDS = 1800
 
@@ -89,7 +89,6 @@ def index_and_locate(paths):
                          skip_blank_titles=True, preserve_blank_row_indices=True)
     sources, cues, offset = [], [], 0.0
     videos = {p.stem: p for p in expand(state['video_paths'], '.mp4')}
-    prefix = run['project_key'][:8] + ':' + run['run_id']
     for subtitle in expand(state['subtitle_paths'], '.srt'):
         media = videos[subtitle.stem]; duration = media_duration(media)
         rows = parse_srt(subtitle, offset)
@@ -99,7 +98,8 @@ def index_and_locate(paths):
         if len(rows) != len(raw_ids):
             raise ValueError('source_subtitle_id_recovery_mismatch')
         for i, row in enumerate(rows):
-            row.update({'original_subtitle_id': raw_ids[i], 'source_id': f'{prefix}:{subtitle.stem}:{raw_ids[i]}', 'ordinal': i})
+            # MiMo sees this anonymous cue ordinal, never a project/run identifier.
+            row.update({'original_subtitle_id': raw_ids[i], 'source_id': f'c{len(cues)+i+1:07d}', 'ordinal': i})
         if len({r['source_id'] for r in rows}) != len(rows):
             raise ValueError('duplicate_original_subtitle_ids')
         sources.append({'source_stem': subtitle.stem, 'video_path': str(media), 'duration': duration,
@@ -174,15 +174,36 @@ def select(paths, product_id):
     atomic_json(paths.cache_dir/'titles.json',titles)
     atomic_json(paths.cache_dir/'subtitle_index.json',index)
     (paths.cache_dir/'fresh_locator.json').write_bytes(locator_bytes)
+    unique_rows={r['source_id']:r for paragraph in paragraphs for r in paragraph['rows']}
+    cleaning={uid:clean_cue(row,uid) for uid,row in unique_rows.items()}
+    fully_removed=sum(not kept for kept,_ in cleaning.values())
+    partial_review=sum(bool(kept) and ''.join(part['text'] for part in kept)!=unique_rows[uid]['text']
+                       for uid,(kept,_) in cleaning.items())
     atomic_json(paths.cache_dir/'candidate_paragraphs.json',{'project_key':run['project_key'],'run_id':run['run_id'],'product':product,
-        'paragraphs':paragraphs,'coverage':coverage,'all_fresh_locator_windows_included':True,'presemantic_removed_cues':0})
+        'paragraphs':paragraphs,'coverage':coverage,'all_fresh_locator_windows_included':True,
+        'presemantic_removed_cues':fully_removed,'mixed_cues_needing_local_cutpoint_review':partial_review,
+        'outbound_policy':VERSION})
     print(json.dumps({'product':product,'paragraph_count':len(paragraphs),'coverage':coverage},ensure_ascii=False))
 
 
 def stage_a_payload(paragraph, product, run):
-    document={'run_id':run['run_id'],'product_key':run['project_key'][:8]+':'+run['run_id']+':'+str(product['product_index']),
-              'product_title':product['title'],'paragraph_id':paragraph['paragraph_id'],
-              'cues':[{'id':r['source_id'],'source':paragraph['source_alias'],'start':r['start'],'end':r['end'],'text':r['text']} for r in paragraph['rows']],
+    if FORBIDDEN.search(product['title']):
+        raise ValueError('stage_A_product_title_needs_local_cleaning')
+    cues=[]
+    for row in paragraph['rows']:
+        kept,_=clean_cue(row,row['source_id'])
+        cleaned=''.join(part['text'] for part in kept)
+        if not cleaned:
+            continue
+        if FORBIDDEN.search(cleaned):
+            raise ValueError('stage_A_outbound_banned_content')
+        cues.append({'id':row['source_id'],'source':paragraph['source_alias'],
+                     'start':row['start'],'end':row['end'],'text':cleaned,
+                     'local_cutpoint_review_required':cleaned!=row['text']})
+    if not cues:
+        return None
+    document={'product_title':product['title'],'paragraph_id':paragraph['paragraph_id'].split(':')[-1],
+              'cues':cues,
               'output_schema':{'product_identity':{'match':'MATCH|UNCERTAIN|OTHER_PRODUCT','evidence':[]},
                   'units':[{'unit_id':'u01','source_ids':['contiguous source subtitle IDs, every ID between endpoints'],
                             'text':'exact concatenation in original order','product_attribution':'MATCH|UNCERTAIN|OTHER_PRODUCT',
@@ -191,6 +212,7 @@ def stage_a_payload(paragraph, product, run):
     instructions=('只输出JSON。先理解整段与商品归属，再提取真实连续完整原声句群。商品编号和链接数字均不决定归属。'
         '先理解价格/库存/链接/演示等混合语境，再区分卖点、背景、画面依赖、促销流程、他品与重复。'
         '只定位来源，不润色。每个unit必须来自同一source连续字幕，source_ids严格按原顺序且包含端点间全部字幕。'
+        '标为local_cutpoint_review_required的字幕只供理解，不能进入自动可用unit；其有效子句保留在本地待物理切点复核。'
         '不得抽取词语/形容词/短语或半句话跨位置拼成新句。保留完整因果前提和结果；问题及依赖回答需一起保留。'
         '尽量提取连续几句话、语义完整且有自然音频边界的单元；必要时长段保留供LOCAL_SPLIT_REVIEW，不机械碎切。'
         '邻段重叠只作理解，来源仍用原ID。不要为45秒限制截断理解；不组装版本。不确定归属明确UNCERTAIN。')
@@ -236,6 +258,10 @@ def validate_unit(unit, paragraph, run, number):
     ordinals=[r['ordinal'] for r in rows]
     if ordinals!=list(range(ordinals[0],ordinals[-1]+1)):raise ValueError('phrase_splice_or_reordered_source')
     if ''.join(r['text'] for r in rows)!=unit.get('text'):raise ValueError('source_text_not_exact')
+    for row in rows:
+        kept,_=clean_cue(row,row['source_id'])
+        if ''.join(part['text'] for part in kept)!=row['text'] or FORBIDDEN.search(row['text']):
+            raise ValueError('cue_requires_local_cutpoint_review')
     if unit.get('product_attribution')!='MATCH':raise ValueError('product_not_confirmed')
     if unit.get('continuous_clip_recommended') is not True:raise ValueError('continuous_unit_not_recommended')
     if not str(unit.get('complete_semantics') or '').strip():raise ValueError('complete_semantics_missing')
@@ -275,19 +301,58 @@ def validate_selection(response, units, run):
 
 
 def stage_b_payload(product, units, run, proposal=None):
-    body={'run_id':run['run_id'],'product_title':product['title'],
+    aliases={g['unit_id']:f'u{i:03d}' for i,g in enumerate(units,1)}
+    for g in units:
+        if FORBIDDEN.search(g['text']):raise ValueError('stage_B_outbound_banned_content')
+    def public_proposal(rows):
+        result=[]
+        for variant in rows or []:
+            public={k:v for k,v in variant.items() if k in ('focus','variant_id','estimated_duration','estimate_seconds')}
+            if any(uid not in aliases for uid in variant.get('unit_ids',[])):
+                raise ValueError('stage_B_proposal_unknown_unit')
+            public['unit_ids']=[aliases[uid] for uid in variant.get('unit_ids',[])]
+            result.append(public)
+        return result
+    body={'product_title':product['title'],
           'target_variant_count':3,
-          'global_nonoverlap_starting_point': proposal or [],
-          'units':[{'unit_id':g['unit_id'],'text':g['text'],'source':g['source_alias'],'start':g['start'],'end':g['end'],
+          'global_nonoverlap_starting_point': public_proposal(proposal),
+          'units':[{'unit_id':aliases[g['unit_id']],'text':g['text'],'source':g['source_alias'],'start':g['start'],'end':g['end'],
                     'category':g['category'],'claim':g['claim'],'needs_context':g['needs_context'],
-                    'visual_dependency':g.get('visual_dependency'),'local_review':g['local_semantic_review']} for g in units],
+                    'visual_dependency':g.get('visual_dependency'),'local_review':'KEEP'} for g in units],
           'output_schema':{'selected_variants':[{'unit_ids':[],'focus':''}],'insufficient_reason':''}}
+    if FORBIDDEN.search(json.dumps(body,ensure_ascii=False)):
+        raise ValueError('stage_B_outbound_metadata_needs_local_cleaning')
     instructions=('只输出精简JSON，不输出分析。审核给定的全局三版无重叠起点，并参考完整候选池；不得找到第一条合格方案就停止。'
                   '可以调整单元顺序/分配或删减至2、1、0版；先保证每版45–60秒、完整自然、不同卖点、零源时间重叠。'
                   '只引用完整unit_id，不改写/拆词/补话。不要用促销或弱话术凑时长。'
                   '若少于3版，在insufficient_reason写明逐版具体原因；不可将不合格候选输出为合格。')
     return {'model':MODEL,'input':instructions+json.dumps(body,ensure_ascii=False,separators=(',',':')),
             'reasoning':{'effort':'low'},'max_output_tokens':6000,'stream':True}
+
+
+def eligible_for_stage_b(units):
+    kept=[];excluded=[]
+    for g in units:
+        reason=None
+        if FORBIDDEN.search(g['text']):reason='raw_unit_contains_forbidden_content'
+        elif FORBIDDEN.search(json.dumps({k:g.get(k) for k in ('category','claim','needs_context')},ensure_ascii=False)):
+            reason='review_metadata_needs_local_cleaning'
+        if reason:excluded.append({'unit_id':g['unit_id'],'reason':reason})
+        else:kept.append(g)
+    return kept,excluded
+
+
+def restore_b_aliases(response, units):
+    aliases={f'u{i:03d}':g['unit_id'] for i,g in enumerate(units,1)}
+    restored=json.loads(json.dumps(response))
+    for variant in restored.get('selected_variants',[]):
+        variant['unit_ids']=[aliases.get(uid,uid) for uid in variant.get('unit_ids',[])]
+    return restored
+
+
+def require_product_match(result):
+    if (result.get('product_identity') or {}).get('match')!='MATCH':
+        raise ValueError('stage_A_product_identity_not_MATCH')
 
 
 def main():
@@ -300,8 +365,10 @@ def main():
     elif args.operation=='A':
         document=json.loads((paths.cache_dir/'candidate_paragraphs.json').read_text());accepted=[];rejected=[];seen=set()
         for n,paragraph in enumerate(document['paragraphs'],1):
-            result=request_once(paths,'A',stage_a_payload(paragraph,document['product'],run),n)
+            payload=stage_a_payload(paragraph,document['product'],run)
+            result=request_once(paths,'A',payload,n) if payload else {'product_identity':{'match':'NO_CLEAN_CUES'},'units':[]}
             atomic_json(paths.cache_dir/f'A_paragraph_{n:02d}.json',result)
+            if payload:require_product_match(result)
             for unit in result.get('units',[]):
                 try:
                     row=validate_unit(unit,paragraph,run,len(accepted)+1);key=tuple(row['source_ids'])
@@ -318,11 +385,14 @@ def main():
         document=json.loads((paths.cache_dir/'candidate_paragraphs.json').read_text())
         local=json.loads((paths.cache_dir/'local_A_review.json').read_text())
         if local['run_id']!=run['run_id']:raise ValueError('local_A_wrong_run')
+        eligible,excluded=eligible_for_stage_b(local['kept_units'])
+        atomic_json(paths.cache_dir/'stage_B_outbound_exclusions.json',{'run_id':run['run_id'],'excluded':excluded})
+        if not eligible:raise ValueError('stage_B_no_precleaned_units')
         proposal_file=paths.cache_dir/'stage_B_candidate_allocation.json'
-        proposal=json.loads(proposal_file.read_text())['variants'] if proposal_file.exists() else None
-        response=request_once(paths,'B',stage_b_payload(document['product'],local['kept_units'],run,proposal),1)
+        proposal=json.loads(proposal_file.read_text())['variants'] if proposal_file.exists() and not excluded else None
+        response=restore_b_aliases(request_once(paths,'B',stage_b_payload(document['product'],eligible,run,proposal),1),eligible)
         atomic_json(paths.cache_dir/'stage_B_selection.json',response)
-        variants=validate_selection(response,local['kept_units'],run)
+        variants=validate_selection(response,eligible,run)
         atomic_json(paths.cache_dir/'stage_B_restored.json',{'run_id':run['run_id'],'product':document['product'],'variants':variants})
         print('B complete; variants',len(variants),flush=True)
 
