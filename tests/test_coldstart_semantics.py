@@ -6,6 +6,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from coldstart_semantics import (validate_unit, frame_append_spec, validate_selection,
                                  stage_a_payload, stage_b_payload, restore_b_aliases, require_product_match)
 from coldstart_semantics import eligible_for_stage_b
+from semantic_evidence import FORBIDDEN
 
 
 class ColdStartContractTests(unittest.TestCase):
@@ -82,6 +83,17 @@ class ColdStartContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'product_identity_not_MATCH'):
             require_product_match({'product_identity':{'match':'UNCERTAIN'},'units':[]})
         require_product_match({'product_identity':{'match':'MATCH'},'units':[]})
+
+    def test_chinese_number_prices_and_link_numbers_are_not_sent(self):
+        for text in ('九十九块，羊毛材质。','三号链接，羊毛材质。','一百元，羊毛材质。'):
+            self.assertIsNotNone(FORBIDDEN.search(text))
+            row=dict(self.rows[0],text=text)
+            payload=stage_a_payload(dict(self.paragraph,rows=[row]),{'title':'测试商品'},self.run)
+            self.assertIsNotNone(payload)
+            self.assertNotIn(text.split('，')[0],payload['input'])
+            self.assertIn('羊毛材质。',payload['input'])
+            with self.assertRaisesRegex(ValueError,'local_cutpoint_review'):
+                validate_unit(dict(self.unit,source_ids=['q0'],text=text),dict(self.paragraph,rows=[row]),self.run,1)
 
     def test_inclusive_api_end_and_exclusive_record_do_not_make_black_frame(self):
         a=frame_append_spec(0,10.28,25,0)

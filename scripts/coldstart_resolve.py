@@ -140,6 +140,7 @@ def main():
     if not sys.flags.utf8_mode:
         os.execve(sys.executable,[sys.executable,*sys.argv],dict(os.environ,PYTHONUTF8='1'))
     parser=argparse.ArgumentParser();parser.add_argument('operation',choices=['inspect','write']);parser.add_argument('--workspace',required=True);parser.add_argument('--root',default='.')
+    parser.add_argument('--allow-user-requested-preview',action='store_true',help='Use only when the current user explicitly requested an UNCERTAIN temporary preview')
     args=parser.parse_args();paths,state,run=load_run(args.root,args.workspace)
     resolve=connect(status_path=paths.workspace_root/'resolve_connection_status.json')
     if not resolve:raise ValueError('resolve_not_connected')
@@ -169,6 +170,8 @@ def main():
     validate_physical_overlap(plan['variants'])
     eligible=set(visual.get('eligible_variant_ids') or [v['variant_id'] for v in plan['variants']])
     preview=set(visual.get('user_requested_preview_variant_ids') or [])
+    if preview and (not args.allow_user_requested_preview or not visual.get('preview_authorization')):
+        raise ValueError('temporary_preview_requires_explicit_current_invocation_authorization')
     assessments={v['variant_id']:v for v in visual.get('variant_results',[])}
     if (not eligible or not eligible.issubset({v['variant_id'] for v in plan['variants']})
             or not preview.issubset(eligible)
@@ -216,6 +219,8 @@ def main():
                 raise ValueError('native_endpoint_protocol_context_mismatch')
             if any(str(Path(sources[c['source_file']]).resolve()) not in items for c in clips):
                 raise ValueError('original_media_not_in_pool')
+            # Finish expensive I/O before activating a target for native append.
+            verify_source_fingerprints(run,state,clips)
             atomic_json(record_file,{'status':'STARTED','name':name,'plan_digest':digest(variant)})
             started=time.perf_counter();target=pool.CreateEmptyTimeline(name)
             if not target or stable_id(target) in before:raise ValueError('new_target_creation_failed')
@@ -234,7 +239,8 @@ def main():
                 position+=clip['record_duration_frames']
             if {stable_id(t):snapshot(t) for t in timelines}!=before:
                 raise ValueError('protected_timelines_changed_before_append')
-            verify_source_fingerprints(run,state,clips)
+            if not project.SetCurrentTimeline(target) or stable_id(project.GetCurrentTimeline())!=stable_id(target):
+                raise ValueError('native_append_target_changed')
             created=pool.AppendToTimeline(append)
             if not created:raise ValueError('native_append_failed')
             actual=snapshot(target)
