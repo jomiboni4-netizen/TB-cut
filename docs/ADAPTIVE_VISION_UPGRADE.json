@@ -1,0 +1,9 @@
+{
+  "upgrade": "round-3",
+  "parent": "cf955fdfb175",
+  "contracts": ["host-strata-v3", "physical-compute-v3", "final-gate-v4-host-strata"],
+  "invalidates": ["old stage code digests", "generic-person count approvals", "unsealed vision", "unproven physical caches"],
+  "migration": "retain and block; no re-certification or runtime state mutation",
+  "readiness": "NOT_READY",
+  "blockers": ["trusted host/subject classifier", "private workbook dependency", "Resolve write/readback/export consumers", "exact VFR mapping"]
+}

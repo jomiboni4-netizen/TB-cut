@@ -1,0 +1,16 @@
+{
+  "upgrade": "independent-worker-final-gate-v3",
+  "correction_round": 2,
+  "runtime_applied": false,
+  "registration_schema": 2,
+  "schedule_schema": 3,
+  "quality_contract": "final-gate-v3",
+  "legacy_final_pass": "stale; independent sealed Codex final result and exact-plan hard/vision evidence required",
+  "independent_context": "fresh ephemeral read-only Codex CLI process per product selection/final review; separate project review; no resume/fork/history",
+  "editing_thresholds_changed": false,
+  "real_media_test_authorized": false,
+  "resolve_write": "BLOCKED; quality preflight only",
+  "real_vision": "UNCERTAIN; generic person sample counts do not prove host identity/full coverage",
+  "consumer_inventory": "docs/PIPELINE_DEPENDENCIES.md",
+  "next_round": "adaptive host detection, measured latency and cache efficiency, remaining consumer regressions"
+}

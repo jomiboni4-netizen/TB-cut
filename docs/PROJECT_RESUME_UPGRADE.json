@@ -1,0 +1,21 @@
+{
+  "upgrade": "project-resume-v2",
+  "correction_round": 1,
+  "runtime_applied": false,
+  "registration_schema": 2,
+  "registered_metadata_schema": 2,
+  "product_stage_schema": 2,
+  "checkpoint_schema": 2,
+  "editing_rules_changed": false,
+  "project_identity": "offline-confirmed stable Resolve ID, generated UUID, confirmed folder device/inode/path and configuration digest; display name alone is insufficient",
+  "integrated": ["init_project.py", "index_subtitles.py", "index_titles.py", "runtime_paths.py", "runtime_meta.py", "runtime_publication.py", "product_checkpoints.py", "update_batch_state.py"],
+  "legacy_policy": "preserve; missing new contract or dependencies blocks registered reuse; no attestation, deletion or automatic state conversion",
+  "upstream_reuse": "only authenticated project_input title/subtitle producers; batch changes do not invalidate the project input indexes",
+  "product_versions": "immutable stage results, captured precompute identity, explicit code/model identifiers and dependency SHA; current range and plan pointers invalidate dependent approval",
+  "publication": "workspace directory lock, checkpoint revision checks, staged atomic JSON; multi-record registration/pointers use incomplete markers; no multi-file or power-loss durability guarantee",
+  "downstream_status": "not integrated; registered range-dependent expected_identity and listed auxiliary entry points fail before external work",
+  "consumer_inventory": "docs/PIPELINE_DEPENDENCIES.md",
+  "acceptance_scope": "synthetic tests only; checkpoint verdict records do not compute or certify real hard audits",
+  "next_round_only": "whole-project small-group scheduler, consumer integration, independent final Codex semantic review and quality gates",
+  "real_test_authorized": false
+}
