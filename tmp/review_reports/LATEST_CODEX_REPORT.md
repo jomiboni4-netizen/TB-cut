@@ -1,27 +1,27 @@
 # Task
 
-将四阶段自我迭代计划写入 GitHub，并完成阶段一盘点及代码基线合成测试。
+完成阶段一代码盘点后，按用户补充的质量目标推进阶段二：评测切点吞字/截断和短时重复表达提炼，并把计划与合成评测基线写入 GitHub PR #3。
 
 # Repo changes
 
-新增 `docs/SELF_ITERATION_PLAN.md`：阶段一盘点，阶段二基线与质量评测，阶段三单变量隔离实验，阶段四受控迭代。迭代轮数遵循项目规则：至少三轮，通常三轮，必要时最多五轮。计划完成后按用户要求清理计划文档。
+GitHub 草稿 PR #3 新增 `docs/NATURALNESS_EVALUATION.md`，定义合成评测标签、两类问题轴、记录格式和当前代码能力边界。更新 `docs/SELF_ITERATION_PLAN.md`，明确阶段二目标及下一步。未改动生产代码。原工作区的 `tmp/review_reports/LATEST_CODEX_REPORT.md` 已有用户本地改动，未覆盖；本次只更新 PR 分支上的对应公开报告。
 
 # Runtime changes
 
-静态检查入口、架构与依赖、精修/门禁、提交历史和本地状态。以 `b994e42` 的归档副本运行基线测试；另以该提交叠加本地跟踪源码/配置/测试改动的临时副本做对照。两个副本均排除媒体、字幕、缓存、归档和本地报告；原工作区未改动。
+只读检查 `scripts/refine_plans_v2.py`、`scripts/project_scheduler.py` 和重复审查逻辑。确认精修已有局部词级 ASR + 20ms RMS dBFS 边界风险调整；相似度检查主要用于文本/方案间重复，尚无证据表明可发现连续口播中的近义重复并提炼。未读取或处理真实媒体、原始字幕或产品资料。
 
 # Validation
 
-基线 `b994e42`：275项中273通过，2项工作簿集成检查因锁定版本与当前安装不同失败（项目锁定 Node 24.19.0 / artifact-tool 2.8.93，测试环境安装 artifact-tool 2.8.94；失败不是剪辑质量测量）。本地未提交源码/配置/测试改动叠加副本：284项全部通过。项目 doctor：未运行。Preflight：未运行。GitHub 草稿 PR #3 仅含计划和报告；本地差异检查未运行。阶段一完成；阶段二真实自然度评测未开始。
+文档内容与现有实现静态对照：完成。项目 doctor、测试、preflight、Git diff/敏感信息扫描：本轮未运行（仅文档评测规范，本轮未提交本地工作树）。上一阶段临时副本结果：基线候选 275 项中 273 项通过、2 项为工作簿工具依赖版本不匹配；本地未提交改动叠加副本 284 项通过。此结果不证明自然度质量。阶段二合成用例的规则执行验证尚未做。
 
 # External actions
 
-MiMo called: no。Resolve connected: no。export performed: no。草稿 PR #3 面向 `main`，未合并。PR #2（误选基线的初稿）已关闭且未合并。
+MiMo called: no。Resolve connected: no。export performed: no。更新 GitHub 草稿 PR #3，未合并。
 
 # Blockers
 
-本地工作区的未提交改动未纳入 PR，测试结果只代表临时对照副本，不代表改动已审查或提交。没有固定口播媒体回归集：`tests/fixtures` 不存在，测试主要使用合成数据。现有精修按词级对齐与 RMS 音频风险调整切点；最终门禁检查时间、词边界、音画范围、重叠和重复，但没有固定样片的人为自然度对照。主分支只有空仓库起点；`b994e42` 是唯一实际代码候选，合成测试已验证但尚无自然度证据。
+没有固定自然度真实样片及人工标签，无法判断真实音频的漏检、误报或剪辑自然度。RMS 只能作风险信号；词级 ASR 也可能与可听边界错位。需要先在隔离副本中验证合成边界用例，再判断真实样本是否必要。
 
 # Git state
 
-GitHub 计划分支 `codex/self-iteration-plan-clean`，本次报告更新前 HEAD 为 `9cd4b7d645938916e342e15d9eca1637cf32d77c`；PR #3 草稿。本地分支 `codex/repository-baseline`，HEAD `b994e42`，比 `main` 多26个提交。原工作区24个已修改跟踪文件及未跟踪文件/归档未提交、未覆盖。
+GitHub 分支 `codex/self-iteration-plan-clean`，PR #3 草稿；最新计划更新提交 `afc6fcffe02db7b78bd2bbd60d491814200a3325`。PR 路径包含计划、合成评测文档和脱敏报告。本地分支 `codex/repository-baseline`，HEAD `b994e42d3bc0983aea440cafa8ac711a421ddc68`；用户已有工作区改动保持原状，本轮没有本地提交。
