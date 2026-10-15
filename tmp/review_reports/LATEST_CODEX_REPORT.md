@@ -1,27 +1,28 @@
 # Task
 
-完成阶段一代码盘点，推进阶段二合成评测基线：针对用户指出的切点吞字/截断，以及短时间重复表达后的提炼。
+完成阶段一仓库盘点和阶段二合成评测定义后，继续完成前三轮隔离迭代，聚焦重复表达提炼与切点起点完整性，并同步四阶段计划进度。
 
 # Repo changes
 
-GitHub 草稿 PR #3 新增 `docs/NATURALNESS_EVALUATION.md`，定义两类评测轴、标签、合成场景与记录格式，并记录首轮基线观察。更新 `docs/SELF_ITERATION_PLAN.md` 固定阶段二目标。未改生产代码。原工作区 `tmp/review_reports/LATEST_CODEX_REPORT.md` 有用户本地改动，未覆盖；仅更新 PR 分支上的公开报告。
+计划分支 PR #3：更新 `docs/SELF_ITERATION_PLAN.md`，记录阶段进度、限制及不清理计划文件的原因。
+代码分支 PR #4：`scripts/registered_pipeline.py` 加入短时重复及近义表达提炼要求；`scripts/refine_plans_v2.py` 修复起点对齐时被较远停顿抢走的风险；`scripts/final_quality_gate.py` 加入成片内部短时重复检查；`tests/test_project_scheduler.py` 新增合成断言。PR #4 仍为草稿。原工作区用户改动未覆盖。
 
 # Runtime changes
 
-只读检查精修、调度、相似度函数。基线代码候选 `b994e42` 的隔离副本合成探针显示：纯音连续到 0.50s 后静音，0.30s 切点被 RMS 逻辑延至 0.54s；合成词时间戳中粗起点 1.45s 被移动到 2.95s，后续需查证是否跳过有效内容；五类短时口播重复例子均未被跨方案 `semantic_duplicate` 判为重复，该函数也不是面向此目标设计。探针不代表真实语音表现。临时纯音文件已删除。另建独立工作区基于 `b994e42`，未写入或提交代码。
+在基线提交 `b994e42` 的临时隔离副本迭代和测试。起点合成用例对照：旧逻辑将 1.45s 起点移到 2.95s；新逻辑对齐到完整词的 1.34s。纯音 RMS 用例只验证电平分支，不代表语音吞字表现。一次尝试用纯合成口播调用 Codex worker 做选择结果配对测试，进程失败，未得到模型输出；不作比较结论。
 
 # Validation
 
-完成文档与代码静态对照及合成探针。仅运行定向脚本探针，未运行项目测试套件、project doctor、preflight、Git diff 检查或敏感信息扫描。本轮无代码改动。前轮临时副本测试：基线候选 275 项中 273 项通过、2 项依赖版本不匹配；叠加本地未提交改动副本 284 项通过；均不构成自然度证据。
+`test_project_scheduler`：17 项通过；本轮相关新断言 4 项通过；`git diff --check` 通过。项目 doctor、完整测试集、preflight、秘密扫描未运行。无真实素材、人工自然度标签或吞字召回数据。
 
 # External actions
 
-MiMo called: no。Resolve connected: no。export performed: no。更新 GitHub 草稿 PR #3，未合并。
+MiMo called: no。Resolve connected: no。export performed: no。Codex worker synthetic probe attempted: failed before result。更新 GitHub PR #3 计划与报告、PR #4 源码/测试与描述；二者均未合并。
 
 # Blockers
 
-没有固定真实口播样片与人工标签，无法判断实际吞字召回、误报或自然度。音量与 ASR 时间戳只能提示风险，不能替代回听。切点起点远移目前仅是需要扩展复现的风险信号；未改算法。连续口播重复提炼能力尚未由现有实现证明。
+重复提炼目前只确认选择任务和终审任务收到具体指令，没有模型输出对照或真实听感证明。切点起点改进仅在合成 ASR 时间戳上通过。阶段二的人标真实样本缺失；四阶段计划继续保留，暂不删除。
 
 # Git state
 
-GitHub 分支 `codex/self-iteration-plan-clean`，PR #3 草稿；本次评测文档提交 `efc5d4d614bb9d9e4005441ca64e367e5e8df970`。本地原分支 `codex/repository-baseline`，HEAD `b994e42d3bc0983aea440cafa8ac711a421ddc68`，用户已有修改保持不变。新增隔离工作区从该基线创建，尚无变更。
+计划分支 `codex/self-iteration-plan-clean`，本报告更新前计划提交为 `cf4ba5806e6c0152ba1de9613d0b58749ef3e64f`，PR #3 草稿。代码分支 `codex/naturalness-correction-1`，PR #4 最新头为 `7611bf5c4fc80dbad52cd303f0f6d50cc1cf1807`，草稿。原分支 `codex/repository-baseline` HEAD `b994e42d3bc0983aea440cafa8ac711a421ddc68`，本地未提交改动保持原样。
