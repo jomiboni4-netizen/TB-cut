@@ -1,18 +1,18 @@
 # Task
 
-完成阶段一代码盘点后，按用户补充的质量目标推进阶段二：评测切点吞字/截断和短时重复表达提炼，并把计划与合成评测基线写入 GitHub PR #3。
+完成阶段一代码盘点，推进阶段二合成评测基线：针对用户指出的切点吞字/截断，以及短时间重复表达后的提炼。
 
 # Repo changes
 
-GitHub 草稿 PR #3 新增 `docs/NATURALNESS_EVALUATION.md`，定义合成评测标签、两类问题轴、记录格式和当前代码能力边界。更新 `docs/SELF_ITERATION_PLAN.md`，明确阶段二目标及下一步。未改动生产代码。原工作区的 `tmp/review_reports/LATEST_CODEX_REPORT.md` 已有用户本地改动，未覆盖；本次只更新 PR 分支上的对应公开报告。
+GitHub 草稿 PR #3 新增 `docs/NATURALNESS_EVALUATION.md`，定义两类评测轴、标签、合成场景与记录格式，并记录首轮基线观察。更新 `docs/SELF_ITERATION_PLAN.md` 固定阶段二目标。未改生产代码。原工作区 `tmp/review_reports/LATEST_CODEX_REPORT.md` 有用户本地改动，未覆盖；仅更新 PR 分支上的公开报告。
 
 # Runtime changes
 
-只读检查 `scripts/refine_plans_v2.py`、`scripts/project_scheduler.py` 和重复审查逻辑。确认精修已有局部词级 ASR + 20ms RMS dBFS 边界风险调整；相似度检查主要用于文本/方案间重复，尚无证据表明可发现连续口播中的近义重复并提炼。未读取或处理真实媒体、原始字幕或产品资料。
+只读检查精修、调度、相似度函数。基线代码候选 `b994e42` 的隔离副本合成探针显示：纯音连续到 0.50s 后静音，0.30s 切点被 RMS 逻辑延至 0.54s；合成词时间戳中粗起点 1.45s 被移动到 2.95s，后续需查证是否跳过有效内容；五类短时口播重复例子均未被跨方案 `semantic_duplicate` 判为重复，该函数也不是面向此目标设计。探针不代表真实语音表现。临时纯音文件已删除。另建独立工作区基于 `b994e42`，未写入或提交代码。
 
 # Validation
 
-文档内容与现有实现静态对照：完成。项目 doctor、测试、preflight、Git diff/敏感信息扫描：本轮未运行（仅文档评测规范，本轮未提交本地工作树）。上一阶段临时副本结果：基线候选 275 项中 273 项通过、2 项为工作簿工具依赖版本不匹配；本地未提交改动叠加副本 284 项通过。此结果不证明自然度质量。阶段二合成用例的规则执行验证尚未做。
+完成文档与代码静态对照及合成探针。仅运行定向脚本探针，未运行项目测试套件、project doctor、preflight、Git diff 检查或敏感信息扫描。本轮无代码改动。前轮临时副本测试：基线候选 275 项中 273 项通过、2 项依赖版本不匹配；叠加本地未提交改动副本 284 项通过；均不构成自然度证据。
 
 # External actions
 
@@ -20,8 +20,8 @@ MiMo called: no。Resolve connected: no。export performed: no。更新 GitHub �
 
 # Blockers
 
-没有固定自然度真实样片及人工标签，无法判断真实音频的漏检、误报或剪辑自然度。RMS 只能作风险信号；词级 ASR 也可能与可听边界错位。需要先在隔离副本中验证合成边界用例，再判断真实样本是否必要。
+没有固定真实口播样片与人工标签，无法判断实际吞字召回、误报或自然度。音量与 ASR 时间戳只能提示风险，不能替代回听。切点起点远移目前仅是需要扩展复现的风险信号；未改算法。连续口播重复提炼能力尚未由现有实现证明。
 
 # Git state
 
-GitHub 分支 `codex/self-iteration-plan-clean`，PR #3 草稿；最新计划更新提交 `afc6fcffe02db7b78bd2bbd60d491814200a3325`。PR 路径包含计划、合成评测文档和脱敏报告。本地分支 `codex/repository-baseline`，HEAD `b994e42d3bc0983aea440cafa8ac711a421ddc68`；用户已有工作区改动保持原状，本轮没有本地提交。
+GitHub 分支 `codex/self-iteration-plan-clean`，PR #3 草稿；本次评测文档提交 `efc5d4d614bb9d9e4005441ca64e367e5e8df970`。本地原分支 `codex/repository-baseline`，HEAD `b994e42d3bc0983aea440cafa8ac711a421ddc68`，用户已有修改保持不变。新增隔离工作区从该基线创建，尚无变更。
