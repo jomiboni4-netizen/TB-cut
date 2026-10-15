@@ -14,6 +14,7 @@ import index_titles
 import index_subtitles
 import registered_pipeline as pipeline
 from refine_plans_v2 import refine_words
+import final_quality_gate as quality_gate
 import project_scheduler as scheduler
 from init_project import initialize
 from product_checkpoints import load_stage, resume, read_ledger, update_checkpoint, capture_stage, publish_stage
@@ -89,6 +90,19 @@ class SchedulerTests(unittest.TestCase):
         ]}
         start, _, _, _ = refine_words(window, 1.40, 2.50)
         self.assertEqual(start, 1.50)
+
+    def test_final_review_checks_internal_repetition_without_dropping_incremental_details(self):
+        record = {'identity': {'stage': 'plan', 'project_key': 'synthetic', 'product_id': 1,
+                               'encoding_id': '001', 'rules_fingerprint': 'rules'},
+                  'body_digest': 'plan-digest', 'body': {'variants': []}}
+        paths = type('Paths', (), {'registered_scope': lambda self: ('synthetic', 'batch')})()
+        with patch.object(quality_gate, 'load_stage', return_value=record):
+            task = quality_gate.final_task(paths, 'plan-ref')
+        questions = ' '.join(task['review_questions'])
+        self.assertIn('成片内部', questions)
+        self.assertIn('短时间内重复', questions)
+        self.assertIn('表达最完整、信息最充分的一次', questions)
+        self.assertIn('补充证据、条件、体验细节', questions)
 
     def engine(self):
         stack=ExitStack()
