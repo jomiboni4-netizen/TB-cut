@@ -55,6 +55,19 @@ class SchedulerTests(unittest.TestCase):
         weights.start()
         self.addCleanup(weights.stop)
 
+    def test_selection_task_requires_safe_short_range_repetition_pruning(self):
+        stage = {'identity': {'project_key': 'synthetic', 'product_id': 1, 'encoding_id': '001',
+                              'rules_fingerprint': 'rules', 'dependencies': [{'path': 'range-ref'}]},
+                 'body_digest': 'candidate-digest', 'body': {'candidates': []}}
+        with patch.object(pipeline, 'load_stage', return_value=stage):
+            task = pipeline.selection_task(None, 'candidate-ref')
+        rules = task['hard_rules']
+        self.assertIn('short-range repeated wording and repeated meaning', rules)
+        self.assertIn('including paraphrases', rules)
+        self.assertIn('independently complete', rules)
+        self.assertIn('Preserve additive evidence', rules)
+        self.assertIn('do not delete solely by repeated keywords', rules)
+
     def engine(self):
         stack=ExitStack()
         def launch(task):
