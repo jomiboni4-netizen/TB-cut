@@ -84,7 +84,11 @@ def selection_task(paths, candidate_ref):
             'range_references': [d['path'] for d in identity['dependencies']],
             'candidates': candidate['body']['candidates'], 'completed_stages': ['range', 'candidate'],
             'issues': [], 'target_stage': 'rough',
-            'hard_rules': 'Up to 3 distinct variants; target 48–56 seconds, final strictly >45 and <60; no banned content, no overlap or duplicate selling points. Return selected_ranges; do not invent source times.'}
+            'hard_rules': ('Up to 3 distinct variants; target 48–56 seconds, final strictly >45 and <60; no banned content, no overlap or duplicate selling points. ' 
+                           'Inspect each selected candidate for short-range repeated wording and repeated meaning, including paraphrases. ' 
+                           'Keep the most complete, informative, natural formulation and omit redundant restatements only when the remaining passage is independently complete. ' 
+                           'Preserve additive evidence, qualifiers, causal/reference dependencies, and natural emphasis; do not delete solely by repeated keywords. ' 
+                           'Return selected_ranges; do not invent source times.')}
     task['task_digest'] = digest(task)
     return task
 
