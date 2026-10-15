@@ -204,13 +204,18 @@ def refine_words(window: dict, rough_start: float, rough_end: float) -> tuple[fl
     if not end_choices:
         end_choices = [overlap_indices[-1]]
 
-    def start_score(index: int) -> float:
-        start = float(words[index]["start"])
-        previous_end = float(words[index - 1]["end"]) if index else start
-        preview = normalize("".join(str(row["text"]) for row in words[index:index + 10]))
-        return max(0.0, start - previous_end) * 12 - abs(start - rough_start) * 1.5
-
-    first = max(start_choices, key=start_score)
+    containing_start = [index for index in start_choices
+                        if float(words[index]["start"]) <= rough_start < float(words[index]["end"])]
+    if containing_start:
+        # Preserve the whole ASR word crossed by the rough cut. A later pause
+        # must not win by scoring higher and discard the selected opening.
+        first = min(containing_start, key=lambda index: float(words[index]["start"]))
+    else:
+        following_start = [index for index in start_choices if float(words[index]["start"]) >= rough_start]
+        if following_start:
+            first = min(following_start, key=lambda index: float(words[index]["start"]))
+        else:
+            first = overlap_indices[0]
     valid_end_choices = [index for index in end_choices if index >= first] or [overlap_indices[-1]]
 
     def end_score(index: int) -> float:

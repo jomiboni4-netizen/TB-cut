@@ -13,6 +13,8 @@ import codex_worker
 import index_titles
 import index_subtitles
 import registered_pipeline as pipeline
+from refine_plans_v2 import refine_words
+import final_quality_gate as quality_gate
 import project_scheduler as scheduler
 from init_project import initialize
 from product_checkpoints import load_stage, resume, read_ledger, update_checkpoint, capture_stage, publish_stage
@@ -54,6 +56,53 @@ class SchedulerTests(unittest.TestCase):
             'name': 'large-v3-turbo', 'resolved_path': 'synthetic', 'weights_digest': digest('synthetic weights'), 'files': {}})
         weights.start()
         self.addCleanup(weights.stop)
+
+    def test_selection_task_requires_safe_short_range_repetition_pruning(self):
+        stage = {'identity': {'project_key': 'synthetic', 'product_id': 1, 'encoding_id': '001',
+                              'rules_fingerprint': 'rules', 'dependencies': [{'path': 'range-ref'}]},
+                 'body_digest': 'candidate-digest', 'body': {'candidates': []}}
+        with patch.object(pipeline, 'load_stage', return_value=stage):
+            task = pipeline.selection_task(None, 'candidate-ref')
+        rules = task['hard_rules']
+        self.assertIn('short-range repeated wording and repeated meaning', rules)
+        self.assertIn('including paraphrases', rules)
+        self.assertIn('independently complete', rules)
+        self.assertIn('Preserve additive evidence', rules)
+        self.assertIn('do not delete solely by repeated keywords', rules)
+
+    def test_refine_words_does_not_jump_opening_to_a_later_pause(self):
+        window = {'words': [
+            {'start': 1.00, 'end': 1.30, 'text': '这个'},
+            {'start': 1.34, 'end': 1.65, 'text': '面料'},
+            {'start': 1.72, 'end': 2.02, 'text': '真的'},
+            {'start': 2.10, 'end': 2.55, 'text': '很舒服'},
+            {'start': 2.95, 'end': 3.30, 'text': '而且'},
+        ]}
+        start, _, text, _ = refine_words(window, 1.45, 3.05)
+        self.assertEqual(start, 1.34)
+        self.assertTrue(text.startswith('面料'))
+
+    def test_refine_words_in_silence_starts_at_next_word(self):
+        window = {'words': [
+            {'start': 1.00, 'end': 1.30, 'text': '这个'},
+            {'start': 1.50, 'end': 1.80, 'text': '面料'},
+            {'start': 2.05, 'end': 2.35, 'text': '透气'},
+        ]}
+        start, _, _, _ = refine_words(window, 1.40, 2.50)
+        self.assertEqual(start, 1.50)
+
+    def test_final_review_checks_internal_repetition_without_dropping_incremental_details(self):
+        record = {'identity': {'stage': 'plan', 'project_key': 'synthetic', 'product_id': 1,
+                               'encoding_id': '001', 'rules_fingerprint': 'rules'},
+                  'body_digest': 'plan-digest', 'body': {'variants': []}}
+        paths = type('Paths', (), {'registered_scope': lambda self: ('synthetic', 'batch')})()
+        with patch.object(quality_gate, 'load_stage', return_value=record):
+            task = quality_gate.final_task(paths, 'plan-ref')
+        questions = ' '.join(task['review_questions'])
+        self.assertIn('成片内部', questions)
+        self.assertIn('短时间内重复', questions)
+        self.assertIn('表达最完整、信息最充分的一次', questions)
+        self.assertIn('补充证据、条件、体验细节', questions)
 
     def engine(self):
         stack=ExitStack()
