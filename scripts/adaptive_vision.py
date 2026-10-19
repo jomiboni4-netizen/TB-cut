@@ -188,43 +188,6 @@ def apply_manual_person_confirmation(paths, source_file, frame, value):
     return value
 
 
-def estimate_v4(clips, samples):
-    durations = [(c['source_end_frame']-c['source_start_frame'])/c['fps'] for c in clips]
-    total = sum(durations)
-    lower = ratio = 0.0
-    coverage = True
-    uncertain = errors = False
-    for i, (clip, duration) in enumerate(zip(clips, durations)):
-        points = sorted([s for s in samples if s['clip_index'] == i], key=lambda s: s['frame'])
-        if not points:
-            coverage = False
-            continue
-        lo, hi = clip['source_start_frame'], clip['source_end_frame']
-        edges = [lo]+[(a['frame']+b['frame']+1)/2 for a, b in zip(points, points[1:])]+[hi]
-        p = 0.0
-        for sample, left, right in zip(points, edges, edges[1:]):
-            label = validate_classification(sample['classification'])['label']
-            p += (right-left)/(hi-lo) * (label == 'HOST_VISIBLE')
-            uncertain |= label == 'UNCERTAIN'
-            errors |= label == 'DETECTOR_ERROR'
-        # A capped temporal-block count prevents adjacent补样 from manufacturing IID confidence.
-        n = min(len(points), len({int((s['frame']-lo)/clip['fps']/POLICY['correlation_seconds']) for s in points}))
-        z = POLICY['z_reference']
-        reference = (p+z*z/(2*n)-z*math.sqrt(p*(1-p)/n+z*z/(4*n*n)))/(1+z*z/n)
-        gaps = [points[0]['frame']-lo, hi-1-points[-1]['frame']]+[b['frame']-a['frame'] for a, b in zip(points, points[1:])]
-        max_gap = max(gaps)/clip['fps']
-        # Additional unsampled-gap penalty: heuristic risk bound, NOT 95% video coverage guarantee.
-        conservative = max(0.0, reference-max_gap/duration)
-        ratio += duration/total*p
-        lower += duration/total*conservative
-        coverage &= points[0]['frame'] == lo and points[-1]['frame'] == hi-1 and max_gap <= 5.0
-    status = ('BLOCKED' if errors else 'UNCERTAIN' if uncertain or not coverage else
-              'PASS' if lower > 0.70 else 'REPAIRABLE' if ratio <= 0.70 else 'UNCERTAIN')
-    return {'host_visible_ratio_estimate': ratio, 'host_visible_ratio_lower_bound': lower,
-            'full_plan_coverage': coverage, 'person_subject_classified': not uncertain and not errors,
-            'status': status, 'statistical_claim': 'temporal-block-capped heuristic; no IID/video confidence guarantee'}
-
-
 def audit(paths, plan, sources, detector):
     classifier = classifier_identity(detector)
     signatures = {name: media_signature(sources[name]) for name in {c['source_file'] for v in plan['variants'] for c in v['clips']}}

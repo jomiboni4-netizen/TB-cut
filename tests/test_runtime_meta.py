@@ -233,10 +233,10 @@ class RuntimeMetaTests(unittest.TestCase):
         with self.assertRaisesRegex(CacheIdentityError, "artifact_sha256_mismatch"):
             validate_cache(self.root, self.artifact)
 
-    def test_resolve_preflight_rejects_legacy_titles(self) -> None:
+    def test_unregistered_legacy_writer_is_disabled_before_reading_titles(self) -> None:
         titles = self.root / ".cache/titles.json"
         titles.write_text('{"products": []}\n', encoding="utf-8")
-        with self.assertRaisesRegex(CacheIdentityError, "legacy_cache_missing_metadata"):
+        with self.assertRaisesRegex(SystemExit, "legacy_unregistered_delivery_disabled"):
             load_products(self.root, [1], workspace=self.root)
 
     def test_legacy_titles_cannot_be_attested_even_with_valid_rows(self):
@@ -259,8 +259,6 @@ class RuntimeMetaTests(unittest.TestCase):
             write_metadata(self.root, titles, producer)
             with self.assertRaisesRegex(CacheIdentityError, 'titles_'):
                 load_checked_json(self.root, titles)
-            with self.assertRaisesRegex(CacheIdentityError, 'titles_'):
-                load_products(self.root, [1], workspace=self.root)
             self.assertTrue(any('titles_' in reason for reason in inspect(resolve_runtime_paths(self.root, self.root))))
 
     def test_parse_uses_exact_authenticated_bytes_after_path_replacement(self):

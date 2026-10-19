@@ -78,67 +78,7 @@ def load_products(root: Path, wanted: list[int], identity: dict | None = None, w
     if paths.registered_scope():
         from final_quality_gate import approved_product
         return [approved_product(paths, pid) for pid in wanted]
-    identity = identity or expected_identity(paths)
-    titles = {int(row["product_index"]): row for row in load_checked_json(paths, paths.cache_dir / "titles.json", expected=identity)["products"]}
-    visual = load_checked_json(paths, paths.cache_dir / "person_coverage_audit.json", expected=identity, artifact_schema_version=2)
-    if visual.get("passed") is not True:
-        raise SystemExit("全量人物可见比例审计未通过")
-    visual_rows = {(int(row["product_index"]), str(row["plan_digest"])): row for row in visual.get("plans", [])}
-    products = []
-    for product_index in wanted:
-        directory = paths.cache_dir / f"product_{product_index:02d}_windowed"
-        manifest = load_checked_json(paths, directory / "approved_plans.json", product_id=product_index, expected=identity, artifact_schema_version=2)
-        rough = load_checked_json(paths, paths.cache_dir / f"product_{product_index:02d}_rough" / "rough_audit.approved.json", product_id=product_index, expected=identity, artifact_schema_version=2)
-        final = load_checked_json(paths, directory / "final_plan_audit.json", product_id=product_index, expected=identity, artifact_schema_version=2)
-        if rough.get("pipeline_version") != "2.1" or final.get("pipeline_version") != "2.1" or manifest.get("pipeline_version") != "2.1":
-            raise SystemExit(f"商品{product_index}仍是旧版派生缓存，必须按V2.1重新生成")
-        if rough.get("passed") is not True:
-            raise SystemExit(f"商品{product_index}语义审计状态不通过")
-        failed_variants = {str(row.get("variant_id")) for row in final.get("errors", []) if row.get("variant_id")}
-        rows = manifest.get("plans", [])
-        if not 1 <= len(rows) <= 3:
-            raise SystemExit(f"商品{product_index}合格版本数无效")
-        plans = []
-        for row in rows:
-            resolved = paths.resolve_reference(row["path"])
-            if resolved.legacy_absolute:
-                print(f"WARN legacy_absolute_plan_path: {row['path']}")
-            path = resolved.path
-            plan = load_checked_json(paths, path, product_id=product_index, expected=identity, artifact_schema_version=2)
-            if plan.get("pipeline_version") != "2.1" or plan.get("status") != "PASS":
-                raise SystemExit(f"商品{product_index}方案不是V2.1 PASS状态")
-            if str(plan.get("variant_id")) in failed_variants:
-                raise SystemExit(f"商品{product_index}批准清单包含终审失败版本")
-            duration = sum((int(c["source_end_frame"]) - int(c["source_start_frame"])) / float(plan.get("fps") or 30) for c in plan.get("clips", []))
-            if not 45.0 < duration < 60.0:
-                raise SystemExit(f"商品{product_index}存在时长不合格版本")
-            check = visual_rows.get((product_index, digest(path)))
-            if not check or check.get("passed") is not True or not float(check.get("host_visible_ratio", 0)) > 0.70:
-                raise SystemExit(f"商品{product_index}人物可见比例审计缺失或不通过")
-            for clip in plan.get("clips", []):
-                if int(clip["source_end_frame"]) <= int(clip["source_start_frame"]):
-                    raise SystemExit(f"商品{product_index}存在无效素材范围")
-                boundary = (clip.get("audit") or {}).get("boundary") or {}
-                if boundary.get("clean_start") is not True or boundary.get("clean_end") is not True:
-                    raise SystemExit(f"商品{product_index}存在未通过的切点")
-                if FORBIDDEN.search(str((clip.get("audit") or {}).get("transcript") or "")):
-                    raise SystemExit(f"商品{product_index}成片仍含禁用内容")
-            for left, right in zip(plan.get("clips", []), plan.get("clips", [])[1:]):
-                if left["source_file"] == right["source_file"] and abs(int(right["source_start_frame"]) - int(left["source_end_frame"])) <= 2:
-                    raise SystemExit(f"商品{product_index}仍有无意义物理剪辑点")
-            if int(plan.get("meaningless_cut_count", -1)) != 0 or int(plan.get("seam_tail_risk_count", 0)) != 0:
-                raise SystemExit(f"商品{product_index}物理剪辑或句尾风险未清零")
-            plans.append(plan)
-        validate_uniqueness(product_index, plans)
-        title = titles[product_index]
-        products.append({
-            "product_index": product_index,
-            "encoding_id": str(title["encoding_id"]),
-            "title": title["title"],
-            "plans": plans,
-        })
-    return products
-
+    raise SystemExit("legacy_unregistered_delivery_disabled: use the registered fixed delivery workflow and current person-presence audit")
 
 def item_row(item: object) -> dict:
     media = item.GetMediaPoolItem()
