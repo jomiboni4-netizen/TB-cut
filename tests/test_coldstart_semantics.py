@@ -8,7 +8,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from coldstart_semantics import (validate_unit, frame_append_spec, validate_selection,
                                  stage_a_payload, stage_b_payload, restore_b_aliases, require_product_match)
 from coldstart_semantics import eligible_for_stage_b, require_complete_stage_b_pool, product_cache
-from coldstart_semantics import selected_inputs
+from coldstart_semantics import selected_inputs, inherited_test_binding
 from semantic_evidence import FORBIDDEN
 
 
@@ -29,6 +29,16 @@ class ColdStartContractTests(unittest.TestCase):
             chosen.write_text(json.dumps({**fields, 'batch': {'batch_id': 'old-batch'},
                                           'runtime': {'status': 'OLD_PASS'}}))
             self.assertEqual(selected_inputs(chosen), fields)
+
+    def test_only_same_project_test_binding_is_inherited(self):
+        parent=dict(resolve=dict(source_timeline='source',target_timeline='final'),runtime=dict(
+            test_timeline_binding=dict(project_id='project',timeline_id='stable-test-id',name='test'),
+            external_semantic_review_authorization={'user_confirmed':True}))
+        self.assertEqual(inherited_test_binding(parent,'project'),parent['runtime']['test_timeline_binding'])
+        self.assertNotIn('external_semantic_review_authorization',inherited_test_binding(parent,'project'))
+        with self.assertRaisesRegex(ValueError,'mismatch'):inherited_test_binding(parent,'other-project')
+        parent['runtime']['test_timeline_binding']['name']='source'
+        with self.assertRaisesRegex(ValueError,'mismatch'):inherited_test_binding(parent,'project')
 
     def setUp(self):
         self.rows=[{'source_id':f'q{i}','source_stem':'raw','ordinal':i,'start':i*2.,'end':i*2.+2,'text':t}

@@ -68,6 +68,38 @@ def validate_physical_overlap(variants):
             used.append(clip)
 
 
+def source_start_matches(row, expected, fps):
+    if row['source_start'] == expected:
+        return True
+    # Resolve can truncate a floating source time just below an integer frame.
+    # Accept only independently agreeing time and exact left-offset readbacks;
+    # never tolerate an actual one-frame shift or change the raw API value.
+    return (row['source_start'] == expected - 1
+            and isinstance(fps, (int, float)) and fps > 0
+            and isinstance(row.get('source_start_time'), (int, float))
+            and isinstance(row.get('source_left_offset'), (int, float))
+            and abs(row['source_start_time'] * fps - expected) < 1e-6
+            and abs(row['source_left_offset'] - expected) < 1e-6)
+
+
+def source_end_mode(row, expected, fps):
+    raw = row['source_end_raw']
+    if 'source_end_time' in row:
+        if (not isinstance(fps,(int,float)) or fps <= 0
+                or not isinstance(row.get('source_end_time'),(int,float))
+                or not isinstance(row.get('source_left_offset'),(int,float))
+                or abs(row['source_end_time']*fps-expected) >= 1e-6
+                or abs(row['source_left_offset']+row['duration']-expected) >= 1e-6):
+            raise ValueError('readback_source_end_precision_mismatch')
+        if raw in (expected,expected-1):
+            return 'exclusive'
+    elif raw == expected-1:
+        return 'inclusive'
+    if raw == expected:
+        return 'exclusive'
+    raise ValueError('readback_source_end_mismatch')
+
+
 def check_readback(actual, clips, source_paths, start_frame):
     expected=[];record=start_frame
     for clip in clips:
@@ -79,13 +111,11 @@ def check_readback(actual, clips, source_paths, start_frame):
         rows=sorted([r for r in actual['rows'] if r['kind']==kind],key=lambda r:r['record_start'])
         if len(rows)!=len(expected):raise ValueError('readback_clip_count_mismatch_'+kind)
         modes=[]
-        for row,(media,start,end,left,right) in zip(rows,expected):
+        for row,(media,start,end,left,right),clip in zip(rows,expected,clips):
             if str(Path(row['media_path']).resolve())!=media:raise ValueError('readback_not_original_media')
             if (row['record_start'],row['record_end'],row['duration'])!=(left,right,right-left):raise ValueError('readback_record_gap_or_wrong_duration')
-            if row['source_start']!=start:raise ValueError('readback_source_start_mismatch')
-            if row['source_end_raw']==end:modes.append('exclusive')
-            elif row['source_end_raw']==end-1:modes.append('inclusive')
-            else:raise ValueError('readback_source_end_mismatch')
+            if not source_start_matches(row,start,clip.get('fps')):raise ValueError('readback_source_start_mismatch')
+            modes.append(source_end_mode(row,end,clip.get('fps')))
             verified.append({'kind':kind,'source_start':start,'source_end_exclusive':end,'record_start':left,'record_end_exclusive':right})
         if len(set(modes))!=1:raise ValueError('inconsistent_native_source_end_protocol')
         end_modes[kind]=modes[0]

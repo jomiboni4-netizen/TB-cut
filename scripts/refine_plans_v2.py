@@ -16,6 +16,7 @@ from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
 from runtime_meta import expected_identity, load_checked_json, write_metadata
+from audio_boundary_evidence import activity_at_cut
 
 
 RISK_ENDING = ("然后", "所以", "因为", "但是", "而且", "如果", "比如", "这个", "那个", "我们", "它的", "第一", "第二")
@@ -49,14 +50,18 @@ def audio_level_frames(media: Path, start: float, end: float) -> list[tuple[floa
 
 
 def refine_audio_end(media: Path, start: float, end: float, source_duration: float) -> tuple[float, dict]:
-    """Extend a cut only when sound continues across it and a nearby quiet run is found."""
+    """Propose an extension for activity across the cut, not later nearby speech.
+
+    The proposal still needs sentence ownership checks before application.
+    This signal audit never confirms a truncated word.
+    """
     lookback = max(start, end - 0.24)
     lookahead = min(source_duration, end + AUDIO_END_LOOKAHEAD_SEC)
     frames = audio_level_frames(media, lookback, lookahead)
-    before = [level for at, level in frames if end - 0.20 <= at < end]
-    after = [(at, level) for at, level in frames if end <= at < lookahead]
-    active_after = [(at, level) for at, level in after if level > AUDIO_SILENCE_DBFS]
-    continued = bool(active_after and active_after[0][0] <= end + AUDIO_FRAME_SEC * 2)
+    before = [level for at, level in frames if end - 0.20 <= at < end-1e-7]
+    after = [(at, level) for at, level in frames if end-1e-7 <= at < lookahead]
+    signal = activity_at_cut(frames, end, AUDIO_SILENCE_DBFS, AUDIO_FRAME_SEC)
+    continued = signal['activity_crosses_cut'] is True
     extension = 0.0
     quiet_run = 0
     quiet_start = None
@@ -80,7 +85,9 @@ def refine_audio_end(media: Path, start: float, end: float, source_duration: flo
         "speech_continues_after_end": continued,
         "quiet_run_found": extension > 0,
         "end_extension_sec": round(extension, 3),
-        "risk": bool(continued and extension == 0),
+        "risk": signal['activity_crosses_cut'] is None or bool(continued and extension == 0),
+        "signal_observation": signal,
+        "risk_scope": "signal_continuity_not_word_truncation",
     }
 
 
@@ -97,15 +104,18 @@ def audit_audio_start(media: Path, start: float, *, lower_bound: float | None = 
             break
     # Without an explicit sentence-owned envelope the audit must not move it.
     adjusted_start = max(lower_bound, min(start, onset)) if onset is not None and lower_bound is not None else start
-    before = [level for at, level in frames if at < adjusted_start]
+    before = [level for at, level in frames if at < adjusted_start-1e-7]
     active_before = bool(before and before[-1] > AUDIO_SILENCE_DBFS)
+    signal = activity_at_cut(frames, adjusted_start, AUDIO_SILENCE_DBFS, AUDIO_FRAME_SEC)
     return adjusted_start, {
         "method": "rms_dbfs_20ms",
         "silence_threshold_dbfs": AUDIO_SILENCE_DBFS,
         "speech_before_start": active_before,
         "start_onset_found": onset is not None,
         "start_extension_sec": round(start - adjusted_start, 3),
-        "risk": active_before,
+        "risk": signal['activity_crosses_cut'] is not False,
+        "signal_observation": signal,
+        "risk_scope": "signal_continuity_not_word_truncation",
     }
 
 

@@ -65,6 +65,30 @@ def selected_inputs(input_state):
     return inputs
 
 
+def inherited_test_binding(parent, project_id):
+    binding = parent.get('runtime',{}).get('test_timeline_binding')
+    if not binding:
+        return None
+    if (binding.get('project_id') != project_id or not all(isinstance(binding.get(k),str) and binding[k].strip()
+            for k in ('name','timeline_id')) or binding['name'] in
+            {parent['resolve']['source_timeline'],parent['resolve']['target_timeline']}):
+        raise ValueError('inherited_test_timeline_project_or_role_mismatch')
+    return dict(binding)
+
+
+def inherited_frame_rates(parent, project_id, input_state):
+    reference=parent.get('runtime',{}).get('frame_rate_registration')
+    if not reference: return None
+    from delivery_assembly import checked_file
+    from delivery_fps import CONTRACT
+    body=checked_file(reference,Path(input_state).resolve().parent)
+    if body.get('contract') != CONTRACT or body.get('project_id') != project_id:
+        raise ValueError('inherited_frame_rate_project_mismatch')
+    path=Path(reference['path'])
+    if not path.is_absolute(): path=Path(input_state).resolve().parent/path
+    return dict(path=str(path.resolve()),sha256=reference['sha256'])
+
+
 def init(repo, project_id, input_state):
     root = Path(repo).resolve()
     if not project_id:
@@ -86,6 +110,12 @@ def init(repo, project_id, input_state):
              'batch': {'batch_id': run_id, 'product_ids': [], 'completed_product_ids': [], 'failed_product_ids': []},
              'batch_overrides': {'skip_blank_titles': True, 'preserve_blank_row_indices': True},
              'runtime': {'pipeline_version': VERSION, 'rule_version': VERSION, 'resolve_write_enabled': False}}
+    parent_state = json.loads(Path(input_state).read_text())
+    frame_rates=inherited_frame_rates(parent_state,project_id,input_state)
+    if frame_rates: state['runtime']['frame_rate_registration']=frame_rates
+    test_binding = inherited_test_binding(parent_state,project_id)
+    if test_binding:
+        state['runtime']['test_timeline_binding'] = test_binding
     atomic_json(paths.workspace_root / 'PROJECT_CONFIG.json', config)
     atomic_json(paths.state_path, state)
     manifest = []

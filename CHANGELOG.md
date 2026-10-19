@@ -4,6 +4,10 @@
 
 # Change Log
 
+## 2026-10-19 — 切点声音提示与局部核实
+- 首尾电平检查只判断紧邻切点的声音连续性，修复后句起声和浮点窗口误分类造成的风险提示；不据此宣称吞字或字音完整。
+- 增加只读、身份校验及源级缓存支持的局部诊断入口，保留原方案与原ASR，分别记录新计算、命中、失败及耗时。诊断结果不提供最终声音通过或Resolve写入许可。
+
 ## 2026-10-15 — workbook runtime compatibility records
 - Keep the 2.8.93 exact distribution locks for strict historical replay; allow daily use only for Node/artifact-tool environments reviewed against the workbook contract and an exact bundled distribution digest.
 - Verify an approved distribution once per repository runtime environment, reuse its local identity record across Resolve workspaces, and recheck its lightweight file stamp and contract revision on each run.
@@ -148,3 +152,16 @@
 - 2026-10-18：通用句首改为原句锚定与有界词间修边，静音不再改选句首；终审协议升级，旧切点证据不可复用。
 
 - 2026-10-18：按用户澄清区分语义与定位：取消以半帧取整误差和中段承接词自动否定句子的拦截；原ASR不改写，声学风险保留；ASR前真实音频窗口起点对齐20ms网格。
+
+- 2026-10-19：增加句子拥有范围内的本机静音修边，保留原词时间，未决声音风险不放行；Resolve源起点整数API出现浮点截断时，仅在精确时间和左偏移共同确认后通过回读。
+
+## 2026-10-19 — 固定执行与分项计时
+
+- 将句子选词后的组装、片段级声音缓存、独立语义/人物并行检查及新建合并时间线事务收敛到delivery_pipeline固定入口；正常商品改JSON参数，不再生成本轮专用执行器。
+- 源级ASR继续按模型/参数/素材/窗口封存复用，只有miss才转写；组装、逐段声音、最终语义、人物和写入按职责失效。旧证据保留，不自动升级。
+- 增加创建/追加前事务记录、核验式恢复和新OS进程独立回读，部分写入禁止自动重放；保留所有既有线。新增显式计算/选段/开发/等待/验证与返工时间账，未知间隔不补造。
+
+- 2026-10-19：按用户要求固定复用已登记的测试时间线；全部审核和备份完成后仅清空该线片段/标记再写入，保留其他时间线，避免按商品新建。
+- 2026-10-19：扩展Resolve结束帧精度回读：精确结束时间与源左偏移加时长必须同时吻合，才解释整数API少一帧的取整误差；实际偏移继续阻断，原始读数保留。
+
+- 2026-10-19：组合阶段增加绑定原词/上下文/逐接缝的主Codex细审记录，先阻断残句与删首词问题；项目帧率显式读取登记、同项目继承复用，写前只读核对，禁止反复设置既有时间线帧率。保留独立终审、逐帧时钟与源端精确回读；不重写已验收成品。

@@ -45,7 +45,8 @@ class Trial:
         self.base = dict(contract=CONTRACT, run=self.run['run_id'], product=product,
             inputs=self.run['input_content_digest'],
             producer=digest({n: _sha256(Path(__file__).with_name(n)) for n in
-                ('sentence_trial.py', 'sentence_boundaries.py', 'final_quality_gate.py', 'refine_plans_v2.py')}),
+                ('sentence_trial.py', 'sentence_boundaries.py', 'final_quality_gate.py', 'refine_plans_v2.py',
+                 'audio_boundary_evidence.py')}),
             rules=_sha256(self.paths.repo_root/'PROJECT_RULES.md'))
 
     def event(self, stage, status, **extra):
