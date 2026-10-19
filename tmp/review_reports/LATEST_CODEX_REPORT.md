@@ -18,7 +18,7 @@
 
 ## External actions
 
-MiMo called: no。Resolve connected: no。export performed: no。已只读确认远端分支与现有PR；本次推送及创建草稿PR获用户授权，结果将在完成后更新。保留现有PR，不合并任何PR。
+MiMo called: no。Resolve connected: no。export performed: no。公开代码已提交并推送，草稿PR #5已创建并附到当前会话：https://github.com/jomiboni4-netizen/TB-cut/pull/5 。已核对PR分支和远端代码提交一致。保留现有PR，不合并任何PR。
 
 ## Blockers
 
@@ -26,47 +26,9 @@ MiMo called: no。Resolve connected: no。export performed: no。已只读确认
 
 ## Git state
 
-此为提交前快照：分支codex/sentence-boundaries-sync，HEAD b994e42d3bc0983aea440cafa8ac711a421ddc68。未暂存；仅显式选择公开文件，不采用git add全部。历史运行archive保留本地。提交后将核对远端提交与新草稿PR。
+此为本次摘要提交之前的快照：分支codex/sentence-boundaries-sync，代码HEAD 4f489bdc1954b366f4ed6dd8cc35e64b1d736dfc已推送并与PR #5一致。公开代码已提交；仅此摘要待提交。未跟踪archive留本地，其余运行数据保持忽略。摘要提交后再次核对远端，不把当前报告写成自引用提交号。
 
 ```text
- M CHANGELOG.md
- M PROJECT_RULES.md
- M docs/PIPELINE_DEPENDENCIES.md
- M package.json
- M scripts/asr_identity.py
- M scripts/check_workbook_dependencies.mjs
- M scripts/codex_worker.py
- M scripts/coldstart_resolve.py
- M scripts/coldstart_semantics.py
- M scripts/final_quality_gate.py
- M scripts/inspect_title_workbook.mjs
- M scripts/product_semantic_preview.py
- M scripts/project_doctor.py
- M scripts/query_table_resize.mjs
- M scripts/refine_plans_v2.py
- M scripts/registered_pipeline.py
- M scripts/resolve_connection_doctor.py
- M scripts/runtime_meta.py
- M scripts/runtime_paths.py
- M scripts/semantic_evidence.py
- M scripts/update_title_counts.mjs
- M tests/quality_fixtures.py
- M tests/test_coldstart_resolve.py
- M tests/test_coldstart_semantics.py
- M tests/test_migrate_runtime_layout.py
- M tests/test_resolve_connection.py
- M tests/test_runtime_meta.py
- M tests/test_runtime_paths.py
- M tests/test_workbook_dependencies.py
  M tmp/review_reports/LATEST_CODEX_REPORT.md
 ?? archive/
-?? config/workbook-compatibility.json
-?? docs/NATURALNESS_EVALUATION.md
-?? docs/SELF_ITERATION_PLAN.md
-?? scripts/check_workbook_structure.py
-?? scripts/sentence_boundaries.py
-?? scripts/sentence_trial.py
-?? scripts/sentence_trial_repair.py
-?? tests/test_sentence_boundaries.py
-?? tests/test_workbook_runtime_compatibility.py
 ```
