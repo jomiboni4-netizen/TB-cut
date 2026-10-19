@@ -1,6 +1,7 @@
 """Local weights and actual inference settings; never download on identity lookup."""
 from pathlib import Path
 import os
+import math
 from runtime_meta import CacheIdentityError, _sha256
 from project_registry import digest
 from compute_metrics import span
@@ -9,7 +10,12 @@ _weights = {}
 
 PARAMETERS = {'language': 'zh', 'beam_size': 5, 'vad_filter': True, 'word_timestamps': True,
               'condition_on_previous_text': False, 'device': 'cpu', 'compute_type': 'int8',
-              'protocol': 'window-words-v3'}
+              'protocol': 'window-words-v4-grid-origin', 'audio_origin_grid_seconds': .02}
+
+
+def snap_interval(start, end, duration):
+    """Snap decoded audio outward BEFORE ASR; preserve actual source timestamps."""
+    return max(0., math.floor(start*50 + 1e-8)/50), min(duration, math.ceil(end*50 - 1e-8)/50)
 
 
 def model_identity(name):

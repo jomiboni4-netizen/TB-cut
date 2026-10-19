@@ -13,6 +13,7 @@ from build_expanded_codex_request import build_wide_candidates
 from publish_confirmed_ranges import build_confirmed_ranges
 from refine_plans_v2 import (refine_words, normalize_physical_clips, audit_audio_start,
                             refine_audio_end, media_duration)
+from sentence_boundaries import CONTRACT as SENTENCE_CONTRACT, SELECTION_RULE, bounded_edges
 from compute_metrics import span
 from compute_store import media_signature, identity as compute_identity, cached, containing_asr
 from asr_identity import model_identity as asr_model_identity, PARAMETERS as ASR_PARAMETERS
@@ -84,6 +85,7 @@ def selection_task(paths, candidate_ref):
             'range_references': [d['path'] for d in identity['dependencies']],
             'candidates': candidate['body']['candidates'], 'completed_stages': ['range', 'candidate'],
             'issues': [], 'target_stage': 'rough',
+            'sentence_opening_rule': SELECTION_RULE,
             'hard_rules': 'Up to 3 distinct variants; target 48–56 seconds, final strictly >45 and <60; no banned content, no overlap or duplicate selling points. Return selected_ranges; do not invent source times.'}
     task['task_digest'] = digest(task)
     return task
@@ -128,6 +130,9 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
     jobs = [{'source_file': by_id[r['candidate_id']]['source_file'], 'start': max(0, r['start']-2),
              'end': min(sources[by_id[r['candidate_id']]['source_file']]['duration'], r['end']+3)}
             for r in rough['body']['selected_ranges']]
+    from asr_identity import snap_interval
+    for job in jobs:
+        job['start'], job['end'] = snap_interval(job['start'], job['end'], sources[job['source_file']]['duration'])
     weights = asr_model_identity(model_name)
     from adaptive_vision import decoder_identity
     parameters = {**ASR_PARAMETERS, 'decoder': decoder_identity(),
@@ -194,7 +199,7 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None):
     sources = {Path(s['video_path']).name: s for s in index['sources']}
     by_id = {c['candidate_id']: c for c in candidate['body']['candidates']}
     args = dict(product_id=rough['identity']['product_id'], encoding_id=rough['identity']['encoding_id'],
-                stage='plan', version=digest([rough_ref, asr_ref, fps]), model_version='word-frame-audio-v3',
+                stage='plan', version=digest([rough_ref, asr_ref, fps, SENTENCE_CONTRACT]), model_version=SENTENCE_CONTRACT,
                 dependencies=[range_ref, rough_ref, asr_ref])
     snapshot = capture_stage(paths, **args)
     variants = {}
@@ -207,18 +212,20 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None):
         if source_file not in frame_rates:
             frame_rates[source_file] = fps if fps is not None else source_fps(media, paths)
         clip_fps = frame_rates[source_file]
+        lo, hi, edge_proof = bounded_edges(window['words'], boundary['first_word_index'], boundary['last_word_index'], clip_fps)
+        start, end = lo/clip_fps, hi/clip_fps
         with span('audio_rms_boundaries', end-start):
-            start, opening = audit_audio_start(media, start)
-            end, ending = refine_audio_end(media, start, end, sources[source_file]['duration'])
-        lo, hi = math.floor(start*clip_fps), math.ceil(end*clip_fps)
+            _, opening = audit_audio_start(media, start)
+            _, ending = refine_audio_end(media, start, end, sources[source_file]['duration'])
+            ending['risk'] = ending['risk'] or ending.get('end_extension_sec', 0) > 0
         if not any(part['media_stem']+'.mp4' == source_file and part['start'] <= lo/clip_fps < hi/clip_fps <= part['end'] for part in ranges):
             raise CacheIdentityError('refined_plan_outside_confirmed_range')
         words = window['words']
-        text = ''.join(w['text'] for w in words if w['end'] > lo/clip_fps and w['start'] < hi/clip_fps)
+        text = ''.join(w['text'] for w in words[boundary['first_word_index']:boundary['last_word_index']+1])
         clip = {'source_file': source_file, 'source_start_frame': lo, 'source_end_frame': hi,
                 'audio_start_frame': lo, 'audio_end_frame': hi, 'fps': clip_fps, 'duration_sec': (hi-lo)/clip_fps,
-                'words': words, 'transcript': text, 'audio_boundary_verified': not opening['risk'] and not ending['risk'],
-                'audit': {'transcript': text, 'boundary': boundary}}
+                'words': words, 'sentence_edges': edge_proof, 'transcript': text, 'audio_boundary_verified': not opening['risk'] and not ending['risk'],
+                'audit': {'transcript': text, 'boundary': boundary, 'audio_cutpoint': {'start': opening, 'end': ending}}}
         variants.setdefault(row['variant_id'], []).append(clip)
     normalized = []
     for vid, clips in variants.items():
@@ -227,7 +234,8 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None):
             clip_fps = clip['fps']
             clip['audio_end_frame'] = clip['source_end_frame']
             clip['audio_boundary_verified'] = all(c['audio_boundary_verified'] for c in clips)
-            clip['transcript'] = ''.join(w['text'] for w in clip['words'] if w['end'] > clip['source_start_frame']/clip_fps and w['start'] < clip['source_end_frame']/clip_fps)
+            proof = clip.get('sentence_edges', {})
+            clip['transcript'] = ''.join(w['text'] for w in clip['words'][proof.get('first_word_index',0):proof.get('last_word_index',len(clip['words'])-1)+1])
         normalized.append({'variant_id': vid, 'clips': merged})
     body = {'variants': normalized, 'selection_receipt': rough['body']['selection_receipt'],
             'selection_task': rough['body']['selection_task']}

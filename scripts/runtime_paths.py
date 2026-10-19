@@ -111,6 +111,10 @@ class RuntimePaths:
 
 def resolve_runtime_paths(repo_root: Path | str, workspace: Path | str | None = None) -> RuntimePaths:
     repo = Path(repo_root).expanduser().resolve()
-    configured = workspace if workspace is not None else os.environ.get("TB_CUT_WORKSPACE")
-    root = Path(configured).expanduser().resolve() if configured else repo
+    environment = os.environ.get("TB_CUT_WORKSPACE")
+    if workspace is not None and environment and Path(workspace).expanduser().resolve() != Path(environment).expanduser().resolve():
+        raise ArtifactPathError("workspace_identity_conflict: --workspace differs from TB_CUT_WORKSPACE")
+    if workspace is None or not str(workspace).strip():
+        raise ArtifactPathError("explicit_workspace_required: pass --workspace; TB_CUT_WORKSPACE only checks conflicts")
+    root = Path(workspace).expanduser().resolve()
     return RuntimePaths(repo, root)

@@ -8,6 +8,8 @@
 
 ## Git and public repository workflow
 
+- 新商品执行必须显式指定 `--workspace`；若还设置 `TB_CUT_WORKSPACE`，两者不同则停止，仅有环境变量也不能隐式选择旧工作区。冷启动 `init` 还必须以 `--input-state` 显式选择本次 MP4、SRT、Excel 和 Resolve 输入清单。根目录旧状态、历史 RUN 和旧报告不能作为默认新任务输入；历史工作区只读保留，不参与默认候选检索。
+
 - Keep every Codex change to public repository files in the Git working tree and reviewable with `git diff` or `git diff --cached`. Do not restore or overwrite changes merely to erase their diff.
 - Develop on a task branch, not directly on the default branch. Use pull requests as the GPT review entry point when a GitHub remote is configured.
 - At the end of each stage, report the branch, latest commit, changed files, tests, and PR number when available.
@@ -169,10 +171,10 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 ## Resolve
 
-- 所有连接、检查、写入和导出入口统一使用 `scripts/resolve_connection.py`，不得临时只调用 `scriptapp("Resolve")` 后就宣布未连接。Codex 在此 Mac 上直接于沙盒外运行 `python3 scripts/resolve_connection_doctor.py --root .` 做只读检查，再判断项目是否就绪。
+- 所有连接、检查、写入和导出入口统一使用 `scripts/resolve_connection.py`，不得临时只调用 `scriptapp("Resolve")` 后就宣布未连接。Codex 在此 Mac 上于沙盒外运行 `python3 scripts/resolve_connection_doctor.py --root . --workspace <本次明确选定的工作区>` 做只读检查，再判断项目是否就绪。
 - 重连每次重新获取 API 对象并检查可读性；默认依次尝试本机、回环地址和当次 `en0` / `en1` 地址，最多四轮，不固定旧 IP。设置 `RESOLVE_HOST` 时尊重明确主机，不回退到其他网络主机。不得缓存跨达芬奇进程生命周期的对象。
 - 达芬奇关闭时无法连接；打开但尚未就绪时自动重试。检查进程默认二十秒超时；连接成功后仍验证当前项目、源/目标时间线。仅重试连接，绝不自动重放时间线写入。
-- 连接诊断保存在忽略的 `.cache/resolve_connection_status.json`。重连失败时先区分程序未运行、API 不可用、项目未打开或不匹配、检查超时，再说明实际阻塞；未经完整回退尝试不得要求用户改偏好设置或找旧记录。新窗口以本规则和统一脚本为准。
+- 连接诊断保存在所选工作区忽略的 `.cache/resolve_connection_status.json`。重连失败时先区分程序未运行、API 不可用、项目未打开或不匹配、检查超时，再说明实际阻塞；未经完整回退尝试不得要求用户改偏好设置或找旧记录。新窗口以本规则和统一脚本为准。
 - Automatically write only after all hard audits pass.
 - Source timeline is read-only.
 - Resolve project/source timeline/target timeline are user-specified per project/batch state.
@@ -201,3 +203,10 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 - For each group: verify complete accepted boundaries/candidates, perform Codex selection, refine and independently review final audio/semantic seams, check every applicable hard rule, and record immutable PASS/REPAIRABLE/BLOCKED checkpoints before eligible Resolve write. Proceed to the next group only after quality gate passes; a blocker must be reported with affected products, dependencies and safe resumption instructions. Preserve completed valid groups and revalidate on upstream change rather than recomputing the entire project.
 - Project-wide completion requires an explicit per-product/per-variant ledger and a final cross-group consistency pass (source overlaps and relevant duplicates, durations, semantic review revisions, host ratio, cuts, audio/video source synchronization, and Resolve readback). Mark "edited", "written", "exported" and "verified" separately. Never claim the whole project completed from one group PASS.
 - The 3–5 Codex correction-cycle limit is a **code-development cap across these requirements**, not a limit of product groups or normal per-product repair attempts. The full-project processing quality gate must not be bypassed to fit a correction round.
+
+## 通用句首与切点约束（2026-10-18）
+
+- 所有新商品使用sentence-owned-edges-v2-frame-estimate：Codex结合原素材前文选择独立完整句首，本地声音修边不能改选句子或越入未保留的前后词。静音、字幕分行与拼接后ASR均不是独立句首证明。
+- 语义独立、残句、依赖关系由Codex结合原源上下文判断；中段有承接词不自动拒绝。ASR与帧格半帧以内的取整误差只记为定位估计，不据此否定句子或声称精确音素认证。显著词时间冲突及真实声音风险仍待修复；禁止改写原ASR时间或无限扩边伪造通过。终审语义角色不重复要求真人试听、画面或本机检测已负责的证据。
+- 旧切点方案及旧终审不兼容新协议，需重建受影响方案与审核；源字幕索引、模型权重和符合身份校验的源级证据不因本次逻辑升级自动作废。
+- 新商品试跑用事件账记录阶段起止、失败、等待与未归因时间，代码开发耗时与商品运行耗时分开。

@@ -67,17 +67,23 @@ def main():
     global STATUS_PATH
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument('--status-path', type=Path, help='Isolated diagnostic file for this run')
     args = parser.parse_args()
+    from runtime_paths import resolve_runtime_paths
+    workspace = resolve_runtime_paths(args.root, args.workspace).workspace_root
+    if not (workspace / 'PROJECT_STATE.json').is_file():
+        parser.error('selected_workspace_state_missing')
+    STATUS_PATH = workspace / '.cache' / 'resolve_connection_status.json'
     if args.status_path:
         STATUS_PATH = args.status_path.resolve()
     if args.timeout <= 0:
         parser.error("timeout must be positive")
     if args.worker:
         try:
-            out, code = check(args.root)
+            out, code = check(workspace)
         except Exception as exc:
             out, code = {"ready": False, "reason": "read_failed", "error_type": type(exc).__name__}, 1
         record_check(out)
@@ -88,6 +94,7 @@ def main():
         env = dict(os.environ, PYTHONUTF8="1")
         child = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), "--root", str(args.root.resolve()),
+             '--workspace', str(workspace),
              '--status-path', str(STATUS_PATH), "--worker"],
             capture_output=True, text=True, encoding="utf-8", timeout=args.timeout, env=env,
         )

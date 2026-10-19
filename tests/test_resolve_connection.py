@@ -95,8 +95,10 @@ class ResolveConnectionTests(unittest.TestCase):
         self.assertEqual((report["reason"], code), ("project_mismatch", 1))
 
     def test_native_hang_times_out_in_separate_process(self):
-        with patch.object(sys, "argv", ["doctor", "--timeout", "1"]), patch.object(doctor.subprocess, "run", side_effect=subprocess.TimeoutExpired("worker", 1)), patch.object(doctor, "record_check"), contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(doctor.main(), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'PROJECT_STATE.json').write_text('{}')
+            with patch.object(sys, "argv", ["doctor", "--workspace", tmp, "--timeout", "1"]), patch.object(doctor.subprocess, "run", side_effect=subprocess.TimeoutExpired("worker", 1)), patch.object(doctor, "record_check"), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(doctor.main(), 1)
         self.assertEqual(json.loads(output.getvalue())["reason"], "connection_check_timed_out")
 
     def test_timeout_does_not_leave_old_success_in_diagnostics(self):
@@ -112,8 +114,10 @@ class ResolveConnectionTests(unittest.TestCase):
 
     def test_worker_crash_is_reported_as_failure(self):
         child = SimpleNamespace(stdout="", returncode=-11)
-        with patch.object(sys, "argv", ["doctor"]), patch.object(doctor.subprocess, "run", return_value=child), patch.object(doctor, "record_check"), contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(doctor.main(), -11)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'PROJECT_STATE.json').write_text('{}')
+            with patch.object(sys, "argv", ["doctor", "--workspace", tmp]), patch.object(doctor.subprocess, "run", return_value=child), patch.object(doctor, "record_check"), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(doctor.main(), -11)
         self.assertEqual(json.loads(output.getvalue())["reason"], "connection_worker_failed")
 
     def test_all_project_entry_points_share_connector(self):

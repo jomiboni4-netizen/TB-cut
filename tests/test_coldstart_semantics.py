@@ -1,15 +1,35 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from coldstart_semantics import (validate_unit, frame_append_spec, validate_selection,
                                  stage_a_payload, stage_b_payload, restore_b_aliases, require_product_match)
-from coldstart_semantics import eligible_for_stage_b, require_complete_stage_b_pool
+from coldstart_semantics import eligible_for_stage_b, require_complete_stage_b_pool, product_cache
+from coldstart_semantics import selected_inputs
 from semantic_evidence import FORBIDDEN
 
 
 class ColdStartContractTests(unittest.TestCase):
+    def test_new_run_requires_explicit_input_manifest(self):
+        with self.assertRaisesRegex(ValueError, 'explicit_input_state_required'):
+            selected_inputs(None)
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            title = base / 'new.xlsx'
+            title.write_bytes(b'new workbook')
+            (base / 'new.srt').write_text('synthetic')
+            (base / 'new.mp4').write_bytes(b'synthetic')
+            chosen = base / 'selected.json'
+            fields = {'title_path': str(title), 'subtitle_paths': [str(base / 'new.srt')],
+                      'video_paths': [str(base / 'new.mp4')],
+                      'resolve': {'project_name': 'new', 'source_timeline': 'source', 'target_timeline': 'review'}}
+            chosen.write_text(json.dumps({**fields, 'batch': {'batch_id': 'old-batch'},
+                                          'runtime': {'status': 'OLD_PASS'}}))
+            self.assertEqual(selected_inputs(chosen), fields)
+
     def setUp(self):
         self.rows=[{'source_id':f'q{i}','source_stem':'raw','ordinal':i,'start':i*2.,'end':i*2.+2,'text':t}
                    for i,t in enumerate(['这件夹克用羊毛。','因为纤维细，','所以穿着柔软。'])]
@@ -17,6 +37,17 @@ class ColdStartContractTests(unittest.TestCase):
         self.run={'project_key':'project-identity','run_id':'new-run'}
         self.unit={'source_ids':['q0','q1','q2'],'text':''.join(r['text'] for r in self.rows),'product_attribution':'MATCH',
                    'continuous_clip_recommended':True,'complete_semantics':'夹克材料及因果完整'}
+
+    def test_rerun_batch_keeps_multiple_products_in_separate_output_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);state_path=root/'PROJECT_STATE.json'
+            state_path.write_text(json.dumps({'batch':{'product_ids':[33,11,2]}}))
+            paths=SimpleNamespace(state_path=state_path,cache_dir=root/'.cache')
+            self.assertEqual(product_cache(paths,33),root/'.cache/products/product_33')
+            self.assertEqual(product_cache(paths,11),root/'.cache/products/product_11')
+            self.assertNotEqual(product_cache(paths,33),product_cache(paths,11))
+            with self.assertRaisesRegex(ValueError,'product_outside_rerun_batch'):
+                product_cache(paths,26)
 
     def test_phrase_splicing_and_reordering_are_rejected(self):
         for ids in (['q0','q2'],['q2','q1','q0']):

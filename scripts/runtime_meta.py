@@ -96,7 +96,7 @@ def _files(paths: list[str], suffix: str) -> list[Path]:
 
 
 def _paths(root: Path | RuntimePaths) -> RuntimePaths:
-    return root if isinstance(root, RuntimePaths) else resolve_runtime_paths(root)
+    return root if isinstance(root, RuntimePaths) else resolve_runtime_paths(root, root)
 
 
 def _state(root: Path | RuntimePaths) -> dict:

@@ -77,11 +77,15 @@ Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作
 
 `runtime_meta.load_checked_json()` 解析与 SHA 校验使用同一份 bytes，不再校验后重开文件。标题的两个消费者（范围生成、Resolve 写入）和 workspace preflight 均通过统一验证，要求 producer、titles schema/generator、连续商品编号、唯一字符串 ID、有效标题和 source/sheet。这些是来源约定，不是抵御恶意伪造的数字签名。subtitle 新增 generator 标记，旧生成器产物不能仅凭通用 identity 复用。升级记录见 `docs/CACHE_SAFETY_UPGRADE.json`；真实 state/cache 未改写。
 
-## Pinned workbook dependencies
+## Workbook runtime compatibility
 
-`package.json` 固定 Node **24.19.0**、`@oai/artifact-tool` **2.8.93**。`workbook-dependencies.lock.json` 与实际检查使用的 `config/workbook-runtime-v4.lock.json` 一致，锁定 Codex primary runtime **26.1011.11113 / darwin arm64** 的完整 artifact-tool 文件树摘要（包含全部传递依赖）。该 module 是私有、带 bundled dependencies 的分发包；这些锁是分发锁，不是 npm package-lock，不能声称公开 `npm ci` 可安装。使用该 bundle 中的 Node 和模块；不得用其他 XLSX parser 替代，也不要复制真实业务工作簿到审核环境。其他平台或拿不到相同 bundle 的审核环境仍有依赖 blocker，必须如实报告。
+`package.json` allows compatible artifact-tool 2.x releases. Daily use is governed by `config/workbook-compatibility.json`, which records exact Node/platform/package versions, a bundled distribution tree digest, the required API surface, the tested workbook contract and a digest of the code/tests that produced that result. A version is accepted only when its exact environment and code contract have a passing record. Unknown versions remain unverified; workbook readers and writers stop, while Project Doctor reports the workbook-only blocker as a warning and completes unrelated checks.
 
-只读依赖检查：`<node-executable> scripts/check_workbook_dependencies.mjs`。检查 Node/平台/module 版本、完整文件树摘要及 workbook API 可导入性，不加载工作簿；正式 parser 同样强制检查。Project Doctor 和标题索引默认优先使用 `~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node`，也可用 `--node` 显式指定；依赖检查失败返回非零。完整 synthetic suite：`TB_CUT_TEST_NODE=<node-executable> python3 -B -m unittest discover -s tests -v`。单独真实 Node→Python synthetic integration：`TB_CUT_TEST_NODE=<node-executable> PYTHONPATH=tests python3 -B -m unittest test_index_titles.IndexTitlesTests.test_node_machine_parser_and_real_generator_on_synthetic_workbook -v`。不能通过跳过 integration 来宣称依赖通过。
+The current tested environment is Node **24.19.0** with bundled `@oai/artifact-tool` **2.8.94**. Its first verification checks the complete distribution tree, required API functions and workbook contract; a repository-local ignored runtime record then lets later Resolve workspaces reuse the proof after a lightweight file stamp and code digest check. This avoids repeating the full dependency tree hash for each project. If the module changes, its environment changes, or the workbook code/tests change, the record no longer matches and that workbook environment needs review.
+
+The exact **2.8.93** records in `workbook-dependencies.lock.json` and `config/workbook-runtime-v4.lock.json` remain unchanged for historical reproduction. Run `node scripts/check_workbook_dependencies.mjs --mode strict-history` only when reproducing that distribution; it is not the daily default. These lock files are private bundled-distribution evidence, not an npm registry lock, so they do not claim that public `npm ci` can install the package.
+
+Daily check: `<node-executable> scripts/check_workbook_dependencies.mjs`. Project Doctor uses the same check but classifies unverified/incompatible workbook support as a warning. The formal parser and backfill still require `status=verified`. Backfill exports to a temporary file, reopens it, compares non-target cell values, formulas and styles, verifies counts, then atomically replaces the requested workbook. Excel reads and writes use the Codex-bundled Node and artifact-tool; a different parser is not used. Synthetic integration and actual locally registered workbook checks are recorded in the compatibility manifest and sanitized review report.
 
 ## Recovery authorization boundary
 
@@ -239,3 +243,13 @@ ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需�
 未编码/未迁移：真实 Resolve 写入/回读/幂等恢复与导出验证、精确 VFR、完整自动语义返修；旧固定路径候选/范围覆盖、window_quality/ASR/refine batch CLI、旧粗选/语义/repair、validate/export/attest/migration/preflight/cleanup 仍不作为新登记链消费者。保留第 2 轮阻塞，不宣称全面迁移。统一批准和 Resolve loader/check-only 使用新门禁，实际写入入口仍拒绝。
 
 来源：Apple VNDetectHumanRectanglesRequest 仅检测人体（https://developer.apple.com/documentation/vision/vndetecthumanrectanglesrequest）；Wilson 的二项比例公式参考 NIST（https://itl.nist.gov/div898/handbook/prc/section2/prc241.htm），连续视频相关性限制由本轮明确保守处理，不作该公式的统计保证。
+
+## 句首约束与新商品试跑
+
+- `sentence_boundaries.py` 负责句子原文对齐、绑定逐词上下文的有界修边及半帧取整估计；静音不能替代语义独立判断。
+- `registered_pipeline.py` 和旧版物理生成入口均停止按附近较大停顿改选首词；`final_quality_gate.py` 升级到v7，缺失或过期的句首证据会被否决。
+- `sentence_trial.py --workspace ... --product ...` 复用显式新运行中已校验的索引，以单个执行器完成选句、本机ASR、物理检查与独立复核。事件日志区分失败、同轮缓存、阶段执行和执行间间隔。
+- 词边界不可切时，`sentence_trial_repair.py` 可在同轮ASR的安全整帧边界内做一次整池重选；不修改原ASR时间，不把候选减少伪报为完成，不授予草稿写入豁免。
+- 该试跑入口不写Resolve；人物与时间线阶段只有在前序检查真正通过后才有意义。试跑失败应记录为REPAIRABLE，不能宣称成品通过或整轮提速。
+
+- Codex负责语义，本机负责定位与声学风险。ASR取整不是音素准确性认证；20ms窗口起点对齐发生在真实声音截取之前，原ASR结果不后移或重写。

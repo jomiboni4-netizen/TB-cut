@@ -4,6 +4,12 @@
 
 # Change Log
 
+## 2026-10-15 — workbook runtime compatibility records
+- Keep the 2.8.93 exact distribution locks for strict historical replay; allow daily use only for Node/artifact-tool environments reviewed against the workbook contract and an exact bundled distribution digest.
+- Verify an approved distribution once per repository runtime environment, reuse its local identity record across Resolve workspaces, and recheck its lightweight file stamp and contract revision on each run.
+- Make Project Doctor warn when workbook operations are unverified or incompatible while keeping unrelated checks available; workbook readers and writers still fail closed.
+- Validate count backfills on an exported temporary file, reopen it, verify non-target values/formulas/styles and counts, then atomically replace the requested file. Recover zero-padded numeric IDs from OOXML evidence.
+
 ## 2026-10-13 — 商品语义定位与 MiMo 两阶段分析
 - Excel 商品编号与编码只标识 SKU；链接号是辅助线索。新增只供本地语义筛选的宽窗口，不自动发布正式商品范围。
 - 禁用内容改为句内子句过滤；保留有效片段、原 cue 来源，并标记混合句切点复核。MiMo 拆成商品归属/句群提取与版本组装两阶段。
@@ -134,3 +140,11 @@
 - 阶段A统一收集合法完整句群；阶段B基于全池联合分配来源时间与卖点，默认寻找3条内容不同、源时间零正重叠的成片，不能找到首条即停。
 - 允许最终0–2条真正合格成片；不足3条须逐项记录素材、内容、时长、来源、语义或技术门禁的实际原因，不以低质量内容凑数。
 - 当前工作簿运行时统一锁定 Node 24.19.0 与 artifact-tool 2.8.93；修复依赖测试只因测试夹具缺配置而误报通过的问题。
+
+# 2026-10-14 — 历史运行逻辑隔离
+
+- 新任务要求明确 `--workspace` 和冷启动输入清单；环境变量仅用于冲突检查，不能隐式选择旧批次。旧语义预览不再读取固定历史候选范围，Resolve 只读诊断按选定工作区核对项目。历史缓存和冻结证据原位保留。
+
+- 2026-10-18：通用句首改为原句锚定与有界词间修边，静音不再改选句首；终审协议升级，旧切点证据不可复用。
+
+- 2026-10-18：按用户澄清区分语义与定位：取消以半帧取整误差和中段承接词自动否定句子的拦截；原ASR不改写，声学风险保留；ASR前真实音频窗口起点对齐20ms网格。

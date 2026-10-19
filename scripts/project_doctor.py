@@ -13,7 +13,7 @@ def main():
     ap.add_argument("--node", default=None)
     args = ap.parse_args()
     root = Path(args.root).resolve()
-    paths = resolve_runtime_paths(root, args.workspace)
+    paths = resolve_runtime_paths(root, args.workspace or root)
     errors, warnings = [], []
     for rel in REQUIRED:
         if not (root / rel).exists(): errors.append(f"missing: {rel}")
@@ -35,12 +35,21 @@ def main():
     try:
         result = subprocess.run([args.node or preferred_node(), str(root / "scripts/check_workbook_dependencies.mjs")],
                                 capture_output=True, text=True, timeout=60)
-        if result.returncode:
-            errors.append("workbook dependency check failed: " + result.stderr.strip())
+        if result.returncode == 0:
+            print("OK   : workbook runtime matches a reviewed compatibility record")
+        elif result.returncode in (2, 3):
+            detail = result.stdout.strip() or result.stderr.strip()
+            try:
+                check = json.loads(detail)
+                status = check.get("status", "unverified")
+                reason = check.get("reason", "workbook_runtime_not_verified")
+            except (json.JSONDecodeError, AttributeError):
+                status, reason = "unverified", detail or "workbook_runtime_not_verified"
+            warnings.append(f"workbook operations {status}: {reason}")
         else:
-            print("OK   : pinned Node, complete artifact-tool distribution digest, workbook API import")
+            errors.append("workbook compatibility checker failed: " + result.stderr.strip())
     except (OSError, subprocess.TimeoutExpired) as exc:
-        errors.append("workbook dependency check unavailable: " + type(exc).__name__)
+        warnings.append("workbook operations unverified: " + type(exc).__name__)
     print("TB Cut V2 doctor")
     print("Scope: required paths, state JSON/configured fields, command availability, workbook dependencies; no runtime cache/media/Resolve validation")
     for x in errors: print("ERROR:", x)

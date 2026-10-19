@@ -84,7 +84,7 @@ def refine_audio_end(media: Path, start: float, end: float, source_duration: flo
     }
 
 
-def audit_audio_start(media: Path, start: float) -> tuple[float, dict]:
+def audit_audio_start(media: Path, start: float, *, lower_bound: float | None = None) -> tuple[float, dict]:
     frames = audio_level_frames(media, max(0.0, start - 0.80), start + 0.10)
     onset = None
     quiet_frames = round(AUDIO_SILENCE_HOLD_SEC / AUDIO_FRAME_SEC)
@@ -95,7 +95,8 @@ def audit_audio_start(media: Path, start: float) -> tuple[float, dict]:
         if len(prior) == quiet_frames and all(value <= AUDIO_SILENCE_DBFS for _, value in prior):
             onset = at
             break
-    adjusted_start = min(start, onset) if onset is not None else start
+    # Without an explicit sentence-owned envelope the audit must not move it.
+    adjusted_start = max(lower_bound, min(start, onset)) if onset is not None and lower_bound is not None else start
     before = [level for at, level in frames if at < adjusted_start]
     active_before = bool(before and before[-1] > AUDIO_SILENCE_DBFS)
     return adjusted_start, {
@@ -145,8 +146,14 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
         if not contiguous:
             merged.append(clip)
             continue
+        from sentence_boundaries import verify_edges
+        left_proof = dict(previous.get('sentence_edges') or {})
+        proofs_mergeable = (verify_edges(previous) and verify_edges(clip)
+                            and left_proof['word_context_digest'] == clip['sentence_edges']['word_context_digest'])
         previous["source_end_frame"] = max(int(previous["source_end_frame"]), int(clip["source_end_frame"]))
         fps = float(previous.get("fps") or clip.get("fps") or 30)
+        if "record_duration_frames" in previous:
+            previous["record_duration_frames"] = previous["source_end_frame"] - previous["source_start_frame"]
         previous["duration_sec"] = round((int(previous["source_end_frame"]) - int(previous["source_start_frame"])) / fps, 3)
         audit = previous.setdefault("audit", {})
         other = clip.get("audit") or {}
@@ -159,6 +166,16 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
         ))
         audit["transcript"] = str(audit.get("transcript") or "") + str(other.get("transcript") or "")
         audit["alignment_transcript"] = str(audit.get("alignment_transcript") or "") + str(other.get("alignment_transcript") or "")
+        if proofs_mergeable:
+            proof = dict(left_proof)
+            for key in ('last_word_end', 'next_word_start', 'last_text', 'last_word_index', 'source_end_frame'):
+                proof[key] = clip['sentence_edges'][key]
+            previous['sentence_edges'] = proof
+            previous['audio_end_frame'] = previous['source_end_frame']
+            previous['audio_boundary_verified'] = previous.get('audio_boundary_verified') is True and clip.get('audio_boundary_verified') is True
+            if clip['sentence_edges'].get('alignment_status') == 'FRAME_ROUNDED_ESTIMATE':
+                proof['alignment_status'] = 'FRAME_ROUNDED_ESTIMATE'
+            previous['transcript'] = ''.join(w['text'] for w in previous['words'][proof['first_word_index']:proof['last_word_index']+1])
         merge_count += 1
     return merged, merge_count
 
@@ -192,41 +209,26 @@ def containing_window(windows: list[dict], source_file: str, start: float, end: 
     return min(choices, key=lambda row: float(row["window_end"]) - float(row["window_start"]))
 
 
-def refine_words(window: dict, rough_start: float, rough_end: float) -> tuple[float, float, str, dict]:
+def refine_words(window: dict, rough_start: float, rough_end: float, selected_text: str | None = None) -> tuple[float, float, str, dict]:
     words = window.get("words") or []
     overlap_indices = [index for index, word in enumerate(words) if float(word["end"]) > rough_start and float(word["start"]) < rough_end]
     if not overlap_indices:
         raise RuntimeError(f"粗剪范围无识别文字：{rough_start}-{rough_end}")
-    start_choices = [index for index, word in enumerate(words) if rough_start - 1.5 <= float(word["start"]) <= rough_start + 1.5 and float(word["start"]) < rough_end]
-    end_choices = [index for index, word in enumerate(words) if rough_end - 1.5 <= float(word["end"]) <= rough_end + 3.0 and float(word["end"]) > rough_start]
-    if not start_choices:
-        start_choices = [overlap_indices[0]]
-    if not end_choices:
-        end_choices = [overlap_indices[-1]]
-
-    def start_score(index: int) -> float:
-        start = float(words[index]["start"])
-        previous_end = float(words[index - 1]["end"]) if index else start
-        preview = normalize("".join(str(row["text"]) for row in words[index:index + 10]))
-        return max(0.0, start - previous_end) * 12 - abs(start - rough_start) * 1.5
-
-    first = max(start_choices, key=start_score)
-    valid_end_choices = [index for index in end_choices if index >= first] or [overlap_indices[-1]]
-
-    def end_score(index: int) -> float:
-        end = float(words[index]["end"])
-        next_start = float(words[index + 1]["start"]) if index + 1 < len(words) else end
-        tail = normalize("".join(str(row["text"]) for row in words[max(first, index - 12):index + 1]))
-        return max(0.0, next_start - end) * 12 - abs(end - rough_end) * 1.5 - (100 if tail.endswith(RISK_ENDING) else 0)
-
-    last = max(valid_end_choices, key=end_score)
+    # Never choose another word because its preceding pause is larger.
+    if selected_text:
+        from sentence_boundaries import anchored_words
+        first, last, _ = anchored_words(words, selected_text, rough_start, rough_end)
+    else:
+        first, last = overlap_indices[0], overlap_indices[-1]
     selected = words[first:last + 1]
     start, end = float(selected[0]["start"]), float(selected[-1]["end"])
     text = "".join(str(row["text"]) for row in selected)
     previous_end = float(words[first - 1]["end"]) if first else start
     next_start = float(words[last + 1]["start"]) if last + 1 < len(words) else end
     meta = {
-        "method": "local_asr_word_and_pause_boundary",
+        "method": "sentence-owned-edges-v1",
+        "first_word_index": first, "last_word_index": last,
+        "source_context_review_required": True,
         "start_gap_sec": round(max(0.0, start - previous_end), 3),
         "end_gap_sec": round(max(0.0, next_start - end), 3),
         "start_shift_sec": round(start - rough_start, 3),
@@ -294,11 +296,13 @@ def main() -> None:
                 candidate = candidates[rough["source"]]
                 media = media_by_name[candidate["source_file"]]
                 window = containing_window(asr["windows"], candidate["source_file"], float(rough["start"]), float(rough["end"]))
-                start, end, alignment_text, boundary = refine_words(window, float(rough["start"]), float(rough["end"]))
-                start, audio_start = audit_audio_start(media, start)
-                end, audio_end = refine_audio_end(media, start, end, durations[candidate["source_file"]])
-                start_frame, end_frame = round(start * args.fps), round(end * args.fps)
+                start, end, alignment_text, boundary = refine_words(window, float(rough["start"]), float(rough["end"]), rough.get("text"))
+                from sentence_boundaries import bounded_edges
+                start_frame, end_frame, sentence_edges = bounded_edges(window['words'], boundary['first_word_index'], boundary['last_word_index'], args.fps)
                 start, end = start_frame / args.fps, end_frame / args.fps
+                _, audio_start = audit_audio_start(media, start)
+                _, audio_end = refine_audio_end(media, start, end, durations[candidate['source_file']])
+                audio_end['risk'] = audio_end['risk'] or audio_end['end_extension_sec'] > 0
                 if end <= start:
                     errors.append({"variant_id": variant["variant_id"], "code": "INVALID_FRAME_RANGE", "clip": clip_index})
                     continue
@@ -318,6 +322,8 @@ def main() -> None:
                     "source_end_frame": end_frame,
                     "duration_sec": round(end - start, 3),
                     "fps": args.fps,
+                    "sentence_edges": sentence_edges,
+                    "words": window["words"],
                     "audit": {
                         "candidate_id": rough["source"],
                         "transcript": rough.get("text") or "",
@@ -351,7 +357,7 @@ def main() -> None:
             plans.append({
                 "schema_version": 2,
                 "pipeline_version": "2.1",
-                "cutpoint_audio_audit_version": "rms-v2",
+                "cutpoint_audio_audit_version": "sentence-owned-edges-v1",
                 "status": "PASS",
                 "writes_davinci": True,
                 "product_index": product_index,
@@ -399,7 +405,7 @@ def main() -> None:
             json.dumps({
                 "schema_version": 2,
                 "pipeline_version": "2.1",
-                "cutpoint_audio_audit_version": "rms-v2",
+                "cutpoint_audio_audit_version": "sentence-owned-edges-v1",
                 "audio_silence_threshold_dbfs": AUDIO_SILENCE_DBFS,
                 "product_index": product_index,
                 "plans": [paths.reference(output_dir / f"cut_plan_variant_{ordinal}.json") for ordinal in range(1, len(plans) + 1)],

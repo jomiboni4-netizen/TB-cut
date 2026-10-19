@@ -1,27 +1,72 @@
-# Task
+# GitHub代码同步与新窗口交接
 
-商品27局部修订后，将通用程序安全推送至现有开发分支，并对 GitHub PR 进行独立只读二次审核。依据复核意见修复对外语义请求、写入前证据及清理保护问题，同时保护含有效卖点的本地完整来源。
+## Task
 
-# Repo changes
+按用户明确授权，将当前可公开源码、合成测试、配置及规则文档同步到独立GitHub草稿PR，并准备本机新窗口续接指令。
 
-首次提交纳入冷启动隔离、三版联合规划、MiMo 终态处理、Resolve 原始素材剪辑与回读、人物 v5 和合成测试。后续补丁为阶段 A/B 请求提供匿名来源 ID、预清理和商品归属阻断；补齐中文数字金额、链接、折扣、买赠及满减话术。对外请求与本地剪辑候选分离：含禁发口播的完整句群只暂停外发，其原文、来源及连续洁净字幕段保留在本地；同一条字幕内的有效子句也单独保留，但仅有原字幕时间包络，声学切点未认证。任何暂停外发的原声句群未完成本地处置前，阶段 B 都停止全局分配，避免把不完整候选池误当穷尽。只在审核元数据出现禁发词时清理元数据，不排除原声洁净的完整句群。Resolve 写入前核对原素材指纹、冻结时间线及密封人物审核，耗时校验先于激活目标线，并在追加前复核当前线；UNCERTAIN 临时试听须由本次调用显式授权。清理脚本现在阻止删除受保护输入的父目录，并在状态损坏时停止。旧运行证据未改写；此版语义流程使用新版本身份。
+## Repo changes
 
-# Runtime changes
+待提交范围包括：通用句首语义与物理定位分工、ASR截取起点网格、有界切点与半帧估计、独立语义审核、单商品事件计时与修复入口；同时同步既有的显式工作区隔离、项目连接诊断、工作簿兼容性检查及安全回填代码。更新自我迭代计划的过时进展，保留计划文件。共39个公开文件；未打包历史archive或任何忽略的运行目录。
 
-商品27保留三条用户原线；本地另存 v1、v2 修订审核线。v1 为 45.40 秒、人物工程审核 UNCERTAIN；v2 为 49.68 秒、人物工程审核 PASS；原 v3 为 50.64 秒，第一接缝保持不变。两处混合话术句群只读检查：一处只有链接流程，另一处有有效的商品配色搭配说明，后者完整来源及连续洁净段已保留在本地待语义和声学复核，未自动改动三条成片。本 Git 补丁没有连接或写入 Resolve。
+## Runtime changes
 
-# Validation
+本次不处理媒体、不调用模型、不连接或写入Resolve。最新本机新商品试跑三版语义通过；声音仍为REPAIRABLE_AUDIO_ONLY，人物未审、时间线未写，不等于成片通过。输入、素材、字幕、ASR、计划、计时及人工修改快照留本地，新窗口按本机交接文件定位。
 
-首次提交前项目 doctor、Python 编译、锁定 Node 环境下 265 项合成测试、暂存区扫描通过。后续补丁先后通过 269、270、273、274 项锁定环境完整测试；最新 21 项冷启动及 2 项清理保护定向测试、项目 doctor、Python 编译和差异检查通过。现有商品27密封 v5 审核文件经只读复核通过。最终暂存扫描以提交前实际结果为准。系统默认 Node 环境下完整测试发生工作簿 Node 版本相关的 1 错误、1 失败，这是测试环境问题，不计为代码 PASS。
+## Validation
 
-# External actions
+本次Doctor结构检查通过；当前工作簿运行时尚未经兼容性审阅，警告保留。未新增或运行测试：同步前源码已于上轮完成47项定向回归（全部通过，139.60秒）；本次仅代码审阅、文件清单、隐私扫描与diff格式检查。39个待提交文件扫描未发现真实用户绝对路径、凭据赋值或私钥。提交前继续核查暂存diff。
 
-MiMo called: no；Resolve connected: no；export performed: no。此前五次普通推送更新现有开发分支，PR #1 保持开放；未合并。此次商品27语义复核仅限本地旧候选证据。最终补丁推送和独立再审核以实际执行为准。
+## External actions
 
-# Blockers
+MiMo called: no。Resolve connected: no。export performed: no。已只读确认远端分支与现有PR；本次推送及创建草稿PR获用户授权，结果将在完成后更新。保留现有PR，不合并任何PR。
 
-商品27 v1 的人物机器审核仍 UNCERTAIN，三版口播接缝仍待用户完整听感验收；一处含有效搭配卖点的连续洁净原声仍需检查语义闭合及切点，未自动纳入阶段 B。促销措辞的本地规则是启发式预清理，不宣称穷尽所有直播说法。Resolve UI 在极短的原生 Append 调用期间主动切换当前时间线，仍需人工避免并发操作；项目脚本锁无法锁住 GUI。分类：原基线已有对外清理不足、商品归属和素材审核缺口以及清理父目录风险；本轮首个修复补丁曾引入激活目标后慢哈希的竞态窗口，现已缩短；本轮又发现并修复同字幕有效子句被遗漏的集成问题；默认 Node 报错仅属环境；再次核对目标线及临时试听调用标志为风险预防。
+## Blockers
 
-# Git state
+声音风险待核实，不能宣称通用切点已完全修好或获得同等质量的速度提升。工作簿当前运行时仍未通过审阅。旧自然度修订PR尚未合并，新的同步分支不表示已合并其修改；后续合并前需对比重叠。
 
-本报告为第六次提交前快照：开发分支 codex/repository-baseline，HEAD c201c40 与远端 PR 头一致。本轮仅修改通用源码、合成测试及本脱敏报告；未跟踪的本地旧运行归档保持原状且不提交。后续 Git 操作以实际复查为准。
+## Git state
+
+此为提交前快照：分支codex/sentence-boundaries-sync，HEAD b994e42d3bc0983aea440cafa8ac711a421ddc68。未暂存；仅显式选择公开文件，不采用git add全部。历史运行archive保留本地。提交后将核对远端提交与新草稿PR。
+
+```text
+ M CHANGELOG.md
+ M PROJECT_RULES.md
+ M docs/PIPELINE_DEPENDENCIES.md
+ M package.json
+ M scripts/asr_identity.py
+ M scripts/check_workbook_dependencies.mjs
+ M scripts/codex_worker.py
+ M scripts/coldstart_resolve.py
+ M scripts/coldstart_semantics.py
+ M scripts/final_quality_gate.py
+ M scripts/inspect_title_workbook.mjs
+ M scripts/product_semantic_preview.py
+ M scripts/project_doctor.py
+ M scripts/query_table_resize.mjs
+ M scripts/refine_plans_v2.py
+ M scripts/registered_pipeline.py
+ M scripts/resolve_connection_doctor.py
+ M scripts/runtime_meta.py
+ M scripts/runtime_paths.py
+ M scripts/semantic_evidence.py
+ M scripts/update_title_counts.mjs
+ M tests/quality_fixtures.py
+ M tests/test_coldstart_resolve.py
+ M tests/test_coldstart_semantics.py
+ M tests/test_migrate_runtime_layout.py
+ M tests/test_resolve_connection.py
+ M tests/test_runtime_meta.py
+ M tests/test_runtime_paths.py
+ M tests/test_workbook_dependencies.py
+ M tmp/review_reports/LATEST_CODEX_REPORT.md
+?? archive/
+?? config/workbook-compatibility.json
+?? docs/NATURALNESS_EVALUATION.md
+?? docs/SELF_ITERATION_PLAN.md
+?? scripts/check_workbook_structure.py
+?? scripts/sentence_boundaries.py
+?? scripts/sentence_trial.py
+?? scripts/sentence_trial_repair.py
+?? tests/test_sentence_boundaries.py
+?? tests/test_workbook_runtime_compatibility.py
+```

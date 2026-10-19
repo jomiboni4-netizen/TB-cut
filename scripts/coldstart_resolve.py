@@ -35,6 +35,15 @@ def assert_new_name(name, existing):
     if name in existing:raise ValueError('timeline_name_exists_no_overwrite')
 
 
+def variant_timeline_name(run_id, variant, *, preview=False):
+    product_id = variant.get('product_index')
+    version = variant.get('version') or variant.get('variant_id')
+    if not isinstance(product_id, int) or product_id <= 0 or not isinstance(version, str) or not version:
+        raise ValueError('variant_product_identity_missing_for_timeline_name')
+    kind = '临时试听_人物门禁待验_声学待验' if preview else '审核_人工听感待验'
+    return f"TBcut_{run_id}_{product_id}_{version}_{kind}"
+
+
 def infer_append_endpoint(start, api_end, actual_duration):
     if actual_duration==api_end-start:return 'exclusive'
     if actual_duration==api_end-start+1:return 'inclusive'
@@ -198,9 +207,9 @@ def main():
             if not archive.namelist() or archive.testzip() is not None:raise ValueError('project_backup_corrupt')
         for variant in plan['variants']:
             if variant['variant_id'] not in eligible:continue
-            name=(f"{state['batch']['product_ids'][0]}_{variant['variant_id']}_临时试听_人物门禁待验_声学待验"
-                  if variant['variant_id'] in preview else
-                  f"{state['batch']['product_ids'][0]}_{variant['variant_id']}_审核_人工听感待验")
+            if variant.get('product_index') not in state['batch']['product_ids']:
+                raise ValueError('variant_product_outside_run_batch')
+            name=variant_timeline_name(run['run_id'],variant,preview=variant['variant_id'] in preview)
             record_file=folder/(variant['variant_id']+'.json')
             if record_file.exists():
                 prior=json.loads(record_file.read_text())

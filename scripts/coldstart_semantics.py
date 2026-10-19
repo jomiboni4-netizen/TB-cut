@@ -21,13 +21,14 @@ from runtime_paths import resolve_runtime_paths
 from runtime_meta import _sha256
 from semantic_evidence import FORBIDDEN, clean_cue, semantic_windows
 from workbook_runtime import preferred_node
+from sentence_boundaries import SELECTION_RULE
 from mimo_responses import create_response, ResponseAPIError, MODEL
 from product_semantic_preview import parse_response
 
 
 VERSION = 'cold-continuous-v3-local-mixed-review'
-MAX_A_REQUESTS = 16
-MAX_A_SECONDS = 1800
+MAX_A_REQUESTS = 40
+MAX_A_SECONDS = 5400
 
 
 def load_run(repo, workspace):
@@ -39,11 +40,36 @@ def load_run(repo, workspace):
     return paths, state, run
 
 
-def init(repo, project_id):
-    root = Path(repo).resolve()
-    parent = json.loads((root / 'PROJECT_STATE.json').read_text())
-    # Deliberate allowlist: no historical runtime/batch/results enter the run.
+def product_cache(paths, product_id):
+    """Keep products in one batch while isolating mutable per-product outputs."""
+    state = json.loads(paths.state_path.read_text())
+    if product_id not in state.get('batch', {}).get('product_ids', []):
+        raise ValueError('product_outside_rerun_batch')
+    folder = paths.cache_dir / 'products' / f'product_{product_id}'
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def selected_inputs(input_state):
+    """Read only the explicitly selected input manifest, never a repo default."""
+    if input_state is None:
+        raise ValueError('explicit_input_state_required')
+    source = Path(input_state).expanduser().resolve()
+    parent = json.loads(source.read_text(encoding='utf-8'))
     inputs = {k: parent[k] for k in ('title_path', 'subtitle_paths', 'video_paths', 'resolve')}
+    if (not Path(inputs['title_path']).is_file()
+            or not inputs['subtitle_paths'] or not inputs['video_paths']
+            or any(not Path(path).exists() for key in ('subtitle_paths', 'video_paths') for path in inputs[key])
+            or not all(inputs['resolve'].get(k) for k in ('project_name', 'source_timeline', 'target_timeline'))):
+        raise ValueError('selected_inputs_incomplete')
+    return inputs
+
+
+def init(repo, project_id, input_state):
+    root = Path(repo).resolve()
+    if not project_id:
+        raise ValueError('explicit_project_id_required')
+    inputs = selected_inputs(input_state)
     run_id = time.strftime('%Y%m%d') + '_' + uuid.uuid4().hex[:10]
     paths = resolve_runtime_paths(root, root / '.cache/workspaces' / ('coldstart_' + run_id))
     paths.workspace_root.mkdir(parents=True, exist_ok=False)
@@ -51,7 +77,6 @@ def init(repo, project_id):
     protected = {line[3:]: _sha256(root / line[3:]) for line in status.splitlines()
                  if (root / line[3:]).is_file()}
     atomic_json(paths.workspace_root / 'GIT_BASELINE.json', {'status': status, 'files': protected})
-    (paths.workspace_root / 'LATEST_CODEX_REPORT.before.md').write_bytes((root / 'tmp/review_reports/LATEST_CODEX_REPORT.md').read_bytes())
     project_key = str(uuid.uuid5(uuid.NAMESPACE_URL, project_id + str(Path(inputs['title_path']).parent)))
     config = {'schema_version': 2, 'project_key': project_key, 'resolve_project_id': project_id,
               'material_folder': folder_identity(Path(inputs['title_path']).parent), 'inputs': inputs}
@@ -154,6 +179,7 @@ def paragraph_chunks(rows, target=130, maximum=210, overlap=8):
 
 def select(paths, product_id):
     state = json.loads(paths.state_path.read_text()); run = json.loads((paths.workspace_root/'RUN.json').read_text())
+    output = product_cache(paths, product_id)
     data = json.loads((paths.cache_dir/'fresh_locator.json').read_text())
     chosen = next(r for r in data['all_products'] if r['product_index']==product_id)
     titles=json.loads((paths.cache_dir/'titles.json').read_text()); product=next(p for p in titles['products'] if p['product_index']==product_id)
@@ -167,19 +193,13 @@ def select(paths, product_id):
                                'source_stem':w['source_stem'], 'rows':chunk})
         coverage.append({'source_stem':w['source_stem'],'start':rows[0]['start'],'end':rows[-1]['end'],'cue_count':len(rows)})
     if len(paragraphs)>MAX_A_REQUESTS:raise ValueError('all_candidate_coverage_exceeds_A_budget')
-    locator_bytes=(paths.cache_dir/'fresh_locator.json').read_bytes()
-    state['batch']['product_ids']=[product_id];state['runtime']['selected_product']=product
-    atomic_json(paths.state_path,state)
-    # Selection changes the existing batch scope. Carry only freshly built inputs.
-    atomic_json(paths.cache_dir/'titles.json',titles)
-    atomic_json(paths.cache_dir/'subtitle_index.json',index)
-    (paths.cache_dir/'fresh_locator.json').write_bytes(locator_bytes)
+    # Batch membership remains fixed after random selection; outputs are product scoped.
     unique_rows={r['source_id']:r for paragraph in paragraphs for r in paragraph['rows']}
     cleaning={uid:clean_cue(row,uid) for uid,row in unique_rows.items()}
     fully_removed=sum(not kept for kept,_ in cleaning.values())
     partial_review=sum(bool(kept) and ''.join(part['text'] for part in kept)!=unique_rows[uid]['text']
                        for uid,(kept,_) in cleaning.items())
-    atomic_json(paths.cache_dir/'candidate_paragraphs.json',{'project_key':run['project_key'],'run_id':run['run_id'],'product':product,
+    atomic_json(output/'candidate_paragraphs.json',{'project_key':run['project_key'],'run_id':run['run_id'],'product':product,
         'paragraphs':paragraphs,'coverage':coverage,'all_fresh_locator_windows_included':True,
         'presemantic_removed_cues':fully_removed,'mixed_cues_needing_local_cutpoint_review':partial_review,
         'outbound_policy':VERSION})
@@ -216,8 +236,8 @@ def stage_a_payload(paragraph, product, run):
         '不得抽取词语/形容词/短语或半句话跨位置拼成新句。保留完整因果前提和结果；问题及依赖回答需一起保留。'
         '尽量提取连续几句话、语义完整且有自然音频边界的单元；必要时长段保留供LOCAL_SPLIT_REVIEW，不机械碎切。'
         '邻段重叠只作理解，来源仍用原ID。不要为45秒限制截断理解；不组装版本。不确定归属明确UNCERTAIN。')
-    return {'model':MODEL,'input':instructions+json.dumps(document,ensure_ascii=False,separators=(',',':')),
-            'reasoning':{'effort':'low'},'max_output_tokens':12000,'stream':True}
+    return {'model':MODEL,'input':instructions+SELECTION_RULE+json.dumps(document,ensure_ascii=False,separators=(',',':')),
+            'reasoning':{'effort':'none'},'max_output_tokens':12000,'stream':True}
 
 
 def request_once(paths, stage, payload, ordinal):
@@ -232,7 +252,10 @@ def request_once(paths, stage, payload, ordinal):
             raw=json.loads(response_file.read_text())
             if raw.get('model')!=MODEL or raw.get('status')!='completed':raise ValueError('cached_terminal_response_invalid')
             return parse_response(raw)
-        raise ValueError('attempted_or_uncertain_request_no_resend')
+        if not (meta.get('status')=='not_dispatched' and meta.get('request_sha256')==fingerprint
+                and meta.get('exception_phase')=='connect' and meta.get('http_status') is None
+                and meta.get('stream_bytes')==0 and not meta.get('terminal_event_received')):
+            raise ValueError('attempted_or_uncertain_request_no_resend')
     atomic_json(folder/'dry_run.json',{'run_id':run['run_id'],'stage':stage,'request_sha256':fingerprint,'bytes':len(encoded),
                                       'input_characters':len(payload['input']),'max_output_tokens':payload['max_output_tokens'],'deadline':240})
     atomic_json(folder/'request.json',payload)
@@ -240,12 +263,25 @@ def request_once(paths, stage, payload, ordinal):
     atomic_json(meta_file,meta)
     try:
         raw,metrics=create_response(payload,240,stage=stage)
-        parsed=parse_response(raw);atomic_json(response_file,raw)
-        meta.update(metrics,status='completed',response_sha256=_sha256(response_file));atomic_json(meta_file,meta)
+        atomic_json(response_file,raw)
+        meta.update(metrics,status='response_completed',response_sha256=_sha256(response_file));atomic_json(meta_file,meta)
+        try:
+            parsed=parse_response(raw)
+        except Exception as exc:
+            meta.update(status='response_completed_parse_failed',parse_error=type(exc).__name__)
+            atomic_json(meta_file,meta)
+            raise
+        meta.update(status='completed');atomic_json(meta_file,meta)
         return parsed
     except BaseException as exc:
         meta.update(getattr(exc,'metrics',{}))
-        status='incomplete' if getattr(exc,'code',None)=='response_incomplete' else 'uncertain'
+        metrics=getattr(exc,'metrics',{})
+        not_dispatched=(metrics.get('exception_phase')=='connect' and metrics.get('http_status') is None
+                        and metrics.get('stream_bytes',0)==0 and not metrics.get('terminal_event_received'))
+        if meta.get('status')=='response_completed_parse_failed':
+            status='response_completed_parse_failed'
+        else:
+            status='incomplete' if getattr(exc,'code',None)=='response_incomplete' else ('not_dispatched' if not_dispatched else 'uncertain')
         meta.update(status=status,error_code=getattr(exc,'code',type(exc).__name__))
         atomic_json(meta_file,meta);raise
 
@@ -328,7 +364,7 @@ def stage_b_payload(product, units, run, proposal=None):
                   '可以调整单元顺序/分配或删减至2、1、0版；先保证每版45–60秒、完整自然、不同卖点、零源时间重叠。'
                   '只引用完整unit_id，不改写/拆词/补话。不要用促销或弱话术凑时长。'
                   '若少于3版，在insufficient_reason写明逐版具体原因；不可将不合格候选输出为合格。')
-    return {'model':MODEL,'input':instructions+json.dumps(body,ensure_ascii=False,separators=(',',':')),
+    return {'model':MODEL,'input':instructions+SELECTION_RULE+json.dumps(body,ensure_ascii=False,separators=(',',':')),
             'reasoning':{'effort':'low'},'max_output_tokens':6000,'stream':True}
 
 
@@ -390,19 +426,35 @@ def require_product_match(result):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=['init','index','select','A','B']);p.add_argument('--root',default='.');p.add_argument('--workspace');p.add_argument('--project-id');p.add_argument('--product',type=int)
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=['init','index','select','A','B']);p.add_argument('--root',default='.');p.add_argument('--workspace');p.add_argument('--input-state');p.add_argument('--project-id');p.add_argument('--product',type=int)
     args=p.parse_args()
-    if args.operation=='init':init(args.root,args.project_id);return
+    if args.operation=='init':init(args.root,args.project_id,args.input_state);return
     paths,state,run=load_run(args.root,args.workspace)
     if args.operation=='index':index_and_locate(paths)
     elif args.operation=='select':select(paths,args.product)
     elif args.operation=='A':
-        document=json.loads((paths.cache_dir/'candidate_paragraphs.json').read_text());accepted=[];rejected=[];seen=set()
+        output=product_cache(paths,args.product)
+        document=json.loads((output/'candidate_paragraphs.json').read_text());accepted=[];rejected=[];request_failures=[];seen=set()
         for n,paragraph in enumerate(document['paragraphs'],1):
             payload=stage_a_payload(paragraph,document['product'],run)
-            result=request_once(paths,'A',payload,n) if payload else {'product_identity':{'match':'NO_CLEAN_CUES'},'units':[]}
-            atomic_json(paths.cache_dir/f'A_paragraph_{n:02d}.json',result)
-            if payload:require_product_match(result)
+            try:
+                result=request_once(paths,'A',payload,n) if payload else {'product_identity':{'match':'NO_CLEAN_CUES'},'units':[]}
+            except Exception as exc:
+                request_failures.append({'paragraph':paragraph['paragraph_id'],'error':str(exc)})
+                atomic_json(output/'stage_A_source_verified.json',{'run_id':run['run_id'],'units':accepted,'source_rejected':rejected,
+                        'request_failures':request_failures,'paragraphs_completed':n,'paragraphs_total':len(document['paragraphs']),
+                        'all_coverage_complete':False})
+                print('A paragraph',n,'request unavailable; not retried; verified units',len(accepted),flush=True)
+                continue
+            atomic_json(output/f'A_paragraph_{n:02d}.json',result)
+            if payload and (result.get('product_identity') or {}).get('match')!='MATCH':
+                rejected.append({'paragraph':paragraph['paragraph_id'],'reason':'stage_A_product_identity_not_MATCH',
+                                 'identity':(result.get('product_identity') or {}).get('match')})
+                atomic_json(output/'stage_A_source_verified.json',{'run_id':run['run_id'],'units':accepted,'source_rejected':rejected,
+                        'request_failures':request_failures,'paragraphs_completed':n,'paragraphs_total':len(document['paragraphs']),
+                        'all_coverage_complete':n==len(document['paragraphs']) and not request_failures})
+                print('A paragraph',n,'identity not MATCH; excluded; verified units',len(accepted),flush=True)
+                continue
             for unit in result.get('units',[]):
                 try:
                     row=validate_unit(unit,paragraph,run,len(accepted)+1);key=tuple(row['source_ids'])
@@ -412,24 +464,26 @@ def main():
                         raise ValueError('overlap_context_unit_needs_local_review')
                     seen.add(key);accepted.append(row)
                 except ValueError as exc:rejected.append({'paragraph':paragraph['paragraph_id'],'unit':unit,'reason':str(exc)})
-            atomic_json(paths.cache_dir/'stage_A_source_verified.json',{'run_id':run['run_id'],'units':accepted,'source_rejected':rejected,
-                    'paragraphs_completed':n,'paragraphs_total':len(document['paragraphs']),'all_coverage_complete':n==len(document['paragraphs'])})
+            atomic_json(output/'stage_A_source_verified.json',{'run_id':run['run_id'],'units':accepted,'source_rejected':rejected,
+                    'request_failures':request_failures,'paragraphs_completed':n,'paragraphs_total':len(document['paragraphs']),
+                    'all_coverage_complete':n==len(document['paragraphs']) and not request_failures})
             print('A paragraph',n,'completed; verified units',len(accepted),'source rejects',len(rejected),flush=True)
     elif args.operation=='B':
-        document=json.loads((paths.cache_dir/'candidate_paragraphs.json').read_text())
-        local=json.loads((paths.cache_dir/'local_A_review.json').read_text())
+        output=product_cache(paths,args.product)
+        document=json.loads((output/'candidate_paragraphs.json').read_text())
+        local=json.loads((output/'local_A_review.json').read_text())
         if local['run_id']!=run['run_id']:raise ValueError('local_A_wrong_run')
         eligible,withheld=eligible_for_stage_b(local['kept_units'])
-        atomic_json(paths.cache_dir/'stage_B_outbound_withheld_local_review.json',{'run_id':run['run_id'],
+        atomic_json(output/'stage_B_outbound_withheld_local_review.json',{'run_id':run['run_id'],
                     'withheld_from_external_request':withheld,'editing_candidates_retained_locally':True})
         require_complete_stage_b_pool(withheld)
         if not eligible:raise ValueError('stage_B_no_precleaned_units')
-        proposal_file=paths.cache_dir/'stage_B_candidate_allocation.json'
+        proposal_file=output/'stage_B_candidate_allocation.json'
         proposal=json.loads(proposal_file.read_text())['variants'] if proposal_file.exists() and not withheld else None
         response=restore_b_aliases(request_once(paths,'B',stage_b_payload(document['product'],eligible,run,proposal),1),eligible)
-        atomic_json(paths.cache_dir/'stage_B_selection.json',response)
+        atomic_json(output/'stage_B_selection.json',response)
         variants=validate_selection(response,eligible,run)
-        atomic_json(paths.cache_dir/'stage_B_restored.json',{'run_id':run['run_id'],'product':document['product'],'variants':variants})
+        atomic_json(output/'stage_B_restored.json',{'run_id':run['run_id'],'product':document['product'],'variants':variants})
         print('B complete; variants',len(variants),flush=True)
 
 
