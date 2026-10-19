@@ -26,7 +26,8 @@ from compute_metrics import Metrics, scope
 
 
 def classification(label):
-    return {'label': label, 'subject_evidence': label == 'HOST_VISIBLE', 'reason': 'synthetic boundary'}
+    return {'label': label, 'subject_evidence': label in
+            {'HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP', 'OTHER_PERSON'}, 'reason': 'synthetic boundary'}
 
 
 class AdaptiveVisionTests(unittest.TestCase):
@@ -52,65 +53,62 @@ class AdaptiveVisionTests(unittest.TestCase):
             body = vision.audit(paths, plan, {'001.mp4': self.video}, detector)
         return body, boundary.call_count
 
-    def test_one_minute_initial_sixteen_then_coverage_rounds(self):
+    def test_one_minute_all_people_uses_only_ten_initial_samples(self):
         plan = valid_plan(); plan['variants'][0]['clips'][0]['source_end_frame'] = 600
         body, calls = self.audit(plan)
         row = body['variants'][0]
-        self.assertEqual(row['rounds'][0]['new_points'], 16)
-        self.assertGreater(calls, 16)
-        self.assertLessEqual(calls, 16*vision.POLICY['max_rounds'])
+        self.assertEqual(row['rounds'][0]['new_points'], 10)
+        self.assertEqual(calls, 10)
         self.assertEqual(row['status'], 'PASS')
         validate_vision(plan, body, self.paths)
 
-    def test_near_seventy_percent_not_pass_and_five_distinct_rounds(self):
+    def test_one_empty_initial_stratum_gets_ten_point_refinement(self):
         count = [0]
         def mixed(*args, **kwargs):
             count[0] += 1
-            return classification('HOST_VISIBLE' if count[0] % 10 < 7 else 'NO_PERSON')
+            if count[0] == 1:
+                return classification('NO_PERSON')
+            if count[0] <= 10:
+                return classification('HOST_VISIBLE')
+            return classification('NO_PERSON' if count[0] < 20 else 'HOST_VISIBLE')
         body, calls = self.audit(classify=mixed)
         row = body['variants'][0]
-        self.assertNotEqual(row['status'], 'PASS')
-        self.assertEqual(len(row['rounds']), 5)
-        self.assertEqual(calls, 70)  # 50s => ceil(16*50/60)=14, five rounds.
+        self.assertEqual(row['status'], 'PASS')
+        self.assertAlmostEqual(row['no_person_ratio_estimate'], .09)
+        self.assertEqual([r['new_points'] for r in row['rounds']], [10, 10])
+        self.assertEqual(calls, 20)
         self.assertEqual(len({s['frame'] for s in row['samples']}), calls)
         vision.verify(self.paths, valid_plan(), body, require_pass=False)
-        with self.assertRaises(CacheIdentityError):
-            vision.verify(self.paths, valid_plan(), body)
 
-    def test_low_coverage_adds_samples_then_repairable(self):
+    def test_all_initial_and_refinement_frames_empty_exceeds_ten_percent(self):
         body, calls = self.audit(classify=lambda *args, **kwargs: classification('NO_PERSON'))
-        self.assertEqual(calls, 70)
+        self.assertEqual(calls, 110)
+        self.assertEqual(body['variants'][0]['no_person_ratio_estimate'], 1.0)
         self.assertEqual(body['variants'][0]['status'], 'REPAIRABLE')
 
-    def test_exactly_seventy_percent_is_not_pass(self):
-        clip = valid_plan()['variants'][0]['clips'][0]
-        clip['source_end_frame'] = 100
-        frames = [0, *range(10, 100, 10), 99]
-        samples = [{'clip_index': 0, 'frame': frame,
-                    'classification': classification('HOST_VISIBLE' if 1 <= i <= 7 else 'NO_PERSON')}
-                   for i, frame in enumerate(frames)]
-        result = vision.estimate([clip], samples)
-        self.assertAlmostEqual(result['host_visible_ratio_estimate'], .70)
-        self.assertEqual(result['status'], 'REPAIRABLE')
-
-    def test_long_closeup_short_host_duration_weight(self):
+    def test_record_time_sampling_is_not_weighted_by_physical_clip_count(self):
         plan = valid_plan()
-        long = plan['variants'][0]['clips'][0]
-        short = copy.deepcopy(long)
-        long['source_end_frame'] = 490
-        short['source_start_frame'], short['source_end_frame'] = 700, 710
-        plan['variants'][0]['clips'] = [long, short]
-        body, _ = self.audit(plan, lambda media, frame, detector, **kwargs: classification('HOST_VISIBLE' if frame >= 700 else 'CLOTHING_CLOSEUP'))
-        self.assertAlmostEqual(body['variants'][0]['host_visible_ratio_estimate'], 0.02)
-        self.assertNotEqual(body['variants'][0]['status'], 'PASS')
+        original = plan['variants'][0]['clips'][0]
+        source_start, source_end = original['source_start_frame'], original['source_end_frame']
+        plan['variants'][0]['clips'] = [
+            {**copy.deepcopy(original), 'source_start_frame': source_start+i*100,
+             'source_end_frame': source_start+(i+1)*100}
+            for i in range(5)]
+        body, calls = self.audit(plan)
+        self.assertEqual(calls, 10)
+        self.assertEqual(body['variants'][0]['status'], 'PASS')
+        self.assertEqual(body['variants'][0]['person_presence_ratio_estimate'], 1.0)
 
-    def test_other_person_and_clothing_never_count(self):
-        for label in ('OTHER_PERSON', 'CLOTHING_CLOSEUP'):
-            detector = self.material/'frame-detector'
-            detector.write_text(label)
-            body, _ = self.audit(classify=lambda *args, **kwargs: classification(label))
-            self.assertEqual(body['variants'][0]['host_visible_ratio_estimate'], 0)
-            self.assertEqual(body['variants'][0]['status'], 'REPAIRABLE')
+    def test_other_person_counts_as_person_and_clothing_triggers_refinement(self):
+        detector = self.material/'frame-detector'; detector.write_text('other-person classifier')
+        body, calls = self.audit(classify=lambda *args, **kwargs: classification('OTHER_PERSON'))
+        self.assertEqual(calls, 10)
+        self.assertEqual(body['variants'][0]['person_presence_ratio_estimate'], 1.0)
+        self.assertEqual(body['variants'][0]['status'], 'PASS')
+        detector.write_text('clothing-only classifier')
+        body, calls = self.audit(classify=lambda *args, **kwargs: classification('CLOTHING_CLOSEUP'))
+        self.assertEqual(calls, 110)
+        self.assertEqual(body['variants'][0]['status'], 'REPAIRABLE')
 
     def test_error_blocks_and_is_not_reusable_cache(self):
         body, first = self.audit(classify=lambda *args, **kwargs: classification('DETECTOR_ERROR'))
@@ -134,18 +132,18 @@ class AdaptiveVisionTests(unittest.TestCase):
             {'best_body': {'confidence': .9, 'height': .12, 'width': .08, 'area': .02}, 'best_face': {}, 'best_pose': {}, 'has_person_signal': True},
             {'best_body': {}, 'best_face': {}, 'best_pose': {}, 'has_person_signal': False},
         ]
-        expected = ['HOST_VISIBLE', 'HOST_VISIBLE', 'HOST_VISIBLE', 'UNCERTAIN', 'NO_PERSON']
+        expected = ['PERSON_VISIBLE', 'PERSON_VISIBLE', 'PERSON_VISIBLE', 'PERSON_VISIBLE', 'NO_PERSON']
         detector = self.material/'feature-detector'; detector.write_text('synthetic')
         for observations, label in zip(payloads, expected):
             def run(command, **kwargs):
                 if command[0].endswith('ffmpeg'):
                     Path(command[-1]).write_bytes(b'frame')
                     return Mock(stdout='', stderr='')
-                return Mock(stdout=json.dumps({'protocol':'apple-frame-v4','observations':observations}), stderr='')
+                return Mock(stdout=json.dumps({'protocol':'apple-frame-v5','observations':observations}), stderr='')
             with patch.object(vision.subprocess, 'run', side_effect=run):
                 result = vision.classify_frame(self.video, 0, detector)
             self.assertEqual(result['label'], label)
-            self.assertEqual(result.get('subject_evidence', False), label == 'HOST_VISIBLE')
+            self.assertEqual(result.get('subject_evidence', False), label in ('HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP'))
 
     def test_different_people_require_no_identity_match(self):
         body, _ = self.audit(classify=lambda *args, **kwargs: classification('HOST_VISIBLE'))
@@ -159,7 +157,8 @@ class AdaptiveVisionTests(unittest.TestCase):
     def test_old_classifier_contract_cannot_validate_as_current(self):
         from codex_worker import key
         body, _ = self.audit()
-        for old_contract in ('host-strata-v3', 'person-subject-strata-v4'):
+        for old_contract in ('host-strata-v3', 'person-subject-strata-v4', 'person-subject-record-strata-v5',
+                             'person-presence-closeup-record-strata-v6'):
             legacy = copy.deepcopy(body)
             legacy['contract'] = old_contract
             legacy['seal'] = hmac.new(key(self.paths), digest({k: v for k, v in legacy.items() if k != 'seal'}).encode(),
@@ -178,7 +177,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertGreater(first, 0)
         self.assertEqual(second, 0)
         self.assertTrue(all(s['cache_hit'] for s in again['variants'][0]['samples']))
-        self.assertEqual(body['variants'][0]['host_visible_ratio_lower_bound'], again['variants'][0]['host_visible_ratio_lower_bound'])
+        self.assertEqual(body['variants'][0]['no_person_ratio_estimate'], again['variants'][0]['no_person_ratio_estimate'])
 
     def test_detector_version_invalidates_gate_and_computes_new_frames(self):
         body, calls = self.audit()
@@ -226,16 +225,16 @@ class AdaptiveVisionTests(unittest.TestCase):
         value = json.loads(path.read_text()); value.pop('seal'); atomic_json(path, value)
         with self.assertRaisesRegex(CacheIdentityError, 'unproven_or_corrupt'): self.audit()
 
-    def test_short_clip_exhaustion_no_repeat_and_multifps_mapping(self):
+    def test_duration_over_sampling_policy_blocks_and_multifps_mapping(self):
         plan = valid_plan()
-        c = plan['variants'][0]['clips'][0]; c['source_end_frame'] = 1
-        body, calls = self.audit(plan)
-        self.assertEqual(calls, 1)
-        self.assertEqual(body['variants'][0]['stop_reason'], 'frame_budget_exhausted')
+        c = plan['variants'][0]['clips'][0]; c['source_end_frame'] = 610
+        with self.assertRaisesRegex(CacheIdentityError, 'duration_outside_sampling_policy'):
+            self.audit(plan)
         c['fps'] = 25; c['source_end_frame'] = 1250
         self.video.write_bytes(b'synthetic different 25fps media')
         body, _ = self.audit(plan, fps=25)
-        self.assertEqual(max(s['frame'] for s in body['variants'][0]['samples']), 1249)
+        self.assertEqual(len(body['variants'][0]['samples']), 10)
+        self.assertTrue(all(0 <= s['frame'] < 1250 for s in body['variants'][0]['samples']))
 
     def test_vfr_or_mismatched_frame_clock_blocks(self):
         detector = self.material/'frame-detector'; detector.write_text('synthetic')

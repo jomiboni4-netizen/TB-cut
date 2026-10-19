@@ -121,22 +121,24 @@ For variants of the same product:
 
 ## Visual/person rule
 
-- Final `host_visible_duration / final_duration` must be strictly greater than 70%. `HOST_VISIBLE` remains a compatibility label meaning a prominent visible person subject; it does not mean a registered or identity-verified host.
-- Count a clear full-body or half-body person in front of the camera, whether standing or seated, when they present clothing or explain the product. A sufficiently clear, prominent face or body pose can independently establish the person as a visible subject; identity consistency across shots is irrelevant.
-- Clothing/product close-ups without a prominent person, empty shots, and isolated hands/arms or other small body parts do not count. Use `UNCERTAIN` when the person-subject decision cannot be made reliably. Never require a face registry, person tracking, a host identity match, or Qwen to count a visible person.
-- Apple Vision human rectangles, face rectangles, and pose points feed the configurable geometry thresholds in `config/vision_rules.json`. A positive human signal below all subject thresholds remains non-counting and uncertain; detector execution errors are `BLOCKED`, never no-person evidence.
-- Sample each final physical plan with 16 initial points per minute, stratified over time and clips; add distinct samples for up to five passes. Weight by covered source time and apply the conservative lower-bound gate. `PASS` requires that lower bound to be strictly above 70%; after the cap, a measured ratio at or below 70% is `REPAIRABLE`, unresolved samples are `UNCERTAIN`, and decode/model/runtime failures are `BLOCKED`. Do not rescan forever or lower the threshold.
+- The subject-presence rule is independent of facing direction, identity, full-body visibility, and the person's pixel share of the frame. Any reliable Apple Vision person rectangle, face rectangle, or body-pose signal meeting the presence confidence settings in `config/vision_rules.json` counts as a person. Small or partial people are accepted; clothing-only/product-only footage and empty frames do not count.
+- `PERSON_CLOSEUP` is a separate shot category, identified by a large face rectangle or a human rectangle near frame height. Its duration share must be at most 30% of the final plan. Small people in the frame are not automatically close-ups. `PERSON_VISIBLE` covers other confirmed person footage; `HOST_VISIBLE` remains a legacy alias and does not mean a registered or identity-verified host.
+- Allow at most 10% estimated no-person duration in each final variant. Sample 10 equal time strata on the rendered variant, independent of its physical clip count. If a stratum midpoint is classified as no-person or clothing-only, refine that stratum with 10 evenly spaced samples. Its estimated no-person share is the fraction of refined samples without a person multiplied by that stratum's 10% weight. Sum across all flagged strata; multiple individually acceptable gaps can exceed the total 10% cap.
+- A refinement stratum is `min(6 seconds, 10% of the rendered variant duration)`, centered on the initial sample and clipped to the variant bounds. Final variants are under 60 seconds, so this equals one 10% stratum and never exceeds 6 seconds. All ten initial person samples mean 0% *sampled* no-person time. Exactly 10% estimated no-person time is allowed; a larger estimate is repairable.
+- Unresolved positive signals are `UNCERTAIN`; detector execution errors are `BLOCKED`, never no-person evidence. Never require face registration, person tracking, host identity matching, or Qwen. Independently enforce the 30% close-up duration cap.
+- This is a deterministic engineering sample audit, not framewise certification: it cannot prove that no unsampled frame is personless. Report `strict_framewise_certified=false`; do not describe sampled PASS as a mathematical guarantee over every frame.
 - Classifier protocol, geometry configuration, detector binary, media identity, and exact final plan are part of the evidence identity. A change to cut points or the classifier invalidates the prior audit. Old classifier results cannot be reused as current evidence.
 - Long close-up/no-person sections should be removed when they are not required for semantic continuity.
 
 Local visual classifier:
-1. Use Apple Vision person, face and pose geometry to classify whether a prominent person is visibly in frame.
+1. Use Apple Vision person, face and pose observations to classify any reliable person presence, separately marking close-ups.
 2. Identity recognition and Qwen are not part of this audit. Unresolved visual evidence remains `UNCERTAIN`; do not escalate it to an identity check.
 
 Apple Vision person detection must run outside the Codex filesystem sandbox on this Mac. An ANE model-load failure or CoreVideo `-6662` / `CVPixelBuffer` allocation failure is an execution-environment error, not a no-person result; stop the audit and rerun outside the sandbox. Rebuild the cached probe whenever its Swift source is newer, and fail closed with the underlying Vision error instead of recording zero-person samples.
 
 Suggested labels:
-- `host_visible`
+- `person_visible`
+- `person_closeup`
 - `clothes_closeup`
 - `no_person`
 - `uncertain`
@@ -160,9 +162,16 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 - 每轮记录新计算量、缓存命中量和阶段耗时；只报告实测整轮提速，不将减少窗口数量当作实际耗时降幅。
 
 - Variant states are `PASS`, `REPAIRABLE`, and `EXHAUSTED`.
-- Duration misses, incomplete openings/endings, closure gaps, 65–70% host visibility, overlap, duplication, poor visuals, weak seams, and low-value blocks are repairable by default.
+- Duration misses, incomplete openings/endings, closure gaps, more than 10% estimated no-person duration, overlap, duplication, poor visuals, weak seams, audible or transcribed stumbles, and low-value blocks are repairable by default.
 - Repair must return to the complete remaining candidate pool, lock already-passing variants, record attempts and changes, and retry up to the configured limit.
 - Only a complete-range scan, complete candidate-pool search, and exhausted repair limit may reduce the target from 3 to 2, 1, or 0.
+
+## Fixed execution and P0 time budget
+
+- Use the versioned `delivery_pipeline.py` stages and local JSON recipes/rules for routine product work. A product-specific selection, correction, manual frame confirmation or exception is recorded in its workspace JSON; do not create or edit Python code for an individual product.
+- Change shared code only to fix a reusable workflow defect. Add synthetic regression coverage, bump the affected contract/producer identity, and record the behavior in `CHANGELOG.md` before returning to product work. Preserve runtime evidence and user diffs.
+- A content correction invalidates only dependent evidence: regenerate the exact plan and semantic task; recompute audio boundaries only for changed clips; rerun the final-variant person audit. Reuse unchanged ASR windows, source clocks, frame classifications, project rates and timeline registration by identity. Do not rerun a whole source or candidate pool for a local change.
+- Target approximately five minutes per product for a warm, non-blocked execution. Record selection/review, local compute, repair and external wait separately. Report measured elapsed time, cache hits and unassigned wall time; do not claim the target was met when mandatory review, repair, first-time computation or authorization wait exceeded it.
 
 ## Physical clip normalization
 
@@ -191,7 +200,7 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 - P0: Favor preserving independently intelligible cause/effect sentences over mechanically retaining or deleting words such as “因为/所以”. Removing “因为” or a redundant lead-in may be appropriate only if the remaining speech is naturally complete and the actual audio cut has no eaten syllables; check meaning rather than keyword presence.
 - P1: Codex is the default semantic decision-maker for this correction effort. Treat MiMo as an optional, explicitly authorized comparison/assistive service, not as a proven replacement for final semantic review. Record failure cases using privacy-safe synthetic or locally approved excerpts; do not attribute quality differences to a model without matched-input evaluation.
 - P1: Optimize elapsed time using measured per-stage timing, repeated-input caching, batched/localized ASR and cut review, and adaptive person sampling; report baseline and after timings, quality regressions and cache hit counts rather than assuming most time is text processing.
-- P1: Replace the fixed 0.5-second person-detection cadence with stratified, adaptive sampling on final clip duration (initial default N=16 points per 60 seconds, proportional for shorter/longer clips). Additional disjoint N-point rounds focus on uncertain/near-threshold results, with up to five sampling passes and a conservative pass gate strictly over 70%. Never count vision exceptions/uncertain frames as confirmed visible-person time, and never treat an inconclusive sample as PASS. Sample across all constituent clips, record points and detector version, and bind results to the exact final plan. Validate synthetic edge cases and separately report authorized local real-frame observations. No identity model is required.
+- P0: Use the fixed two-stage final-variant person audit defined in `config/vision_rules.json`; do not use per-clip 16-points-per-minute rounds, a 70% host threshold, or an any-no-person hard veto. Its exact 10% aggregate no-person duration and 10-point local refinement rules are specified in the Visual/person rule above.
 
 ## One Resolve project, one path registration and isolated resumable processing (2026-10-12)
 

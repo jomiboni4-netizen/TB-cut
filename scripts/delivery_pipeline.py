@@ -34,7 +34,7 @@ def semantic_task(plan):
         product_title=plan['product']['title'],plan_digest=digest(plan),rules_fingerprint=plan.get('rules_fingerprint'),
         review_producer_digest=digest({name:_sha256(Path(__file__).with_name(name)) for name in PRODUCERS['semantic']}),
         variants=semantic_review_variants(plan),
-        instructions=SELECTION_RULE+'独立检查每条完整开头、结尾及所有接缝，原源上下文依赖、因果条件转折列举指代承诺闭合、禁止内容、卖点与跨版重复。'
+        instructions=SELECTION_RULE+'独立检查每条完整开头、结尾及所有接缝，原源上下文依赖、因果条件转折列举指代承诺闭合、明显卡壳/假起句/词音节重复/无效填充、禁止内容、卖点与跨版重复。'
         '只做语义审核；声音、人物和帧定位由本机检查，不要求真人试听或音素精度。承接词和半帧估计不自动失败。'
         '每条严格大于45秒、小于60秒，不以填充或高度重复凑三条。checks六项必须分别判断；issues列具体阻断问题；selected_ranges为空。')
     task['task_digest'] = digest(task)
@@ -64,20 +64,25 @@ class Pipeline:
         self.sources = {Path(x).name:x for x in self.state['video_paths']}
         require(len(self.sources) == len(self.state['video_paths']), 'ambiguous_source_basename')
         self.rules = _sha256(self.paths.repo_root/'PROJECT_RULES.md')
+        self.vision_rules_path = self.paths.repo_root/'config'/'vision_rules.json'
+        self.vision_rules_sha = _sha256(self.vision_rules_path)
         self.store = Store(self.paths,dict(project=self.run['project_key'],run=self.run['run_id'],
             inputs=self.run['input_content_digest'],product=self.recipe['product_id'],encoding=self.recipe['encoding_id']),self.ledger)
         self.code = {n:_sha256(self.paths.repo_root/'scripts'/n) for n in
                      set(sum(PRODUCERS.values(),[])+['delivery_runtime.py','delivery_resolve.py'])}
         self._prepared = None
-        atomic_json(self.folder/'PIPELINE_MANIFEST.json',dict(contract='fixed-delivery-v2-early-editorial-fixed-rates',
+        atomic_json(self.folder/'PIPELINE_MANIFEST.json',dict(contract='fixed-delivery-v3-two-stage-person-audit-disfluency',
             producer_snapshot=self.code,stage_producers=PRODUCERS,recipe_sha256=self.recipe_sha,
             frozen_cutpoint_contract='owned-gap-local-audio-v1',rules_sha256=self.rules,
+            vision_rules_sha256=self.vision_rules_sha,
             normal_execution='parameters_only_no_generated_code',legacy_artifacts='read_only_not_automatically_attested',
             older_automatic_plans='stale_for_new_execution_requires_source_bound_editorial_and_rate_registration'))
 
     def unchanged(self):
         require(_sha256(self.recipe_path) == self.recipe_sha and _sha256(self.paths.repo_root/'PROJECT_RULES.md') == self.rules,
                 'recipe_or_rules_changed_during_execution')
+        require(_sha256(self.vision_rules_path) == self.vision_rules_sha,
+                'vision_rules_changed_during_execution')
         require(all(_sha256(self.paths.repo_root/'scripts'/n) == sha for n,sha in self.code.items()),
                 'pipeline_code_changed_during_execution_stop_and_revalidate')
         for key in ('index','titles','range_manifest','frame_rates','assembly_review'):
@@ -167,7 +172,8 @@ class Pipeline:
                 'detector_missing_or_rebuild_required')
         from compute_store import media_signature
         media = {name:media_signature(self.sources[name]) for name in {c['source_file'] for v in plan['variants'] for c in v['clips']}}
-        body = self.store.stage('vision',dict(plan=digest(plan),classifier=classifier_identity(detector),policy=POLICY,media=media),
+        body = self.store.stage('vision',dict(plan=digest(plan),classifier=classifier_identity(detector),
+            policy=POLICY,vision_rules_sha256=self.vision_rules_sha,media=media),
             PRODUCERS['vision'],lambda:audit(self.paths,plan,self.sources,detector))
         verify(self.paths,plan,body,require_pass=True)
         return body

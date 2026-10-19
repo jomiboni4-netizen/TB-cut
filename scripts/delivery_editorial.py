@@ -8,8 +8,9 @@ from delivery_runtime import require
 from project_registry import digest
 from runtime_meta import _sha256
 
-CONTRACT = 'source-bound-assembly-review-v1'
-UNIT_CHECKS = {'opening_complete','ending_complete','no_internal_unfinished_clause','source_dependencies_resolved','removed_words_safe'}
+CONTRACT = 'source-bound-assembly-review-v2-disfluency'
+UNIT_CHECKS = {'opening_complete','ending_complete','no_internal_unfinished_clause',
+               'source_dependencies_resolved','removed_words_safe','disfluency_reviewed'}
 SEAM_CHECKS = {'reference_resolved','causal_conditions_preserved','transition_complete','no_information_repeat'}
 
 
@@ -47,7 +48,7 @@ def task(paths, recipe):
     result = dict(rules_sha256=_sha256(paths.repo_root/'PROJECT_RULES.md'),review_producer_sha256=_sha256(paths.repo_root/'scripts/delivery_editorial.py'),product_title=product['title'],titles_sha256=recipe['titles']['sha256'],range_sha256=recipe['range_manifest']['sha256'],contract=CONTRACT,product_id=recipe['product_id'],encoding_id=recipe['encoding_id'],
         input_content_digest=recipe['input_content_digest'],index_sha256=recipe['index']['sha256'],
         variants=variants,unit_checks=sorted(UNIT_CHECKS),seam_checks=sorted(SEAM_CHECKS),
-        instructions='主Codex逐段审读最终保留的原词（不是只看字幕概括）：句首主语/对象是否完整，段内是否有未完动作、条件或列举，删首尾后是否仍独立。逐接缝核对指代、因果、转折、承诺与信息重复，并跨版本检查卖点重复。上下文不足时扩大最小原文窗口，未解决前不能PASS；不能按连接词、口误或半帧误差机械拒绝。记录每项判断的具体理由，声音风险另交本机。')
+        instructions='主Codex逐段审读最终保留的原词（不是只看字幕概括）：句首主语/对象是否完整，段内是否有未完动作、条件或列举，删首尾后是否仍独立。逐段检查明显卡壳、假起句、词语/音节重复及无效填充；只在局部原词/音频证据支持时修剪，不能把语气或正常重复机械删除。逐接缝核对指代、因果、转折、承诺与信息重复，并跨版本检查卖点重复。上下文不足时扩大最小原文窗口，未解决前不能PASS；不能按连接词、口误或半帧误差机械拒绝。记录每项判断的具体理由，未见明显卡壳也需说明依据，声音边界风险另交本机。')
     result['task_digest']=digest(result)
     return result
 

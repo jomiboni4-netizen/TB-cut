@@ -20,10 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 class Paths:
     def __init__(self, root):
         self.repo_root = root/'repo';self.workspace_root = root/'work';self.project_records_dir = self.workspace_root/'records'
-        for p in [self.repo_root/'scripts',self.workspace_root,self.project_records_dir]:p.mkdir(parents=True,exist_ok=True)
+        for p in [self.repo_root/'scripts',self.repo_root/'config',self.workspace_root,self.project_records_dir]:p.mkdir(parents=True,exist_ok=True)
         for name in set(sum(PRODUCERS.values(),[])+['delivery_runtime.py','delivery_resolve.py']):
             (self.repo_root/'scripts'/name).write_bytes((ROOT/'scripts'/name).read_bytes())
         (self.repo_root/'PROJECT_RULES.md').write_text('synthetic rules')
+        (self.repo_root/'config'/'vision_rules.json').write_bytes((ROOT/'config'/'vision_rules.json').read_bytes())
         (self.project_records_dir/'worker_seal.key').write_bytes(b'k'*32)
     def runtime_argument(self, ref):return self.workspace_root/ref
     def reference(self, path):return str(path.relative_to(self.workspace_root))
@@ -140,6 +141,10 @@ class DeliveryTests(unittest.TestCase):
     def test_code_change_during_normal_execution_stops(self):
         pipeline=self.pipeline();path=self.paths.repo_root/'scripts/delivery_resolve.py';path.write_text('changed')
         with self.assertRaisesRegex(ValueError,'code_changed'):pipeline.prepare()
+
+    def test_vision_policy_config_change_during_execution_stops(self):
+        pipeline=self.pipeline();path=self.paths.repo_root/'config'/'vision_rules.json';path.write_text('{}')
+        with self.assertRaisesRegex(ValueError,'vision_rules_changed_during_execution'):pipeline.unchanged()
 
     def test_reordered_variants_reuse_all_audio_and_refresh_plan(self):
         before,_=self.pipeline().prepare();self.audio.reset_mock()

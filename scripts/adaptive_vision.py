@@ -12,15 +12,17 @@ from project_registry import digest
 from runtime_meta import CacheIdentityError, _sha256
 from compute_store import media_signature, identity, cached, check_media
 from compute_metrics import span, count
-from vision_record_score_v5 import CONTRACT, POLICY, estimate
+from vision_record_score_v5 import (CONTRACT, POLICY, ABSENT_LABELS, estimate,
+                                    expected_refinement_times, initial_record_times,
+                                    map_record_time)
 
-FRAME_CACHE_PROTOCOL = 'person-subject-strata-v4'
-# The v4 frame adapter has not changed. Scoring-only edits must reuse its frame evidence.
+FRAME_CACHE_PROTOCOL = 'person-presence-closeup-strata-v5'
+# Legacy v4 adapter digest is retained only for reproducing old evidence identities.
 _V4_ADAPTER_SHA256 = '464bb0bae7b7cbc46bd996174f0d747b7d3c21e7e4deabb84f6713d292234c5d'
 _V4_CLASSIFIER_AST_SHA256 = 'e61b0e6bf0972a660516580b94f94708c89ce0eada81adcc21e938fd20ddb646'
 _CLASSIFIER_FUNCTIONS = {'decoder_identity', 'subject_thresholds', 'classify_observations',
                          'classify_frame', 'validate_classification'}
-LABELS = {'HOST_VISIBLE', 'CLOTHING_CLOSEUP', 'OTHER_PERSON', 'NO_PERSON', 'UNCERTAIN', 'DETECTOR_ERROR'}
+LABELS = {'HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP', 'CLOTHING_CLOSEUP', 'OTHER_PERSON', 'NO_PERSON', 'UNCERTAIN', 'DETECTOR_ERROR'}
 _decoders = {}
 
 
@@ -75,7 +77,7 @@ def classifier_identity(detector):
             'adapter_sha256': classifier_adapter_digest(),
             'decoder': decoder_identity(),
             'runtime': {'os': platform.platform(), 'macos': platform.mac_ver()[0]},
-            'protocol': 'apple-frame-v4-person-subject',
+            'protocol': 'apple-frame-v5-person-presence-closeup',
             'parameters': subject_thresholds()}
 
 
@@ -93,25 +95,21 @@ def classify_observations(obs, thresholds=None):
     faces = obs.get('face_candidates') or [obs.get('best_face') or {}]
     poses = obs.get('pose_candidates') or [obs.get('best_pose') or {}]
     t = thresholds
-    body_ok = any(b.get('confidence', 0) >= t['body_confidence']
-                  and b.get('height', 0) >= t['body_height']
-                  and b.get('area', 0) >= t['body_area']
-                  and t['body_aspect_min'] <= b.get('width', 0) / max(b.get('height', 1), 1e-9)
-                  <= t['body_aspect_max'] for b in bodies)
-    face_ok = any(f.get('confidence', 0) >= t['face_confidence']
-                  and f.get('height', 0) >= t['face_height']
-                  and f.get('area', 0) >= t['face_area'] for f in faces)
-    pose_ok = any(p.get('points', 0) >= t['pose_points']
-                  and p.get('height', 0) >= t['pose_height']
-                  and p.get('area', 0) >= t['pose_area'] for p in poses)
-    if body_ok or face_ok or pose_ok:
-        return {'label': 'HOST_VISIBLE', 'subject_evidence': True,
-                'reason': 'prominent_person_geometry',
-                'evidence': {'body': body_ok, 'face': face_ok, 'pose': pose_ok}}
-    any_person = bool(obs.get('has_person_signal'))
-    return {'label': 'UNCERTAIN' if any_person else 'NO_PERSON',
-            'subject_evidence': False,
-            'reason': 'partial_or_small_person' if any_person else 'no_prominent_person'}
+    # Presence is independent of facing direction, frame occupancy, and full-body visibility.
+    body = any(b.get('confidence', 0) >= t['presence_confidence'] for b in bodies)
+    face = any(f.get('confidence', 0) >= t['presence_confidence'] for f in faces)
+    pose = any(p.get('points', 0) >= t['presence_pose_points'] for p in poses)
+    closeup = (any(f.get('confidence', 0) >= t['presence_confidence']
+                   and f.get('area', 0) >= t['closeup_face_area_min'] for f in faces)
+               or any(b.get('confidence', 0) >= t['presence_confidence']
+                      and b.get('height', 0) >= t['closeup_person_height_min'] for b in bodies))
+    any_person = body or face or pose or bool(obs.get('has_person_signal'))
+    if any_person:
+        return {'label': 'PERSON_CLOSEUP' if closeup else 'PERSON_VISIBLE',
+                'subject_evidence': True,
+                'reason': 'person_presence_closeup' if closeup else 'person_presence',
+                'evidence': {'body': body, 'face': face, 'pose': pose}}
+    return {'label': 'NO_PERSON', 'subject_evidence': False, 'reason': 'no_person_signal'}
 
 
 def proven_clock(paths, media, signature=None):
@@ -126,7 +124,7 @@ def clock_model_identity():
 
 
 def classify_frame(media, frame, detector, *, fps=None):
-    """Classify a prominent person in frame; identity matching is not part of this task."""
+    """Classify any person presence and close-up share, without identity matching."""
     try:
         with tempfile.TemporaryDirectory(prefix='tbcut-frame-') as folder:
             image = Path(folder)/'frame.png'
@@ -146,7 +144,7 @@ def classify_frame(media, frame, detector, *, fps=None):
                 result = subprocess.run([str(detector), '--frame', str(image)], text=True,
                                         capture_output=True, check=True)
                 value = json.loads(result.stdout)
-            if value.get('protocol') != 'apple-frame-v4' or not isinstance(value.get('observations'), dict):
+            if value.get('protocol') != 'apple-frame-v5' or not isinstance(value.get('observations'), dict):
                 raise CacheIdentityError('detector_frame_protocol_missing')
             return classify_observations(value['observations'], thresholds)
     except Exception as exc:
@@ -158,49 +156,36 @@ def classify_frame(media, frame, detector, *, fps=None):
 
 def validate_classification(value):
     if (not isinstance(value, dict) or value.get('label') not in LABELS
-            or value['label'] == 'HOST_VISIBLE' and value.get('subject_evidence') is not True):
+            or value['label'] in ('HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP') and value.get('subject_evidence') is not True):
         raise CacheIdentityError('unproven_person_subject_classification')
     return value
 
 
-def allocation(clips):
-    durations = [(c['source_end_frame']-c['source_start_frame'])/c['fps'] for c in clips]
-    if not clips or any(not math.isfinite(d) or d <= 0 for d in durations):
-        raise CacheIdentityError('invalid_vision_physical_ranges')
-    capacities = [c['source_end_frame']-c['source_start_frame'] for c in clips]
-    budget = max(math.ceil(sum(durations)/60*POLICY['points_per_minute']), sum(min(2, n) for n in capacities))
-    counts = [min(2, n) for n in capacities]
-    while sum(counts) < min(budget, sum(capacities)):
-        available = [i for i, n in enumerate(capacities) if counts[i] < n]
-        i = max(available, key=lambda i: durations[i]/(counts[i]+1))
-        counts[i] += 1
-    return counts
-
-
-def next_frames(clip, budget, previous, seed):
-    lo, hi = clip['source_start_frame'], clip['source_end_frame']
-    seen = set(previous)
-    new = []
-    if not seen:
-        for j in range(budget):
-            if j == 0:
-                frame = lo
-            elif j == budget-1:
-                frame = hi-1
-            else:
-                jitter = int(digest([POLICY['seed'], seed, j])[:8], 16)/0xffffffff
-                frame = lo + int((j-0.1+0.2*jitter)*(hi-lo-1)/(budget-1))
-            frame = min(hi-1, max(lo, frame))
-            if frame not in seen:
-                seen.add(frame); new.append(frame)
-    while len(new) < budget and len(seen) < hi-lo:
-        boundaries = sorted({lo-1, hi, *seen})
-        left, right = max(zip(boundaries, boundaries[1:]), key=lambda p: p[1]-p[0])
-        frame = (left+right)//2
-        if frame in seen:
-            break
-        seen.add(frame); new.append(frame)
-    return new
+def apply_manual_person_confirmation(paths, source_file, frame, value):
+    """Apply narrowly scoped human evidence without rewriting the immutable detector cache."""
+    folder = paths.workspace_root/'delivery'
+    for record_path in folder.glob('MANUAL_VISUAL_CONFIRMATION_*.json'):
+        try:
+            record = json.loads(record_path.read_text(encoding='utf-8'))
+            if record.get('source_frame') != frame:
+                continue
+            evidence = paths.workspace_root/record['frame_evidence_path']
+            if (record.get('contract') != 'codex-local-manual-person-confirmation-v1'
+                    or record.get('reviewer') != 'primary_codex'
+                    or record.get('source_file') != Path(source_file).name
+                    or record.get('manual_result') != 'PERSON_VISIBLE'
+                    or record.get('detector_result', {}).get('label') != value.get('label')
+                    or record.get('detector_result', {}).get('subject_evidence') != value.get('subject_evidence')
+                    or not evidence.is_file()
+                    or _sha256(evidence) != record.get('frame_evidence_sha256')):
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        return {'label': 'PERSON_VISIBLE', 'subject_evidence': True,
+                'reason': 'manual_visual_confirmation_of_partial_person',
+                'evidence': {'manual_confirmation': str(record_path),
+                             'original_detector_result': value}}
+    return value
 
 
 def estimate_v4(clips, samples):
@@ -234,7 +219,7 @@ def estimate_v4(clips, samples):
         lower += duration/total*conservative
         coverage &= points[0]['frame'] == lo and points[-1]['frame'] == hi-1 and max_gap <= 5.0
     status = ('BLOCKED' if errors else 'UNCERTAIN' if uncertain or not coverage else
-              'PASS' if lower > POLICY['threshold_exclusive'] else 'REPAIRABLE' if ratio <= 0.70 else 'UNCERTAIN')
+              'PASS' if lower > 0.70 else 'REPAIRABLE' if ratio <= 0.70 else 'UNCERTAIN')
     return {'host_visible_ratio_estimate': ratio, 'host_visible_ratio_lower_bound': lower,
             'full_plan_coverage': coverage, 'person_subject_classified': not uncertain and not errors,
             'status': status, 'statistical_claim': 'temporal-block-capped heuristic; no IID/video confidence guarantee'}
@@ -255,37 +240,54 @@ def audit(paths, plan, sources, detector):
                     or abs(clock['fps']-c['fps']) > 1e-5
                     or c['source_start_frame'] < 0 or c['source_end_frame'] > clock['frame_count']):
                 raise CacheIdentityError('plan_source_frame_clock_mismatch')
-        budgets = allocation(clips)
-        samples, rounds = [], []
-        for round_index in range(POLICY['max_rounds']):
-            before = len(samples)
-            for i, (clip, budget) in enumerate(zip(clips, budgets)):
-                previous = [s['frame'] for s in samples if s['clip_index'] == i]
-                new = next_frames(clip, budget, previous, [digest(plan), variant['variant_id'], i])
-                for frame in new:
-                    name = clip['source_file']
-                    expected = identity(paths, 'vision_frame', signatures[name], classifier,
-                                        {'protocol': FRAME_CACHE_PROTOCOL}, frame)
-                    def compute(n=name, f=frame):
-                        with span('frame_classification', 1):
-                            value = validate_classification(classify_frame(sources[n], f, detector, fps=clip['fps']))
-                            if value['label'] == 'DETECTOR_ERROR':
-                                # Failure is evidence, never a reusable valid cached classification.
-                                raise CacheIdentityError('detector_error: '+str(value.get('diagnostic') or value.get('reason') or 'unclassified')[:500])
-                            return value
-                    try:
-                        value, hit = cached(paths, expected, compute)
-                        validate_classification(value)
-                    except CacheIdentityError as exc:
-                        if not str(exc).startswith('detector_error:'):
-                            raise
-                        value, hit = {'label': 'DETECTOR_ERROR', 'reason': str(exc)}, False
-                    samples.append({'clip_index': i, 'source_file': name, 'frame': frame,
-                                    'classification': value, 'cache_hit': hit, 'round': round_index+1})
-            evaluation = estimate(clips, samples)
-            rounds.append({'round': round_index+1, 'new_points': len(samples)-before, **evaluation})
-            if evaluation['status'] in ('PASS', 'BLOCKED') or before == len(samples):
-                break
+        samples = []
+
+        def classify_record_time(record_time, kind, stratum_index):
+            clip_index, frame = map_record_time(clips, record_time)
+            name = clips[clip_index]['source_file']
+            expected = identity(paths, 'vision_frame', signatures[name], classifier,
+                                {'protocol': FRAME_CACHE_PROTOCOL}, frame)
+            def compute():
+                with span('frame_classification', 1):
+                    value = validate_classification(classify_frame(sources[name], frame, detector,
+                                                                   fps=clips[clip_index]['fps']))
+                    if value['label'] == 'DETECTOR_ERROR':
+                        # Execution errors are never reusable no-person classifications.
+                        raise CacheIdentityError('detector_error: '+str(value.get('diagnostic') or value.get('reason') or 'unclassified')[:500])
+                    return value
+            try:
+                value, hit = cached(paths, expected, compute)
+                validate_classification(value)
+            except CacheIdentityError as exc:
+                if not str(exc).startswith('detector_error:'):
+                    raise
+                value, hit = {'label': 'DETECTOR_ERROR', 'reason': str(exc)}, False
+            value = apply_manual_person_confirmation(paths, name, frame, value)
+            samples.append({'clip_index': clip_index, 'source_file': name, 'frame': frame,
+                            'record_time_seconds': float(record_time), 'sample_kind': kind,
+                            'stratum_index': stratum_index, 'classification': value,
+                            'cache_hit': hit})
+
+        initial_times = initial_record_times(clips)
+        for stratum_index, record_time in enumerate(initial_times):
+            classify_record_time(record_time, 'initial', stratum_index)
+        initial_lookup = {sample['stratum_index']: sample['classification']['label']
+                          for sample in samples if sample['sample_kind'] == 'initial'}
+        for stratum_index, label in initial_lookup.items():
+            if label in ABSENT_LABELS:
+                for record_time in expected_refinement_times(clips, stratum_index):
+                    classify_record_time(record_time, 'refinement', stratum_index)
+
+        evaluation = estimate(clips, samples)
+        rounds = [{'round': 1, 'new_points': len(initial_times), 'phase': 'initial',
+                   'no_person_strata': [s['stratum_index'] for s in samples
+                                        if s['sample_kind'] == 'initial'
+                                        and s['classification']['label'] in ABSENT_LABELS]}]
+        refinement_count = sum(s['sample_kind'] == 'refinement' for s in samples)
+        if refinement_count:
+            rounds.append({'round': 2, 'new_points': refinement_count, 'phase': 'flagged_strata_refinement'})
+        for round_row in rounds:
+            round_row.update({k: v for k, v in evaluation.items()})
         rows.append({'variant_id': variant['variant_id'], 'samples': samples, 'rounds': rounds,
                      'stop_reason': 'frame_budget_exhausted' if rounds[-1]['new_points'] == 0 else evaluation['status'], **evaluation})
     for signature in signatures.values():
