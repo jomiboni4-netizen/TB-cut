@@ -5,6 +5,7 @@ import hmac
 import json
 import math
 import platform
+from fractions import Fraction
 from pathlib import Path
 import subprocess
 import tempfile
@@ -52,9 +53,48 @@ def decoder_identity():
     return _decoders[signature]
 
 
-def frame_clock(media):
-    """Prove CFR from every decoded frame timestamp, never r_frame_rate alone. VFR blocks."""
+def frame_clock(media, *, allow_vfr_approximate=False, preferred_fps=None):
+    """Prove CFR timestamps, or use the explicitly approved metadata mean-rate approximation."""
     with span('frame_clock'):
+        if allow_vfr_approximate:
+            result = subprocess.run(['/opt/homebrew/bin/ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                '-show_entries', 'stream=avg_frame_rate,nb_frames,duration,start_time',
+                '-show_entries', 'format=duration', '-of', 'json', str(media)],
+                text=True, capture_output=True, check=True)
+            metadata = json.loads(result.stdout)
+            streams = metadata.get('streams') or []
+            if len(streams) != 1:
+                raise CacheIdentityError('source_video_stream_metadata_missing_or_ambiguous')
+            stream = streams[0]
+            try:
+                average_fps = float(Fraction(stream['avg_frame_rate']))
+                duration_value = stream.get('duration') or metadata.get('format', {}).get('duration')
+                duration = float(duration_value)
+                origin = float(stream.get('start_time') or 0)
+                frame_count = int(stream['nb_frames'])
+            except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+                raise CacheIdentityError('source_average_rate_metadata_invalid') from exc
+            if not all(math.isfinite(value) for value in (average_fps, duration, origin)) or average_fps <= 0 or duration <= 0:
+                raise CacheIdentityError('source_average_rate_metadata_invalid')
+            if preferred_fps is not None:
+                preferred_fps = float(preferred_fps)
+                if not math.isfinite(preferred_fps) or preferred_fps <= 0:
+                    raise CacheIdentityError('preferred_frame_rate_invalid')
+            snap_delta = abs(average_fps-preferred_fps) if preferred_fps is not None else math.inf
+            fps = preferred_fps if snap_delta <= 0.01 else average_fps
+            if frame_count < 2:
+                frame_count = round(duration * average_fps)
+            if frame_count < 2:
+                raise CacheIdentityError('source_average_rate_frame_count_unavailable')
+            evidence = {'avg_frame_rate': stream['avg_frame_rate'], 'duration': duration,
+                        'nb_frames': stream.get('nb_frames'), 'start_time': origin,
+                        'preferred_rate_fps': preferred_fps, 'selected_rate_fps': fps,
+                        'rate_rounding_delta_fps': fps-average_fps}
+            return {'fps': fps, 'average_fps': average_fps, 'frame_count': frame_count,
+                    'mapping': 'decoded-vfr-average-rate-approx-v2',
+                    'video_first_pts': origin, 'pts_digest': None,
+                    'clock_metadata_digest': digest(evidence), 'clock_metadata': evidence,
+                    'max_deviation_seconds': None}
         result = subprocess.run(['/opt/homebrew/bin/ffprobe', '-v', 'error', '-select_streams', 'v:0',
             '-show_frames', '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(media)],
             text=True, capture_output=True, check=True)
@@ -63,10 +103,15 @@ def frame_clock(media):
             raise CacheIdentityError('source_frame_clock_unproven')
         delta = (times[-1]-times[0])/(len(times)-1)
         origin = times[0]
-        if delta <= 0 or any(abs(t-origin-i*delta) > 2e-6 for i, t in enumerate(times)):
+        deviations = [abs(t-origin-i*delta) for i, t in enumerate(times)]
+        max_deviation = max(deviations)
+        if delta <= 0 or (max_deviation > 2e-6 and not allow_vfr_approximate):
             raise CacheIdentityError('vfr_exact_mapping_not_integrated')
+        mapping = ('decoded-vfr-average-rate-approx-v1' if max_deviation > 2e-6
+                   else 'decoded-cfr-with-origin-v4')
         return {'fps': 1/delta, 'frame_count': len(times), 'pts_digest': digest(times),
-                'video_first_pts': origin, 'mapping': 'decoded-cfr-with-origin-v4'}
+                'video_first_pts': origin, 'mapping': mapping,
+                'max_deviation_seconds': max_deviation}
 
 
 def classifier_identity(detector):
@@ -77,7 +122,7 @@ def classifier_identity(detector):
             'adapter_sha256': classifier_adapter_digest(),
             'decoder': decoder_identity(),
             'runtime': {'os': platform.platform(), 'macos': platform.mac_ver()[0]},
-            'protocol': 'apple-frame-v5-person-presence-closeup',
+            'protocol': 'apple-frame-v6-person-presence-closeup-pose-fallback',
             'parameters': subject_thresholds()}
 
 
@@ -109,14 +154,20 @@ def classify_observations(obs, thresholds=None):
                 'subject_evidence': True,
                 'reason': 'person_presence_closeup' if closeup else 'person_presence',
                 'evidence': {'body': body, 'face': face, 'pose': pose}}
+    if obs.get('pose_available') is False:
+        return {'label': 'UNCERTAIN', 'subject_evidence': False,
+                'reason': 'pose_detector_unavailable_without_rectangle_or_face_evidence'}
     return {'label': 'NO_PERSON', 'subject_evidence': False, 'reason': 'no_person_signal'}
 
 
-def proven_clock(paths, media, signature=None):
+def proven_clock(paths, media, signature=None, *, allow_vfr_approximate=False, preferred_fps=None):
     signature = signature or media_signature(media)
+    protocol = ('decoded-cfr-with-origin-v4+vfr-average-approx-v2' if allow_vfr_approximate
+                else 'decoded-cfr-with-origin-v4')
     expected = identity(paths, 'clock', signature, clock_model_identity(),
-                        {'protocol': 'decoded-cfr-with-origin-v4'}, 'all_frames')
-    return cached(paths, expected, lambda: frame_clock(media))[0]
+                        {'protocol': protocol, 'preferred_fps': preferred_fps}, 'all_frames')
+    return cached(paths, expected, lambda: frame_clock(media, allow_vfr_approximate=allow_vfr_approximate,
+                                                        preferred_fps=preferred_fps))[0]
 
 
 def clock_model_identity():
@@ -144,7 +195,7 @@ def classify_frame(media, frame, detector, *, fps=None):
                 result = subprocess.run([str(detector), '--frame', str(image)], text=True,
                                         capture_output=True, check=True)
                 value = json.loads(result.stdout)
-            if value.get('protocol') != 'apple-frame-v5' or not isinstance(value.get('observations'), dict):
+            if value.get('protocol') != 'apple-frame-v6' or not isinstance(value.get('observations'), dict):
                 raise CacheIdentityError('detector_frame_protocol_missing')
             return classify_observations(value['observations'], thresholds)
     except Exception as exc:
@@ -188,18 +239,31 @@ def apply_manual_person_confirmation(paths, source_file, frame, value):
     return value
 
 
-def audit(paths, plan, sources, detector):
+def audit(paths, plan, sources, detector, *, allow_vfr_approximate=False):
+    editing_policy = plan.get('editing_policy') or {}
+    closeup_limit = editing_policy.get('closeup_duration_ratio_max_inclusive', POLICY['closeup_duration_ratio_max_inclusive'])
+    if not isinstance(closeup_limit, (int, float)) or not 0 <= closeup_limit <= 1:
+        raise CacheIdentityError('project_closeup_policy_invalid')
+    effective_policy = dict(POLICY, closeup_duration_ratio_max_inclusive=closeup_limit)
     classifier = classifier_identity(detector)
     signatures = {name: media_signature(sources[name]) for name in {c['source_file'] for v in plan['variants'] for c in v['clips']}}
+    preferred_rates = {name: next(c['fps'] for v in plan['variants'] for c in v['clips']
+                                  if c['source_file'] == name) for name in signatures}
     clocks = {}
     for name, signature in signatures.items():
-        clocks[name] = proven_clock(paths, sources[name], signature)
+        clocks[name] = proven_clock(paths, sources[name], signature,
+                                    allow_vfr_approximate=allow_vfr_approximate,
+                                    preferred_fps=preferred_rates[name])
     rows = []
     for variant in plan['variants']:
         clips = variant['clips']
         for c in clips:
             clock = clocks[c['source_file']]
-            if (clock.get('mapping') not in ('decoded-cfr-v3', 'decoded-cfr-with-origin-v4')
+            permitted_mappings = {'decoded-cfr-v3', 'decoded-cfr-with-origin-v4'}
+            if allow_vfr_approximate:
+                permitted_mappings.add('decoded-vfr-average-rate-approx-v2')
+            if (clock.get('mapping') not in permitted_mappings
+                    or clock.get('mapping') != c.get('frame_clock_mapping')
                     or abs(clock['fps']-c['fps']) > 1e-5
                     or c['source_start_frame'] < 0 or c['source_end_frame'] > clock['frame_count']):
                 raise CacheIdentityError('plan_source_frame_clock_mismatch')
@@ -241,7 +305,7 @@ def audit(paths, plan, sources, detector):
                 for record_time in expected_refinement_times(clips, stratum_index):
                     classify_record_time(record_time, 'refinement', stratum_index)
 
-        evaluation = estimate(clips, samples)
+        evaluation = estimate(clips, samples, closeup_ratio_max=closeup_limit)
         rounds = [{'round': 1, 'new_points': len(initial_times), 'phase': 'initial',
                    'no_person_strata': [s['stratum_index'] for s in samples
                                         if s['sample_kind'] == 'initial'
@@ -258,7 +322,7 @@ def audit(paths, plan, sources, detector):
     if classifier_identity(detector) != classifier:
         raise CacheIdentityError('classifier_changed_during_audit')
     body = {'contract': CONTRACT, 'plan_digest': digest(plan), 'classifier': classifier,
-            'policy': POLICY, 'media': signatures, 'clocks': clocks, 'variants': rows}
+            'policy': effective_policy, 'media': signatures, 'clocks': clocks, 'variants': rows}
     from codex_worker import key
     body['seal'] = hmac.new(key(paths), digest(body).encode(), hashlib.sha256).hexdigest()
     return body
@@ -271,7 +335,9 @@ def verify(paths, plan, body, *, require_pass=True):
     if (not secret_path.is_file() or not isinstance(body.get('seal'), str)
             or not hmac.compare_digest(body['seal'], hmac.new(secret_path.read_bytes(), digest(unsigned).encode(), hashlib.sha256).hexdigest())):
         raise CacheIdentityError('vision_execution_seal_missing_or_invalid')
-    if body.get('contract') != CONTRACT or body.get('policy') != POLICY or body.get('plan_digest') != digest(plan):
+    expected_policy = dict(POLICY, closeup_duration_ratio_max_inclusive=(plan.get('editing_policy') or {}).get(
+        'closeup_duration_ratio_max_inclusive', POLICY['closeup_duration_ratio_max_inclusive']))
+    if body.get('contract') != CONTRACT or body.get('policy') != expected_policy or body.get('plan_digest') != digest(plan):
         raise CacheIdentityError('vision_contract_or_plan_changed')
     if classifier_identity(body['classifier']['detector_path']) != body['classifier']:
         raise CacheIdentityError('vision_classifier_changed')

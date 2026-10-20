@@ -8,7 +8,16 @@
 
 ## Git and public repository workflow
 
-- 新商品执行必须显式指定 `--workspace`；若还设置 `TB_CUT_WORKSPACE`，两者不同则停止，仅有环境变量也不能隐式选择旧工作区。冷启动 `init` 还必须以 `--input-state` 显式选择本次 MP4、SRT、Excel 和 Resolve 输入清单。根目录旧状态、历史 RUN 和旧报告不能作为默认新任务输入；历史工作区只读保留，不参与默认候选检索。
+- 一个 Resolve 项目只允许一份长期项目状态记录：`.cache/projects/<project_key>/PROJECT_STATE.json`。它绑定稳定 Resolve 项目 ID、素材目录、视频/字幕/标题路径及源/目标时间线；所有商品批次从该记录继承，不重复注册或复制绑定字段。仓库根目录 `PROJECT_STATE.json` 是旧记录，不能用于选择活动项目。
+- 商品批次是短期切片，按 `.cache/projects/<project_key>/batches/<batch_id>/` 隔离，只记录项目引用、商品范围、进度及本批派生产物，不持有独立项目身份或另一套素材路径。完成时间写入批次状态；完成满 7 天后可由清理器预览并删除该批切片，项目状态记录和达芬奇项目不随批次清理。活动/未完成批次不得自动删除。
+- 新商品执行必须显式指定当前批次工作区；若还设置 `TB_CUT_WORKSPACE`，两者不同则停止，仅有环境变量也不能隐式选择旧工作区。冷启动必须显式选择本次输入清单，并将经确认的项目绑定写入项目级记录。迁移到该结构完成前，旧版批次工作区状态只能作为兼容数据，不能称为已经满足“一项目一记录”。无 `--workspace` 的 project doctor 只检查仓库结构，不能报告当前项目就绪。历史 RUN、旧报告不能作为默认新任务输入。
+
+## Resolve project editorial mode routing
+
+- Editing mode is selected from the live DaVinci Resolve project display name by `config/project_editing_modes.json`; stable Resolve project ID still controls project identity and file/path binding. The display name is a workflow selector, not authentication.
+- A name containing `都督` uses `dudu_marked_range`: the user's product start/end markers define approximate source bounds, not frame-accurate cuts. Choose and semantically shape one approximately one-minute product video within each marked range; target 55–less than 60 seconds, with `PERSON_CLOSEUP` at most 40% of total duration.
+- A name containing `淘宝` uses `taobao_legacy`: retain the established 45–less than 60 second range, target three distinct variants when the full candidate pool supports them (allow fewer only after exhaustion), and cap `PERSON_CLOSEUP` at 30%.
+- Both modes retain shared semantic closure, banned-content, synchronization, source-bound, person-presence, and Resolve validation rules. If the project name matches both keywords or neither keyword, stop before selection or write and report the routing reason; never guess or use the other mode as fallback.
 
 - Keep every Codex change to public repository files in the Git working tree and reviewable with `git diff` or `git diff --cached`. Do not restore or overwrite changes merely to erase their diff.
 - Develop on a task branch, not directly on the default branch. Use pull requests as the GPT review entry point when a GitHub remote is configured.
@@ -29,6 +38,12 @@
 - End task replies with only these sections: `Report updated`, `Branch`, `HEAD`, `PR`, `Tests`, and `Runtime not committed`. Put detailed results and Git file status in the report.
 
 ## 标题数据与商品编号
+
+### 工作簿依赖信任
+
+- 日常工作簿操作信任 Codex 托管运行时解析到的 `@oai/artifact-tool` 包身份，不因 Node 或该依赖升级版本号而阻断；不得把 semver 白名单作为日常门禁。
+- 每次运行仍确认包身份，并验证 `FileBlob.load`、`SpreadsheetFile.importXlsx`、`SpreadsheetFile.exportXlsx` 等实际需要的能力；真实工作簿读写继续执行结构、导出回读和非目标单元格保护检查。
+- `strict-history` 仅用于明确的历史复现，保留精确版本和分发摘要。禁止通过改版本号或伪造兼容记录绕过能力检查。
 
 
 
@@ -122,10 +137,10 @@ For variants of the same product:
 ## Visual/person rule
 
 - The subject-presence rule is independent of facing direction, identity, full-body visibility, and the person's pixel share of the frame. Any reliable Apple Vision person rectangle, face rectangle, or body-pose signal meeting the presence confidence settings in `config/vision_rules.json` counts as a person. Small or partial people are accepted; clothing-only/product-only footage and empty frames do not count.
-- `PERSON_CLOSEUP` is a separate shot category, identified by a large face rectangle or a human rectangle near frame height. Its duration share must be at most 30% of the final plan. Small people in the frame are not automatically close-ups. `PERSON_VISIBLE` covers other confirmed person footage; `HOST_VISIBLE` remains a legacy alias and does not mean a registered or identity-verified host.
+- `PERSON_CLOSEUP` is a separate shot category, identified by a large face rectangle or a human rectangle near frame height. Enforce the project-mode cap: at most 40% for `都督`, at most 30% for `淘宝`. Small people in the frame are not automatically close-ups. `PERSON_VISIBLE` covers other confirmed person footage; `HOST_VISIBLE` remains a legacy alias and does not mean a registered or identity-verified host.
 - Allow at most 10% estimated no-person duration in each final variant. Sample 10 equal time strata on the rendered variant, independent of its physical clip count. If a stratum midpoint is classified as no-person or clothing-only, refine that stratum with 10 evenly spaced samples. Its estimated no-person share is the fraction of refined samples without a person multiplied by that stratum's 10% weight. Sum across all flagged strata; multiple individually acceptable gaps can exceed the total 10% cap.
 - A refinement stratum is `min(6 seconds, 10% of the rendered variant duration)`, centered on the initial sample and clipped to the variant bounds. Final variants are under 60 seconds, so this equals one 10% stratum and never exceeds 6 seconds. All ten initial person samples mean 0% *sampled* no-person time. Exactly 10% estimated no-person time is allowed; a larger estimate is repairable.
-- Unresolved positive signals are `UNCERTAIN`; detector execution errors are `BLOCKED`, never no-person evidence. Never require face registration, person tracking, host identity matching, or Qwen. Independently enforce the 30% close-up duration cap.
+- Unresolved positive signals are `UNCERTAIN`; detector execution errors are `BLOCKED`, never no-person evidence. Never require face registration, person tracking, host identity matching, or Qwen. Independently enforce the close-up cap selected by the project mode.
 - This is a deterministic engineering sample audit, not framewise certification: it cannot prove that no unsampled frame is personless. Report `strict_framewise_certified=false`; do not describe sampled PASS as a mathematical guarantee over every frame.
 - Classifier protocol, geometry configuration, detector binary, media identity, and exact final plan are part of the evidence identity. A change to cut points or the classifier invalidates the prior audit. Old classifier results cannot be reused as current evidence.
 - Long close-up/no-person sections should be removed when they are not required for semantic continuity.
@@ -147,17 +162,18 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 ## Audio/cut-point rule
 
-- Codex chooses semantic ranges; local tools choose final physical cut points.
-- Use SRT + local ASR/VAD + pauses/energy + frame boundaries for clean starts/ends.
+- Codex first freezes the complete semantic combination from the current subtitle index and source context. Local ASR must not rescan full selected clips or broad candidate ranges after that decision.
+- Local ASR is for checking only the proposed opening and ending cut neighborhoods for swallowed, partial, or misaligned words. Start with a small window around each cut (normally no more than 2.5 seconds on either side); expand only that cut's window when the result is ambiguous, and record the reason.
+- Use subtitle cue timing, local cut-neighborhood ASR, pauses/energy, and source frame boundaries together to validate clean starts and ends. ASR does not choose the content, rewrite the Codex combination, or certify semantic closure.
 - Never hard-cut a half word or half sentence.
-- Local ASR should be windowed around selected ranges, not full-media retranscription by default.
+- Do not transcribe the body of a selected clip solely to obtain word alignment. If an edge check finds a likely swallowed word, repair or move that edge and recheck only the affected neighborhood.
 - Semantic timecodes are rough bounds. If a natural sentence ending lies after the rough end, extend to the sentence boundary first; if this would exceed 60 seconds, remove or replace another low-value complete segment. Never meet duration by cutting a sentence tail.
 - Tail closure risks include unfinished cause, condition, contrast, enumeration, reference, promise, and speech that continues as the same sentence for the next 1–3 seconds.
 
 ## Repair and exhaustion
 
-- 成片检查提速默认顺序：先用派生字幕索引和轻量硬规则确定语义修复方案，再集中进行局部 ASR 与画面复核；明显将被替换的片段不提前做昂贵检测。失败后只重新计算受影响的素材窗口，最终所有硬审核仍须通过。
-- 局部 ASR 合并同素材重叠窗口，每批仅使用一个按需加载的模型实例；缓存齐全时不加载模型，不通过降低识别质量提速。
+- 成片检查提速默认顺序：Codex先用派生字幕索引和原源上下文冻结版本组合；之后只对最终选段的首尾切点做局部ASR核验，再做画面复核。明显将被替换的片段不提前做昂贵检测。失败后只重新计算受影响切点附近的素材窗口，最终所有硬审核仍须通过。
+- 局部 ASR 只合并相邻或重叠的切点窗口，每批仅使用一个按需加载的模型实例；缓存齐全时不加载模型，不通过降低识别质量提速。窗口总量和扩窗原因纳入运行记录。
 - 人物检测可复用 `scripts/review_compute_cache.py` 的物理范围缓存，键必须包含素材身份、大小/修改时间、精确检测范围及检测器内容指纹。说明、语义角色和时间线位置变化不要求重复计算相同源画面，但必须重算当前方案审核与完整方案摘要；缓存检测数据不代表写入授权。旧无指纹缓存不可直接提升为新缓存。
 - 每轮记录新计算量、缓存命中量和阶段耗时；只报告实测整轮提速，不将减少窗口数量当作实际耗时降幅。
 
@@ -169,6 +185,13 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 ## Fixed execution and P0 time budget
 
 - Use the versioned `delivery_pipeline.py` stages and local JSON recipes/rules for routine product work. A product-specific selection, correction, manual frame confirmation or exception is recorded in its workspace JSON; do not create or edit Python code for an individual product.
+- P0 delivery and data integrity: process products independently. As soon as a product's required hard audits pass, append it to the explicitly registered target timeline, immediately read it back and verify clip identity, order, duration, source ranges and audio/video linkage; persist a `written_and_verified` checkpoint before starting the next product. A batch-level review must never delay an already passing product. After requested products are written or explicitly blocked, reorder only this run's product blocks by ascending workbook physical-row `product_index`; preserve internal clip order, synchronized media, markers and unrelated/manual material, then re-read the affected timeline.
+- P0 target readiness: before expensive selection or media analysis, verify the chosen workspace, current Resolve project/timeline identities, source and target identities, fixed pipeline entrypoint, registered downstream consumer integration, and write/readback capability. A structural doctor PASS alone is not runtime integration evidence. If integration cannot be invoked, report the exact blocker before broad media, ASR or vision computation.
+- P1 progress and recovery: maintain a durable per-product ledger with current stage, last checkpoint, elapsed time by selection/compute/repair/wait/write/verification, and next action. `REPAIRABLE` must create a structured repair request (`failed_stage`, exact issue/evidence, `rollback_to`, `invalidate`, `preserve`, attempt number) and re-enter the nearest valid upstream stage; it must not return as a terminal product result. Recompute only that stage and its dependents, preserving valid upstream inputs and completed products. Environment faults use a bounded fallback tool/runtime and then rerun only the failed stage. True missing-input/authorization faults remain resumable blockers with a stored resume point, not exhausted products. After the configured repair/fallback limit, mark `PAUSED_RETRYABLE` or `EXHAUSTED`, preserve every artifact, report the next action, and continue independent products when safe. A repeated identical failure must not rerun unchanged inputs without a changed repair request or runtime identity.
+- P2 semantic review: judge retained speech's actual meaning in original context, not connector keywords, transcript fragments, or subtitle cue boundaries. For each opening, transition and ending, compare retained words with minimum surrounding context and decide whether the cut is naturally understandable, complete and product-relevant. Preserve sensible clauses containing “因为/所以/但是”; repair only real dangling dependencies, meaning changes, or unusable cuts. Record concise reasons; do not loosen genuine hard rules to force delivery.
+- P3 project continuity: persist stable project/media/subtitle/workbook/Resolve timeline identities and batch progress. Later conversations should validate identity changes and resume from the ledger, not silently select stale roots or repeatedly request already confirmed configuration.
+- P4 evidence correctness: freeze code/rule versions during production; a shared implementation change enters a separate development/validation step and invalidates only dependent evidence. Treat media-embedded audio/video offsets and user-declared visual placeholders as source/editing facts, not semantic defects. Compare streams using separately validated source clocks; unequal source-frame numbers alone do not prove an editorial error. Store intentional repairs in the edit manifest.
+- P5 efficiency and reporting: log stage durations and cache hits, optimize only from measured bottlenecks, and report edited/written/verified/exported as separate states. Warm-run time targets are measurement goals, not grounds to skip required checks or claim unmeasured speedups.
 - Change shared code only to fix a reusable workflow defect. Add synthetic regression coverage, bump the affected contract/producer identity, and record the behavior in `CHANGELOG.md` before returning to product work. Preserve runtime evidence and user diffs.
 - A content correction invalidates only dependent evidence: regenerate the exact plan and semantic task; recompute audio boundaries only for changed clips; rerun the final-variant person audit. Reuse unchanged ASR windows, source clocks, frame classifications, project rates and timeline registration by identity. Do not rerun a whole source or candidate pool for a local change.
 - Target approximately five minutes per product for a warm, non-blocked execution. Record selection/review, local compute, repair and external wait separately. Report measured elapsed time, cache hits and unassigned wall time; do not claim the target was met when mandatory review, repair, first-time computation or authorization wait exceeded it.

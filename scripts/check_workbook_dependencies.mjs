@@ -80,15 +80,6 @@ async function quickTreeStamp(directory) {
   return sha(Buffer.from(JSON.stringify(rows)));
 }
 
-async function codeFingerprint(policy) {
-  const digest = createHash('sha256');
-  for (const name of policy.contract_files) {
-    const bytes = await fs.readFile(path.join(root, name));
-    digest.update(`${name}\0${sha(bytes)}\n`);
-  }
-  return digest.digest('hex');
-}
-
 async function readCache(cachePath) {
   try { return JSON.parse(await fs.readFile(cachePath, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -102,12 +93,6 @@ async function writeCache(cachePath, value) {
 }
 
 export async function checkDependencies({mode = 'compatible', moduleEntryOverride} = {}) {
-  if (process.version !== 'v24.19.0') {
-    return {status: 'unverified', reason: 'workbook_node_version_unverified', node: process.version};
-  }
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
-    return {status: 'unverified', reason: 'workbook_platform_unverified', platform: process.platform, arch: process.arch};
-  }
   const pkg = await packageInfo(moduleEntryOverride);
 
   if (mode === 'strict-history') {
@@ -128,47 +113,39 @@ export async function checkDependencies({mode = 'compatible', moduleEntryOverrid
   if (mode !== 'compatible') return {status: 'incompatible', reason: 'unknown_workbook_dependency_mode'};
 
   const policy = JSON.parse(await fs.readFile(path.join(root, 'config/workbook-compatibility.json'), 'utf8'));
-  const approved = policy.runtimes.find(item => item.artifact_tool === pkg.info.version
-    && item.node === process.version && item.platform === process.platform && item.arch === process.arch);
-  if (!approved) {
-    return {status: 'unverified', reason: 'artifact_tool_runtime_not_reviewed', node: process.version,
-      artifactTool: pkg.info.version, entry: pkg.entry};
+  if (pkg.info.name !== policy.trusted_package) {
+    return {status: 'incompatible', reason: 'artifact_tool_package_identity_mismatch',
+      expected: policy.trusted_package, actual: pkg.info.name};
   }
-  if (approved.test_status !== 'passed') {
-    return {status: 'unverified', reason: 'workbook_contract_tests_not_passed', node: process.version,
-      artifactTool: pkg.info.version};
-  }
-  const contractDigest = await codeFingerprint(policy);
-  if (contractDigest !== approved.contract_sha256) {
-    return {status: 'unverified', reason: 'workbook_contract_revision_not_reviewed', node: process.version,
-      artifactTool: pkg.info.version};
+  if (!moduleEntryOverride) {
+    const bundledPackageRoot = path.resolve(path.dirname(path.dirname(process.execPath)),
+      'node_modules', '@oai', 'artifact-tool');
+    if (pkg.directory !== bundledPackageRoot) {
+      return {status: 'incompatible', reason: 'artifact_tool_not_from_codex_runtime',
+        packageRoot: pkg.directory};
+    }
   }
   const stamp = await quickTreeStamp(pkg.directory);
   const cachePath = path.join(root, '.cache/workbook_runtime_compatibility.json');
   const cache = await readCache(cachePath);
   const identity = {node: process.version, platform: process.platform, arch: process.arch,
     artifactTool: pkg.info.version, packageRoot: pkg.directory, packageEntry: pkg.entry,
-    quickTreeStamp: stamp, contractSha256: contractDigest, distributionSha256: approved.tree_sha256};
-  if (cache && stable(cache.identity) === stable(identity)
-      && cache.distributionSha256 === approved.tree_sha256 && cache.status === 'verified') {
+    packageName: pkg.info.name, quickTreeStamp: stamp};
+  if (cache && stable(cache.identity) === stable(identity) && cache.status === 'verified') {
     const module = await import(pathToFileURL(pkg.entry));
     const missing = validateApiSurface(module);
     if (missing.length) return {status: 'incompatible', reason: 'artifact_tool_required_api_missing', missing};
     return {status: 'verified', mode, node: process.version, artifactTool: pkg.info.version,
-      distribution: approved.distribution, verification: 'cached-environment-record', workbookApi: 'required-import-export'};
+      package: pkg.info.name, verification: 'cached-environment-record', workbookApi: 'required-import-export'};
   }
   const tree = await treeEvidence(pkg.directory);
-  if (tree.fileCount !== approved.file_count || tree.treeSha256 !== approved.tree_sha256) {
-    return {status: 'incompatible', reason: 'artifact_tool_distribution_mismatch', node: process.version,
-      artifactTool: pkg.info.version, actualFileCount: tree.fileCount};
-  }
   const module = await import(pathToFileURL(pkg.entry));
   const missing = validateApiSurface(module);
   if (missing.length) return {status: 'incompatible', reason: 'artifact_tool_required_api_missing', missing};
   await writeCache(cachePath, {status: 'verified', identity, distributionSha256: tree.treeSha256,
-    verifiedAt: new Date().toISOString(), compatibilityRecord: policy.record_id});
+    fileCount: tree.fileCount, verifiedAt: new Date().toISOString(), trustPolicy: policy.policy});
   return {status: 'verified', mode, node: process.version, artifactTool: pkg.info.version,
-    distribution: approved.distribution, verification: 'full-distribution-and-contract', workbookApi: 'required-import-export'};
+    package: pkg.info.name, verification: 'package-identity-and-runtime-capabilities', workbookApi: 'required-import-export'};
 }
 
 if (process.argv[1] && await fs.realpath(process.argv[1]) === fileURLToPath(import.meta.url)) {

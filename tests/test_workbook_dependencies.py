@@ -30,7 +30,7 @@ class WorkbookDependencyTests(unittest.TestCase):
         script = ROOT / 'scripts/check_workbook_dependencies.mjs'
         current = subprocess.run([node, str(script)], capture_output=True, text=True)
         self.assertEqual(current.returncode, 0, current.stderr)
-        self.assertEqual(json.loads(current.stdout)['artifactTool'], '2.8.94')
+        self.assertEqual(json.loads(current.stdout)['package'], '@oai/artifact-tool')
         historical = subprocess.run([node, str(script), '--mode', 'strict-history'], capture_output=True, text=True)
         self.assertEqual(historical.returncode, 3)
         self.assertEqual(json.loads(historical.stdout)['reason'], 'historical_artifact_tool_version_mismatch')

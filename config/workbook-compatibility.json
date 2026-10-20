@@ -1,22 +1,13 @@
 {
-  "schema_version": 1,
-  "record_id": "workbook-contract-20261015-v1",
-  "policy": "allowlisted-runtime-and-code-contract",
-  "required_node": "24.19.0",
-  "contract_files": [
-    "package.json",
-    "scripts/check_workbook_dependencies.mjs",
-    "scripts/check_workbook_structure.py",
-    "scripts/index_titles.py",
-    "scripts/inspect_title_workbook.mjs",
-    "scripts/project_doctor.py",
-    "scripts/query_table_resize.mjs",
-    "scripts/resolve_trial.py",
-    "scripts/update_title_counts.mjs",
-    "scripts/workbook_runtime.py",
-    "tests/test_index_titles.py",
-    "tests/test_workbook_dependencies.py",
-    "tests/test_workbook_runtime_compatibility.py"
+  "schema_version": 2,
+  "record_id": "workbook-trusted-package-identity-v2",
+  "policy": "trusted-bundled-package-identity-and-capability-check",
+  "trusted_package": "@oai/artifact-tool",
+  "trusted_source": "codex-primary-runtime",
+  "required_api": [
+    "FileBlob.load",
+    "SpreadsheetFile.importXlsx",
+    "SpreadsheetFile.exportXlsx"
   ],
   "historical_strict_profile": {
     "version": "2.8.93",
@@ -29,28 +20,16 @@
     "daily_default": false,
     "evidence": "preserved exact historical distribution locks; strict mode requires that exact package tree"
   },
-  "runtimes": [
-    {
-      "artifact_tool": "2.8.94",
-      "node": "v24.19.0",
-      "platform": "darwin",
-      "arch": "arm64",
-      "distribution": "codex-primary-runtime-node",
-      "file_count": 212,
-      "tree_sha256": "29ac1e4f72d3c83497edfe2dda233776ffaed4b8ae533b7f208c8dc292f27999",
-      "contract_sha256": "7dbdd1454775b0f4266d8a3615eb42cc722aa480384f154ebc67afd7f89c1347",
-      "capabilities": [
-        "FileBlob.load",
-        "SpreadsheetFile.importXlsx",
-        "SpreadsheetFile.exportXlsx",
-        "sheet inventory and values",
-        "OOXML guard and physical-row indexing",
-        "zero-padded numeric ID recovery",
-        "count-column write with non-target value/formula/style verification",
-        "temporary export and reopen verification",
-        "atomic replace after validation"
-      ],
-      "test_status": "passed"
-    }
+  "version_policy": "No Node or artifact-tool semver allowlist in compatible mode. Trust is based on the package identity resolved by the Codex primary runtime and runtime capability checks.",
+  "capabilities": [
+    "FileBlob.load",
+    "SpreadsheetFile.importXlsx",
+    "SpreadsheetFile.exportXlsx",
+    "sheet inventory and values",
+    "OOXML guard and physical-row indexing",
+    "zero-padded numeric ID recovery",
+    "count-column write with non-target value/formula/style verification",
+    "temporary export and reopen verification",
+    "atomic replace after validation"
   ]
 }

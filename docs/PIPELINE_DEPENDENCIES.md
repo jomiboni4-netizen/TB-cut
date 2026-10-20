@@ -24,7 +24,7 @@
 | export | `export_marked_variants.py` | `PROJECT_STATE.json` Resolve 项目/目标时间线及商品标记；CLI 输出目录 | `.cache/export_manifest.json` + meta；仅 `--render` 时产生 MP4 | 当前项目名/时间线；按连续片段和音频终点设导出范围；每次更新 manifest 后刷新 meta | export verification |
 | export verification | `verify_exports.py` | 已验证的 `.cache/export_manifest.json`、manifest 指向的 MP4、FFmpeg/ffprobe | `.cache/export_verification.json` + meta | 身份、文件数量/时长差、尾部黑帧 | 交付 |
 
-`enforce_v2_request_rules.py` 可对已认证请求原位更新规则并刷新 meta，但它不能从零生成基础请求。`inspect_timeline_for_export.py`、`compare_timeline_versions.py`、`update_title_counts.mjs`、`update_batch_state.py` 是辅助/历史或交付后步骤，不是上述主链的自动前置步骤。时间线快照和历史对比仍未接入统一身份校验，勿当成当前批次依据。`project_doctor.py` 检查必需路径、state JSON 和配置字段、命令可用性，以及固定 Node/module 版本、分发包摘要和 workbook API 导入；不读取素材、不验证 runtime 缓存、不连接 Resolve。
+`enforce_v2_request_rules.py` 可对已认证请求原位更新规则并刷新 meta，但它不能从零生成基础请求。`inspect_timeline_for_export.py`、`compare_timeline_versions.py`、`update_title_counts.mjs`、`update_batch_state.py` 是辅助/历史或交付后步骤，不是上述主链的自动前置步骤。时间线快照和历史对比仍未接入统一身份校验，勿当成当前批次依据。`project_doctor.py` 检查必需路径、state JSON 和配置字段、命令可用性，以及 Codex 托管 artifact-tool 包身份和 workbook API 导入；不读取素材、不验证 runtime 缓存、不连接 Resolve。
 
 前置顺序：`init → subtitle index + title index → product ranges → expanded candidates → MiMo review → semantic audit →（必要时 repair）→ rough approval → windowed ASR → window quality → refine plans → person coverage + final approval → Resolve write → Resolve validation → export → export verification`。`fingerprint_inputs.py` 可在 init 后运行，但它的输出目前不是后续脚本的强制输入；统一身份 helper 会直接计算当前输入指纹。
 
@@ -67,7 +67,7 @@
 
 ## Deterministic title index
 
-正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。Node 和 `@oai/artifact-tool` 必须符合下述固定分发约定；缺失或版本/摘要不符直接失败，不更换 XLSX parser，不使用旧缓存兜底。
+正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。必须使用 Codex 托管运行时解析到的 `@oai/artifact-tool`，并通过包身份和实际 API 能力检查；不按版本号阻断，不更换 XLSX parser，不使用旧缓存兜底。
 
 Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。仅当本批状态显式设置 `batch_overrides.skip_blank_titles=true` 时，空标题行跳过且不占商品编号；该策略进入输入指纹。输出保留 `source`、`sheet`、`products`，新增 `schema_version=2` 和 `generator=index_titles.py:v2`；采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
 
@@ -79,13 +79,13 @@ Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作
 
 ## Workbook runtime compatibility
 
-`package.json` allows compatible artifact-tool 2.x releases. Daily use is governed by `config/workbook-compatibility.json`, which records exact Node/platform/package versions, a bundled distribution tree digest, the required API surface, the tested workbook contract and a digest of the code/tests that produced that result. A version is accepted only when its exact environment and code contract have a passing record. Unknown versions remain unverified; workbook readers and writers stop, while Project Doctor reports the workbook-only blocker as a warning and completes unrelated checks.
+日常模式信任 Codex 托管运行时解析出的 `@oai/artifact-tool` 包身份，不要求 Node 或依赖版本号命中白名单。每次运行检查包名、加载入口和 `FileBlob.load`、`SpreadsheetFile.importXlsx`、`SpreadsheetFile.exportXlsx` 能力；本地缓存记录当前包身份、版本、路径与分发摘要，供同一运行环境加速重复检查，不构成版本许可清单。
 
-The current tested environment is Node **24.19.0** with bundled `@oai/artifact-tool` **2.8.94**. Its first verification checks the complete distribution tree, required API functions and workbook contract; a repository-local ignored runtime record then lets later Resolve workspaces reuse the proof after a lightweight file stamp and code digest check. This avoids repeating the full dependency tree hash for each project. If the module changes, its environment changes, or the workbook code/tests change, the record no longer matches and that workbook environment needs review.
+缓存失效或运行时包发生变化时重新检查其分发文件树和 API 导入；正式工作簿操作仍由本地结构检查、导出后回读及非目标内容保护门禁验证。若 API 缺失、包身份不符或真实工作簿结构不兼容，工作簿操作停止。`strict-history` 保留精确历史锁，仅供明确的历史复现使用。
 
 The exact **2.8.93** records in `workbook-dependencies.lock.json` and `config/workbook-runtime-v4.lock.json` remain unchanged for historical reproduction. Run `node scripts/check_workbook_dependencies.mjs --mode strict-history` only when reproducing that distribution; it is not the daily default. These lock files are private bundled-distribution evidence, not an npm registry lock, so they do not claim that public `npm ci` can install the package.
 
-Daily check: `<node-executable> scripts/check_workbook_dependencies.mjs`. Project Doctor uses the same check but classifies unverified/incompatible workbook support as a warning. The formal parser and backfill still require `status=verified`. Backfill exports to a temporary file, reopens it, compares non-target cell values, formulas and styles, verifies counts, then atomically replaces the requested workbook. Excel reads and writes use the Codex-bundled Node and artifact-tool; a different parser is not used. Synthetic integration and actual locally registered workbook checks are recorded in the compatibility manifest and sanitized review report.
+日常检查：`<node-executable> scripts/check_workbook_dependencies.mjs`。Project Doctor 使用同一检查；工作簿解析与回填要求 `status=verified`。回填先导出临时文件并回读，比较非目标单元格值、公式和样式，核验计数后才原子替换。Excel 读写使用 Codex 托管 Node 与 artifact-tool，不切换其他解析器。真实本地工作簿操作仍需遵守登记输入和审核规则。
 
 ## Recovery authorization boundary
 

@@ -107,7 +107,7 @@ def _sample_map(samples, clips):
     return by_stratum
 
 
-def estimate(clips, samples):
+def estimate(clips, samples, *, closeup_ratio_max=None):
     """Estimate no-person share with equal record-time strata and targeted refinement."""
     from adaptive_vision import validate_classification
 
@@ -156,7 +156,8 @@ def estimate(clips, samples):
 
     presence_ratio = max(Fraction(), Fraction(1)-no_person_ratio)
     no_person_limit = Fraction(str(POLICY['no_person_ratio_max_inclusive']))
-    closeup_limit = Fraction(str(POLICY['closeup_duration_ratio_max_inclusive']))
+    closeup_limit = Fraction(str(POLICY['closeup_duration_ratio_max_inclusive']
+                                 if closeup_ratio_max is None else closeup_ratio_max))
     no_person_value, closeup_value = float(no_person_ratio), float(closeup_ratio)
     presence_value = float(presence_ratio)
     status = ('BLOCKED' if errors else 'UNCERTAIN' if uncertain else

@@ -28,12 +28,12 @@ class WorkbookRuntimeCompatibilityTests(unittest.TestCase):
             self.fail(f"Node script failed ({result.returncode}): {result.stderr[-500:]}")
         return result
 
-    def test_current_runtime_is_allowlisted_and_reused(self):
+    def test_current_runtime_identity_and_capabilities_are_reused(self):
         result = self.run_node(self.checker)
         first = json.loads(result.stdout)
         self.assertEqual(first["status"], "verified")
-        self.assertEqual(first["artifactTool"], "2.8.94")
-        self.assertEqual(first["node"], "v24.19.0")
+        self.assertEqual(first["package"], "@oai/artifact-tool")
+        self.assertTrue(first["artifactTool"])
         again = json.loads(self.run_node(self.checker).stdout)
         self.assertEqual(again["status"], "verified")
         self.assertEqual(again["verification"], "cached-environment-record")
@@ -105,28 +105,32 @@ class WorkbookRuntimeCompatibilityTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(workbook.read_bytes()).hexdigest(), original_digest)
             self.assertFalse(preview.exists())
 
-    def test_fake_distribution_and_missing_api_are_rejected(self):
+    def test_semver_is_not_a_gate_but_required_api_is(self):
         with tempfile.TemporaryDirectory() as temp:
             fake = Path(temp) / "node_modules/@oai/artifact-tool"
             (fake / "dist").mkdir(parents=True)
             (fake / "package.json").write_text(json.dumps({"name": "@oai/artifact-tool", "version": "2.8.94"}))
             entry = fake / "dist/artifact_tool.mjs"
-            entry.write_text("export const FileBlob={}; export const SpreadsheetFile={};\n")
+            entry.write_text("export const FileBlob={load(){}}; export const SpreadsheetFile={importXlsx(){},exportXlsx(){}};\n")
             script = (
                 "import {checkDependencies,validateApiSurface} from './scripts/check_workbook_dependencies.mjs';"
                 f"const result=await checkDependencies({{moduleEntryOverride:{json.dumps(str(entry))}}});"
                 "console.log(JSON.stringify({result,missing:validateApiSurface({FileBlob:{},SpreadsheetFile:{}})}));"
             )
             result = json.loads(self.run_node("--input-type=module", "-e", script).stdout)
-            self.assertEqual(result["result"]["status"], "incompatible")
-            self.assertEqual(result["result"]["reason"], "artifact_tool_distribution_mismatch")
+            self.assertEqual(result["result"]["status"], "verified")
+            self.assertEqual(result["result"]["artifactTool"], "2.8.94")
             self.assertEqual(set(result["missing"]), {
                 "FileBlob.load", "SpreadsheetFile.importXlsx", "SpreadsheetFile.exportXlsx"})
             package = fake / "package.json"
-            package.write_text(json.dumps({"name": "@oai/artifact-tool", "version": "2.8.95"}))
+            package.write_text(json.dumps({"name": "@oai/artifact-tool", "version": "99.0.0"}))
             result = json.loads(self.run_node("--input-type=module", "-e", script).stdout)
-            self.assertEqual(result["result"]["status"], "unverified")
-            self.assertEqual(result["result"]["reason"], "artifact_tool_runtime_not_reviewed")
+            self.assertEqual(result["result"]["status"], "verified")
+            self.assertEqual(result["result"]["artifactTool"], "99.0.0")
+            entry.write_text("export const FileBlob={}; export const SpreadsheetFile={};\n")
+            result = json.loads(self.run_node("--input-type=module", "-e", script).stdout)
+            self.assertEqual(result["result"]["status"], "incompatible")
+            self.assertEqual(result["result"]["reason"], "artifact_tool_required_api_missing")
 
 
 if __name__ == "__main__":

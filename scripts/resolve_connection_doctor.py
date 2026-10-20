@@ -44,6 +44,13 @@ def check(root):
            "current_timeline": timeline.GetName() if timeline else None,
            "timelines": names, "AI cut": "AI cut" in names, "成品": "成品" in names,
            "ready": True, "reason": "ready"}
+    try:
+        from project_editing_modes import resolve_editing_mode
+        mode_id, mode_policy = resolve_editing_mode(project.GetName())
+        out.update(editing_mode=mode_id, editing_policy=mode_policy)
+    except Exception as exc:
+        out.update(ready=False, reason=str(exc) if str(exc).startswith('resolve_project_mode_')
+                   else 'project_editing_mode_invalid')
     state_path = root / "PROJECT_STATE.json"
     if state_path.exists():
         expected = json.loads(state_path.read_text(encoding="utf-8"))["resolve"]

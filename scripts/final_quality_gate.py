@@ -15,9 +15,20 @@ CONTRACT = 'final-gate-v7-sentence-edges-frame-estimate'
 
 def plan_errors(plan):
     errors = []
+    editing_policy = plan.get('editing_policy') or {}
+    duration_limits = editing_policy.get('duration_exclusive_seconds', plan.get('duration_exclusive_seconds', [45.0, 60.0]))
+    if (not isinstance(duration_limits, list) or len(duration_limits) != 2
+            or not all(isinstance(value, (int, float)) for value in duration_limits)
+            or not 0 <= duration_limits[0] < duration_limits[1] <= 60):
+        duration_limits = [45.0, 60.0]
     variants = plan.get('variants', [])
     if not 1 <= len(variants) <= 3 or len({v.get('variant_id') for v in variants}) != len(variants):
         return ['VARIANT_SET_INVALID']
+    target_count = editing_policy.get('target_variant_count')
+    if target_count is not None:
+        allow_fewer = editing_policy.get('allow_fewer_variants_when_exhausted') is True
+        if (allow_fewer and len(variants) > target_count) or (not allow_fewer and len(variants) != target_count):
+            errors.append('VARIANT_COUNT_DOES_NOT_MATCH_PROJECT_MODE')
     all_clips = []
     for variant in variants:
         clips = variant.get('clips', [])
@@ -58,7 +69,7 @@ def plan_errors(plan):
             if clip.get('audio_boundary_verified') is not True:
                 errors.append('AUDIO_BOUNDARY_UNVERIFIED')
             all_clips.append((clip, lo, hi))
-        if not 45.0 < duration < 60.0:
+        if not duration_limits[0] < duration < duration_limits[1]:
             errors.append('DURATION_OUTSIDE_STRICT_LIMITS')
         for left, right in zip(clips, clips[1:]):
             if left['source_file'] == right['source_file'] and abs(left['source_end_frame'] - right['source_start_frame']) <= 2:
@@ -102,9 +113,9 @@ def final_task(paths, plan_ref):
                'encoding_id': record['identity']['encoding_id'], 'rules_fingerprint': record['identity']['rules_fingerprint'],
                'plan_reference': plan_ref, 'plan_digest': record['body_digest'],
                'variants': semantic_review_variants(plan), 'local_errors': [e for e in plan_errors(plan) if e != 'AUDIO_BOUNDARY_UNVERIFIED'],
-               'hard_rules': {'duration_exclusive': [45, 60],
+               'hard_rules': {'duration_exclusive': (plan.get('editing_policy') or {}).get('duration_exclusive_seconds', plan.get('duration_exclusive_seconds', [45, 60])),
                               'person_audit': {'no_person_ratio_max_inclusive': 0.10,
-                                               'closeup_duration_ratio_max_inclusive': 0.30,
+                                               'closeup_duration_ratio_max_inclusive': (plan.get('editing_policy') or {}).get('closeup_duration_ratio_max_inclusive', 0.30),
                                                'sampling_contract': 'person-presence-two-stage-record-v7'},
                               'overlap_allowed': False, 'semantic_duplicates_allowed': False,
                               'content_scope': '只保留当前商品卖点/材质/版型/工艺/穿着感受；禁止价格、促销、优惠、红包、抽奖、链接、欢迎、闲聊、后台、拍摄、无关商品和空话'},

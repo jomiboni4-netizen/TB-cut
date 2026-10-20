@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-def registered_vision(plan, sources, detector, *, paths):
+def registered_vision(plan, sources, detector, *, paths, allow_vfr_approximate=False):
     from adaptive_vision import audit
-    return audit(paths, plan, sources, detector)
+    return audit(paths, plan, sources, detector, allow_vfr_approximate=allow_vfr_approximate)
 
 
 def main() -> None:

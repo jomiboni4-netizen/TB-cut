@@ -145,7 +145,7 @@ def perform(paths, state, run, plan, request, quality_gate, *, operation):
     require(len(sources) == len(state['video_paths']), 'ambiguous_source_basename')
     pre = read(folder/'RESOLVE_PREFLIGHT.json')
     if operation == 'write':
-        doctor = subprocess.run([sys.executable,str(paths.repo_root/'scripts/project_doctor.py'),'--root',str(paths.repo_root)],capture_output=True,text=True)
+        doctor = subprocess.run([sys.executable,str(paths.repo_root/'scripts/project_doctor.py'),'--root',str(paths.repo_root),'--workspace',str(paths.workspace_root)],capture_output=True,text=True)
         require(doctor.returncode == 0, 'project_doctor_failed')
         require(not journal.exists(), 'transaction_exists_use_readback_or_recover_no_reappend')
     else:
