@@ -29,8 +29,8 @@ STAGE_A_MAX_OUTPUT_TOKENS = 12000
 LINK_MENTION = re.compile(r"(?:\d+|[零一二三四五六七八九十两]+)\s*号\s*(?:商品)?\s*(?:链|连)接")
 
 
-def current_inputs(root: Path, product_ids: list[int]):
-    state = json.loads((root / "PROJECT_STATE.json").read_text(encoding="utf-8"))
+def current_inputs(root: Path, workspace: Path, product_ids: list[int]):
+    state = json.loads((workspace / "PROJECT_STATE.json").read_text(encoding="utf-8"))
     title_path = Path(state["title_path"]).expanduser().resolve()
     parsed = parse_workbook(title_path, root, preferred_node())
     overrides = state.get("batch_overrides") or {}
@@ -47,38 +47,12 @@ def current_inputs(root: Path, product_ids: list[int]):
         digest.update(str(path).encode())
         digest.update(path.read_bytes())
     current_fingerprint = digest.hexdigest()
-    index_path = root / ".cache" / "subtitle_index.json"
+    index_path = workspace / ".cache" / "subtitle_index.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
     expected = state.get("runtime", {}).get("subtitle_index_fingerprint")
     if not expected or current_fingerprint != expected or index.get("fingerprint") != expected:
         raise ValueError("subtitle_index_fingerprint_mismatch")
     return state, titles, index, current_fingerprint
-
-
-def local_hints(root: Path, products: list[dict], sources: dict):
-    """Read historical ranges only as broad candidate seeds, matched by encoding ID."""
-    hint_path = root / ".cache" / "workspaces" / "20261010_tail25_35" / ".cache" / "product_ranges.json"
-    if not hint_path.is_file():
-        return {}
-    prior = json.loads(hint_path.read_text(encoding="utf-8"))
-    by_encoding = {str(row.get("encoding_id")): row for row in prior.get("products", [])}
-    hints = {}
-    for product in products:
-        old = by_encoding.get(str(product.get("encoding_id")))
-        if not old:
-            continue
-        per_source = []
-        for segment in old.get("ranges", []):
-            source = sources.get(str(segment.get("media_stem")))
-            if not source:
-                continue
-            left = max(0.0, float(segment["start"]) - 90.0)
-            right = min(float(source["duration"]), float(segment["end"]) + 90.0)
-            per_source.append({"source_stem": str(segment["media_stem"]), "local_start": left,
-                               "local_end": right, "seed_kind": "historical_hint_by_exact_encoding_only"})
-        if per_source:
-            hints[int(product["product_index"])] = per_source
-    return hints
 
 
 def build_windows(index: dict, products: list[dict], hints: dict):
@@ -547,12 +521,9 @@ def markdown_preview(product: dict, rough: dict, groups: list[dict], excluded: l
     return "\n".join(lines) + "\n"
 
 
-def run(root: Path, product_ids: list[int], output_root: Path, *, offline: bool = False):
-    state, products, index, fingerprint = current_inputs(root, product_ids)
-    # Match historical reviewed time hints by exact encoding ID only. They
-    # shortlist fresh lexical windows but never become accepted ranges.
-    hints = local_hints(root, products, {str(r["source_stem"]): r for r in index["sources"]})
-    rough = build_windows(index, products, hints)
+def run(root: Path, workspace: Path, product_ids: list[int], output_root: Path, *, offline: bool = False):
+    state, products, index, fingerprint = current_inputs(root, workspace, product_ids)
+    rough = build_windows(index, products, {})
     output_root.mkdir(parents=True, exist_ok=True)
     manifest = {"schema_version": 1, "authority": "LOCAL_PREVIEW_ONLY_NOT_AUTHENTICATED_RANGES",
                 "product_ids": product_ids, "subtitle_fingerprint": fingerprint, "model": MODEL,
@@ -636,13 +607,21 @@ def run(root: Path, product_ids: list[int], output_root: Path, *, offline: bool 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")
+    parser.add_argument("--workspace", required=True)
     parser.add_argument("--products", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--offline", action="store_true", help="build local clean candidate windows without contacting MiMo")
     args = parser.parse_args()
     root = Path(args.root).resolve()
-    manifest = run(root, [int(v) for v in args.products.split(",") if v.strip()],
-                   (root / args.output).resolve(), offline=args.offline)
+    workspace = Path(args.workspace).expanduser().resolve()
+    environment = os.environ.get("TB_CUT_WORKSPACE")
+    if environment and Path(environment).expanduser().resolve() != workspace:
+        parser.error("workspace_identity_conflict")
+    output_root = (workspace / args.output).resolve()
+    if workspace not in output_root.parents:
+        parser.error("output_must_be_inside_selected_workspace")
+    manifest = run(root, workspace, [int(v) for v in args.products.split(",") if v.strip()],
+                   output_root, offline=args.offline)
     for row in manifest["products"]:
         print(f"商品{row['product_index']}: {row['status']} variants={row['variant_count']} "
               f"preview={row['preview_md']}")

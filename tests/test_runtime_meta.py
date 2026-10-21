@@ -233,18 +233,18 @@ class RuntimeMetaTests(unittest.TestCase):
         with self.assertRaisesRegex(CacheIdentityError, "artifact_sha256_mismatch"):
             validate_cache(self.root, self.artifact)
 
-    def test_resolve_preflight_rejects_legacy_titles(self) -> None:
+    def test_unregistered_legacy_writer_is_disabled_before_reading_titles(self) -> None:
         titles = self.root / ".cache/titles.json"
         titles.write_text('{"products": []}\n', encoding="utf-8")
-        with self.assertRaisesRegex(CacheIdentityError, "legacy_cache_missing_metadata"):
-            load_products(self.root, [1])
+        with self.assertRaisesRegex(SystemExit, "legacy_unregistered_delivery_disabled"):
+            load_products(self.root, [1], workspace=self.root)
 
     def test_legacy_titles_cannot_be_attested_even_with_valid_rows(self):
         titles = self.root / '.cache/titles.json'
         titles.write_text(json.dumps({'source': 'synthetic.xlsx', 'sheet': 'Sheet1',
                                      'products': [{'product_index': 1, 'encoding_id': '001', 'title': 'Synthetic'}]}))
         identity = expected_identity(self.root)
-        argv = ['attest_runtime_cache.py', '--root', str(self.root), 'attest-input',
+        argv = ['attest_runtime_cache.py', '--root', str(self.root), '--workspace', str(self.root), 'attest-input',
                 '--artifact', str(titles), '--artifact-sha256', hashlib.sha256(titles.read_bytes()).hexdigest(),
                 '--batch-id', identity['batch_id'], '--input-fingerprint', identity['input_fingerprint']]
         with patch.object(sys, 'argv', argv), self.assertRaisesRegex(CacheIdentityError, 'attestation_not_allowed'):
@@ -259,9 +259,7 @@ class RuntimeMetaTests(unittest.TestCase):
             write_metadata(self.root, titles, producer)
             with self.assertRaisesRegex(CacheIdentityError, 'titles_'):
                 load_checked_json(self.root, titles)
-            with self.assertRaisesRegex(CacheIdentityError, 'titles_'):
-                load_products(self.root, [1])
-            self.assertTrue(any('titles_' in reason for reason in inspect(resolve_runtime_paths(self.root))))
+            self.assertTrue(any('titles_' in reason for reason in inspect(resolve_runtime_paths(self.root, self.root))))
 
     def test_parse_uses_exact_authenticated_bytes_after_path_replacement(self):
         write_metadata(self.root, self.artifact, 'test')
@@ -290,7 +288,7 @@ class RuntimeMetaTests(unittest.TestCase):
         transport.write_text(json.dumps({"status": "completed", "request_digest": "wrong"}), encoding="utf-8")
         identity = expected_identity(self.root)
         argv = [
-            "attest_runtime_cache.py", "--root", str(self.root), "attest-response",
+            "attest_runtime_cache.py", "--root", str(self.root), "--workspace", str(self.root), "attest-response",
             "--artifact", str(result), "--request", str(request),
             "--artifact-sha256", hashlib.sha256(result.read_bytes()).hexdigest(),
             "--batch-id", identity["batch_id"],

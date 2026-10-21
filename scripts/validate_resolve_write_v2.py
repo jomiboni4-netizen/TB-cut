@@ -10,6 +10,8 @@ from resolve_connection import connect
 from runtime_paths import resolve_runtime_paths
 
 from runtime_meta import expected_identity, load_checked_json, write_metadata
+from resolve_trial import stable_id
+from resolve_write_v2 import snapshot_preserved
 
 
 
@@ -41,18 +43,29 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
-    identity = expected_identity(paths)
+    identity = expected_identity(paths, include_ranges=not bool(paths.registered_scope()))
     report_path = paths.runtime_argument(args.report)
     report = load_checked_json(paths, report_path, expected=identity, artifact_schema_version=2)
     if report.get("pipeline_version") != "2.1":
         raise SystemExit("写入报告不是V2.1，拒绝按新版验收")
-    resolve = connect()
+    resolve = connect(status_path=paths.workspace_root/'resolve_connection_status.json')
     if not resolve:
         raise SystemExit("未连接达芬奇")
     project = resolve.GetProjectManager().GetCurrentProject()
-    if not project or project.GetName() != report["project"]:
+    if (not project or project.GetName() != report["project"]
+            or (report.get('project_id') and stable_id(project) != report['project_id'])):
         raise SystemExit("当前达芬奇项目不匹配")
     target = timeline_by_name(project, report["target_timeline"])
+    if report.get('target_timeline_id') and stable_id(target) != report['target_timeline_id']:
+        raise SystemExit('目标时间线稳定身份不匹配')
+    if report.get('target_after'):
+        from coldstart_resolve import snapshot as resolve_snapshot
+        current_inventory = {stable_id(project.GetTimelineByIndex(i)): resolve_snapshot(project.GetTimelineByIndex(i))
+                             for i in range(1, project.GetTimelineCount()+1)}
+        if current_inventory != report.get('protected_after'):
+            raise SystemExit('Resolve时间线在写入后发生变化')
+        if not snapshot_preserved(report['target_before'], report['target_after']):
+            raise SystemExit('写入报告未证明目标原有内容完整保留')
     video = list(target.GetItemListInTrack("video", 1) or [])
     audio = list(target.GetItemListInTrack("audio", 1) or [])
     expected = report["expected"]
@@ -73,7 +86,8 @@ def main() -> None:
             errors.append(f"素材段{index + 1}音频不同步")
     markers = target.GetMarkers() or {}
     for marker in report["markers"]:
-        actual = markers.get(int(marker["frame"]), {})
+        marker_frame = marker.get('timeline_frame_offset', marker["frame"])
+        actual = markers.get(int(marker_frame), {})
         if actual.get("name") != marker["encoding_id"] or actual.get("customData") != f"tb_cut_product_start:{marker['encoding_id']}":
             errors.append(f"商品{marker['product_index']}标记不匹配")
     result = {

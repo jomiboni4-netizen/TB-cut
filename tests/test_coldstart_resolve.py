@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from coldstart_resolve import (assert_new_name, check_readback, validate_physical_overlap,
-                               infer_append_endpoint, append_endpoint, verify_source_fingerprints)
+                               infer_append_endpoint, append_endpoint, verify_source_fingerprints,
+                               variant_timeline_name)
 from coldstart_resolve import verify_visual_provenance
 from project_registry import atomic_json
 
@@ -49,6 +50,15 @@ class NativeReadbackTests(unittest.TestCase):
 
     def test_no_existing_name_is_overwritten(self):
         with self.assertRaisesRegex(ValueError,'no_overwrite'):assert_new_name('existing',{'existing'})
+
+    def test_timeline_name_uses_variant_product_not_first_batch_product(self):
+        variant={'product_index':11,'version':'v1','variant_id':'p11_v1'}
+        self.assertEqual(variant_timeline_name('20261015_run',variant),
+                         'TBcut_20261015_run_11_v1_审核_人工听感待验')
+        self.assertEqual(variant_timeline_name('20261015_run',variant,preview=True),
+                         'TBcut_20261015_run_11_v1_临时试听_人物门禁待验_声学待验')
+        with self.assertRaisesRegex(ValueError,'product_identity_missing'):
+            variant_timeline_name('20261015_run',{'variant_id':'v1'})
 
     def test_cross_variant_physical_overlap_rejected(self):
         with self.assertRaisesRegex(ValueError,'physical_source_frame_overlap'):

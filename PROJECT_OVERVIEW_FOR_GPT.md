@@ -17,7 +17,7 @@
 5. `docs/PIPELINE_DEPENDENCIES.md`：各阶段真实输入、输出及缓存身份规则。
 6. 具体工作涉及的 `scripts/` 源码，而非仅凭 `README.md`。README 是入门说明，示例不代表任何批次的运行状态。
 
-规则优先级：**当前用户指令 > `PROJECT_RULES.md` > `AGENTS.md` > 自动化默认值**。执行清理或写 Resolve 前先运行 `python3 scripts/project_doctor.py --root .`。它只验证结构、基础配置和命令可用，不证明所有缓存、媒体或 Resolve 状态正确。
+规则优先级：**当前用户指令 > `PROJECT_RULES.md` > `AGENTS.md` > 自动化默认值**。状态生命周期目标是每个 Resolve 项目一份长期项目记录，商品批次为独立短期切片，完成 7 天后可预览清理；详见 `docs/PROJECT_STATE_LIFECYCLE.md`。此目标尚待工具链迁移，不能把旧批次工作区状态说成已完成。执行破坏性操作或写 Resolve 前运行 `python3 scripts/project_doctor.py --root . --workspace <本批工作区>`。不传工作区时只检查仓库结构；Resolve 写入前还须执行只读身份检查。
 
 运行路径现分为 repo（源码、长期规则和配置）与 workspace（`PROJECT_STATE.json`、`.cache/`、`reports/`、`plans/`、`exports/`）。默认 workspace=repo，单独运行可用 `--workspace <path>` 或 `TB_CUT_WORKSPACE`。迁移前用 `python3 scripts/workspace_preflight.py --repo . --workspace <path>` 只读检查；遗留缓存可能因身份或路径校验失败而阻塞迁移；须证明来源或重建失效链，并通过预检后再考虑物理移动。
 

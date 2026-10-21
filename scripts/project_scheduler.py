@@ -21,14 +21,19 @@ from compute_metrics import Metrics, scope, span, count
 
 def targets(paths):
     titles, _ = inputs(paths)
-    values = [{'product_id': p['product_index'], 'encoding_id': p['encoding_id']} for p in titles['products']]
     state = json.loads(paths.state_path.read_text())
+    by_id = {int(p['product_index']): p for p in titles['products']}
+    product_ids = [int(pid) for pid in state['batch']['product_ids']]
+    if not product_ids or len(product_ids) != len(set(product_ids)):
+        raise CacheIdentityError('registered_batch_product_set_invalid')
+    missing = [pid for pid in product_ids if pid not in by_id]
+    if missing:
+        raise CacheIdentityError('registered_batch_product_missing_from_catalog')
+    values = [{'product_id': pid, 'encoding_id': by_id[pid]['encoding_id']} for pid in product_ids]
     if state.get('trial'):
         from trial_session import validate_trial
         selected = set(validate_trial(paths)['products'])
         values = [v for v in values if v['product_id'] in selected]
-    if sorted(p['product_id'] for p in values) != sorted(state['batch']['product_ids']):
-        raise CacheIdentityError('whole_project_target_set_not_registered_use_explicit_whole_project_init')
     return values
 
 
@@ -39,15 +44,8 @@ def groups(values, size=3):
 
 
 def schedule(paths, size=3):
-    titles, _ = inputs(paths)
-    complete_ids = sorted(p['product_index'] for p in titles['products'])
-    state = json.loads(paths.state_path.read_text())
-    if state.get('trial'):
-        from trial_session import validate_trial
-        complete_ids = validate_trial(paths)['products']
-    if sorted(state['batch']['product_ids']) != complete_ids:
-        from init_project import initialize
-        initialize(paths, products=complete_ids)  # Inherit confirmed project paths; groups never change this set.
+    # The registered batch is the explicit work scope. Do not silently widen a
+    # three-product task to the entire workbook when preparing the schedule.
     values = targets(paths)
     result = {'schema_version': 3, 'project_key': paths.registered_scope()[0], 'targets': values,
               'groups': [[p['product_id'] for p in g] for g in groups(values, size)], 'group_size': size}
@@ -84,7 +82,8 @@ def checkpoint(paths, pid, encoding, status, plan=None, evidence=None, reason=No
     raise CacheIdentityError('checkpoint_revision_contention')
 
 
-def process_product(paths, product, *, mode='package', detector=None):
+def process_product(paths, product, *, mode='package', detector=None, include_cross_boundary_cues=False,
+                    allow_vfr_approximate=False, preferred_fps=None, repair_limit=2):
     pid, encoding = product['product_id'], product['encoding_id']
     with product_lease(paths, pid):
         resumed_at = time.perf_counter()
@@ -118,7 +117,8 @@ def process_product(paths, product, *, mode='package', detector=None):
                         raise CacheIdentityError('cursor_dependency_changed')
                     if name == 'vision':
                         from registered_pipeline import vision_model_version
-                        if record['identity']['model_version'] != vision_model_version(detector):
+                        if record['identity']['model_version'] != vision_model_version(
+                                detector, allow_vfr_approximate=allow_vfr_approximate):
                             raise CacheIdentityError('vision_classifier_or_policy_changed')
                     if name == 'asr':
                         from registered_pipeline import asr_model_identity, current_asr_parameters
@@ -162,34 +162,81 @@ def process_product(paths, product, *, mode='package', detector=None):
                 raise CacheIdentityError('confirmed_product_range_missing')
             range_ref = json.loads(pointer.read_text())['reference']
             load_stage(paths, range_ref)
-            candidate_ref = stage('candidate', lambda: candidates(paths, range_ref))
-            task = selection_task(paths, candidate_ref)
-            task_path = paths.project_records_dir / 'tasks' / f'{task["task_digest"]}.json'
-            with workspace_lock(paths):
-                atomic_json(task_path, {'status': 'REVIEW_PENDING', 'task': task})
-            if mode == 'package':
-                raise CacheIdentityError('independent_worker_not_started_task_package_pending')
-            receipt = worker(task)
-            rough_ref = stage('rough', lambda: rough_selection(paths, candidate_ref, receipt))
-            asr_ref = stage('asr', lambda: local_asr(paths, rough_ref))
-            plan_ref = stage('plan', lambda: physical_plan(paths, rough_ref, asr_ref))
+            candidate_ref = stage('candidate', lambda: candidates(
+                paths, range_ref, include_cross_boundary_cues=include_cross_boundary_cues))
             from final_quality_gate import plan_errors
-            errors = plan_errors(load_stage(paths, plan_ref)['body'])
-            if errors:
-                checkpoint(paths, pid, encoding, 'REPAIRABLE', plan_ref, reason=','.join(errors))
-                return {'product_id': pid, 'status': 'REPAIRABLE', 'errors': errors}
-            task = final_task(paths, plan_ref)
-            with workspace_lock(paths):
-                atomic_json(paths.project_records_dir / 'tasks' / f'{task["task_digest"]}.json',
-                            {'status': 'REVIEW_PENDING', 'task': task})
-            final_receipt = worker(task)
             from codex_worker import verify_receipt
-            if verify_receipt(paths, final_receipt, task)['result']['verdict'] == 'REPAIRABLE':
-                checkpoint(paths, pid, encoding, 'REPAIRABLE', plan_ref, reason='independent_final_review_repair_required')
-                return {'product_id': pid, 'status': 'REPAIRABLE'}
+
+            repair_history = cursor.get('repair_history', [])
+            repair_issues = (repair_history[-1].get('issues', []) if repair_history else [])
+            repair_attempts = int(cursor.get('repair_attempts', 0))
+            repair_rounds = 0
+            if repair_limit < 1 or repair_attempts < 0:
+                raise CacheIdentityError('repair_attempt_state_invalid')
+            while True:
+                current_repair_attempt = repair_attempts + repair_rounds
+                task = selection_task(paths, candidate_ref, issues=repair_issues,
+                                      repair_attempt=current_repair_attempt)
+                task_path = paths.project_records_dir / 'tasks' / f'{task["task_digest"]}.json'
+                with workspace_lock(paths):
+                    atomic_json(task_path, {'status': 'REVIEW_PENDING', 'task': task})
+                if mode == 'package':
+                    checkpoint(paths, pid, encoding, 'REPAIRABLE' if repair_attempts else 'IN_PROGRESS',
+                               reason='selection_task_package_pending')
+                    return {'product_id': pid, 'status': 'REPAIRABLE' if repair_attempts else 'IN_PROGRESS',
+                            'reason': 'selection_task_package_pending', 'repair_attempts': repair_attempts}
+                receipt = worker(task)
+                response = verify_receipt(paths, receipt, task)['result']
+                if response['verdict'] != 'PASS' or not response.get('selected_ranges'):
+                    if response['verdict'] == 'BLOCKED':
+                        raise CacheIdentityError('selection_worker_blocked')
+                    repair_issues = response.get('issues') or ['selection_returned_no_usable_ranges']
+                else:
+                    # A changed selection invalidates every downstream stage. Keep candidate/range evidence.
+                    if repair_rounds or repair_issues:
+                        for name in ('rough', 'asr', 'plan', 'vision', 'final_audit'):
+                            cursor.pop(name, None)
+                    rough_ref = stage('rough', lambda: rough_selection(
+                        paths, candidate_ref, receipt, issues=repair_issues,
+                        repair_attempt=current_repair_attempt))
+                    asr_ref = stage('asr', lambda: local_asr(paths, rough_ref))
+                    plan_ref = stage('plan', lambda: physical_plan(
+                        paths, rough_ref, asr_ref, fps=preferred_fps,
+                        allow_vfr_approximate=allow_vfr_approximate))
+                    errors = plan_errors(load_stage(paths, plan_ref)['body'])
+                    if not errors:
+                        task = final_task(paths, plan_ref)
+                        with workspace_lock(paths):
+                            atomic_json(paths.project_records_dir / 'tasks' / f'{task["task_digest"]}.json',
+                                        {'status': 'REVIEW_PENDING', 'task': task})
+                        final_receipt = worker(task)
+                        final_result = verify_receipt(paths, final_receipt, task)['result']
+                        expected_checks = {'opening', 'ending', 'causal_logic', 'seams', 'selling_value', 'duplicates'}
+                        checks = final_result.get('checks', {})
+                        if (final_result['verdict'] == 'PASS' and set(checks) == expected_checks
+                                and all(checks.values()) and not final_result.get('issues')):
+                            break
+                        if final_result['verdict'] == 'BLOCKED':
+                            raise CacheIdentityError('independent_final_review_blocked')
+                        repair_issues = final_result.get('issues') or ['final_review_checks_incomplete_or_failed']
+                    else:
+                        repair_issues = errors
+                repair_attempts += 1
+                repair_rounds += 1
+                cursor['repair_attempts'] = repair_attempts
+                cursor.setdefault('repair_history', []).append({'attempt': repair_attempts,
+                    'issues': repair_issues[:20], 'from_stage': 'selection' if repair_rounds == 1 else 'final_review'})
+                with workspace_lock(paths):
+                    atomic_json(cursor_path, cursor)
+                checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
+                           reason=','.join(repair_issues)[:180])
+                if repair_rounds >= repair_limit:
+                    return {'product_id': pid, 'status': 'REPAIRABLE', 'errors': repair_issues,
+                            'repair_attempts': repair_attempts, 'repair_limit_reached': True}
             if not detector:
                 raise CacheIdentityError('verified_host_detector_unavailable')
-            vision_ref = stage('vision', lambda: vision_audit(paths, plan_ref, detector))
+            vision_ref = stage('vision', lambda: vision_audit(
+                paths, plan_ref, detector, allow_vfr_approximate=allow_vfr_approximate))
             evidence = stage('final_audit', lambda: import_final_review(paths, plan_ref, vision_ref, final_receipt))
             checkpoint(paths, pid, encoding, 'FINAL_PASS', plan_ref, evidence)
             return {'product_id': pid, 'status': 'FINAL_PASS'}
@@ -213,7 +260,9 @@ def subprocess_error_types():
 
 
 def project_audit(paths):
-    values = targets(paths)
+    state = json.loads(paths.state_path.read_text())
+    skipped = {int(value) for value in state.get('batch', {}).get('failed_product_ids', [])}
+    values = [value for value in targets(paths) if value['product_id'] not in skipped]
     rows = resume(paths)
     errors, passed = [], []
     for value in values:
@@ -264,15 +313,17 @@ def project_review_task(paths, products, rows):
     return task
 
 
-def _run_project(paths, *, group_size=3, mode='package', detector=None):
+def _run_project(paths, *, group_size=3, mode='package', detector=None, include_cross_boundary_cues=False,
+                 allow_vfr_approximate=False, preferred_fps=None, repair_limit=2):
     manifest = schedule(paths, group_size)
     by_id = {v['product_id']: v for v in manifest['targets']}
     processed = []
     for group in manifest['groups']:
-        results = [process_product(paths, by_id[pid], mode=mode, detector=detector) for pid in group]
+        results = [process_product(paths, by_id[pid], mode=mode, detector=detector,
+                                   include_cross_boundary_cues=include_cross_boundary_cues,
+                                   allow_vfr_approximate=allow_vfr_approximate,
+                                   preferred_fps=preferred_fps, repair_limit=repair_limit) for pid in group]
         processed.append({'products': group, 'statuses': [r['status'] for r in results]})
-        if any(r['status'] not in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED') for r in results):
-            break  # Preserve good siblings; no silent skip into later groups.
     with span('project_quality_gate'):
         preliminary = project_audit(paths)
     if preliminary['errors'] == ['PROJECT_CODEX_REVIEW_PENDING'] and mode == 'codex':
@@ -294,12 +345,16 @@ def _run_project(paths, *, group_size=3, mode='package', detector=None):
     return result
 
 
-def run_project(paths, *, group_size=3, mode='package', detector=None):
+def run_project(paths, *, group_size=3, mode='package', detector=None, include_cross_boundary_cues=False,
+                allow_vfr_approximate=False, preferred_fps=None, repair_limit=2):
     metrics = Metrics()
     with scope(metrics):
         try:
             with span('project_total'):
-                return _run_project(paths, group_size=group_size, mode=mode, detector=detector)
+                return _run_project(paths, group_size=group_size, mode=mode, detector=detector,
+                                    include_cross_boundary_cues=include_cross_boundary_cues,
+                                    allow_vfr_approximate=allow_vfr_approximate,
+                                    preferred_fps=preferred_fps, repair_limit=repair_limit)
         finally:
             with workspace_lock(paths):
                 atomic_json(paths.project_records_dir/'metrics'/'project.json', {
@@ -312,19 +367,35 @@ def main():
     parser.add_argument('--root', default='.')
     parser.add_argument('--workspace', required=True)
     parser.add_argument('--group-size', type=int, default=3)
+    parser.add_argument('--repair-limit', type=int, default=2,
+                        help='Maximum repair reruns per product per invocation; default 2')
     parser.add_argument('--mode', choices=('package', 'codex'), default='package')
     parser.add_argument('--detector')
     parser.add_argument('--audit-only', action='store_true')
     parser.add_argument('--product', type=int, help='Standalone single-product entry; never resumes another chat')
+    parser.add_argument('--include-cross-boundary-cues', action='store_true',
+                        help='Explicit batch policy: include complete subtitle cues intersecting approximate range edges')
+    parser.add_argument('--allow-vfr-approximate', action='store_true',
+                        help='Explicit batch override: use whole-file average rate for VFR source mapping')
+    parser.add_argument('--preferred-fps', type=float,
+                        help='Verified project/timeline rate used only when the approved mean-rate approximation agrees within tolerance')
     args = parser.parse_args()
     paths = resolve_runtime_paths(args.root, args.workspace)
     if args.product is not None:
         product = next((p for p in targets(paths) if p['product_id'] == args.product), None)
         if product is None:
             raise CacheIdentityError('unknown_project_product')
-        print(json.dumps(process_product(paths, product, mode=args.mode, detector=args.detector), ensure_ascii=False))
+        print(json.dumps(process_product(paths, product, mode=args.mode, detector=args.detector,
+                                         include_cross_boundary_cues=args.include_cross_boundary_cues,
+                                         allow_vfr_approximate=args.allow_vfr_approximate,
+                                         preferred_fps=args.preferred_fps,
+                                         repair_limit=args.repair_limit), ensure_ascii=False))
         return
-    result = project_audit(paths) if args.audit_only else run_project(paths, group_size=args.group_size, mode=args.mode, detector=args.detector)
+    result = project_audit(paths) if args.audit_only else run_project(
+        paths, group_size=args.group_size, mode=args.mode, detector=args.detector,
+        include_cross_boundary_cues=args.include_cross_boundary_cues,
+        allow_vfr_approximate=args.allow_vfr_approximate,
+        preferred_fps=args.preferred_fps, repair_limit=args.repair_limit)
     print(json.dumps(result, ensure_ascii=False))
     raise SystemExit(0 if result['final_review_complete'] else 2)
 

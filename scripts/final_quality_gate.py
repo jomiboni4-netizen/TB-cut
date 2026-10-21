@@ -6,17 +6,29 @@ from project_registry import digest
 from runtime_meta import CacheIdentityError, _sha256
 from product_checkpoints import load_stage, capture_stage, publish_stage
 from codex_worker import verify_receipt
+from sentence_boundaries import verify_edges, CONTRACT as SENTENCE_CONTRACT
 from audit_mimo_v2 import FORBIDDEN, semantic_duplicate
 from build_expanded_codex_request import FORBIDDEN as CANDIDATE_FORBIDDEN
 
-CONTRACT = 'final-gate-v5-person-subject-strata'
+CONTRACT = 'final-gate-v7-sentence-edges-frame-estimate'
 
 
 def plan_errors(plan):
     errors = []
+    editing_policy = plan.get('editing_policy') or {}
+    duration_limits = editing_policy.get('duration_exclusive_seconds', plan.get('duration_exclusive_seconds', [45.0, 60.0]))
+    if (not isinstance(duration_limits, list) or len(duration_limits) != 2
+            or not all(isinstance(value, (int, float)) for value in duration_limits)
+            or not 0 <= duration_limits[0] < duration_limits[1] <= 60):
+        duration_limits = [45.0, 60.0]
     variants = plan.get('variants', [])
     if not 1 <= len(variants) <= 3 or len({v.get('variant_id') for v in variants}) != len(variants):
         return ['VARIANT_SET_INVALID']
+    target_count = editing_policy.get('target_variant_count')
+    if target_count is not None:
+        allow_fewer = editing_policy.get('allow_fewer_variants_when_exhausted') is True
+        if (allow_fewer and len(variants) > target_count) or (not allow_fewer and len(variants) != target_count):
+            errors.append('VARIANT_COUNT_DOES_NOT_MATCH_PROJECT_MODE')
     all_clips = []
     for variant in variants:
         clips = variant.get('clips', [])
@@ -31,6 +43,8 @@ def plan_errors(plan):
                 errors.append('INVALID_SOURCE_FRAMES')
                 continue
             duration += (end - start) / fps
+            if not verify_edges(clip):
+                errors.append('SENTENCE_EDGE_PROOF_MISSING_OR_STALE')
             if (clip.get('audio_start_frame'), clip.get('audio_end_frame')) != (start, end):
                 errors.append('AV_RANGE_MISMATCH')
             words = clip.get('words')
@@ -38,8 +52,14 @@ def plan_errors(plan):
                 errors.append('RETAINED_WORD_ALIGNMENT_MISSING')
                 continue
             lo, hi = start / fps, end / fps
-            kept = [w for w in words if w['end'] > lo and w['start'] < hi]
-            if not kept or any(w['start'] < lo - 1e-9 or w['end'] > hi + 1e-9 for w in kept):
+            proof = clip.get('sentence_edges') or {}
+            if verify_edges(clip):
+                kept = words[proof['first_word_index']:proof['last_word_index']+1]
+                tolerance = .5/fps if proof.get('alignment_status') == 'FRAME_ROUNDED_ESTIMATE' else 0.
+            else:
+                kept = [w for w in words if w['end'] > lo and w['start'] < hi]
+                tolerance = 0.
+            if not kept or any(w['start'] < lo-tolerance-1e-9 or w['end'] > hi+tolerance+1e-9 for w in kept):
                 errors.append('WORD_CUT_AT_OPENING_ENDING_OR_SEAM')
             text = ''.join(w['text'] for w in kept)
             if text != clip.get('transcript'):
@@ -49,7 +69,7 @@ def plan_errors(plan):
             if clip.get('audio_boundary_verified') is not True:
                 errors.append('AUDIO_BOUNDARY_UNVERIFIED')
             all_clips.append((clip, lo, hi))
-        if not 45.0 < duration < 60.0:
+        if not duration_limits[0] < duration < duration_limits[1]:
             errors.append('DURATION_OUTSIDE_STRICT_LIMITS')
         for left, right in zip(clips, clips[1:]):
             if left['source_file'] == right['source_file'] and abs(left['source_end_frame'] - right['source_start_frame']) <= 2:
@@ -65,21 +85,41 @@ def plan_errors(plan):
     return sorted(set(errors))
 
 
+def semantic_review_variants(plan):
+    """Expose semantic evidence without asking a text reviewer to certify audio."""
+    variants = []
+    for variant in plan.get('variants', []):
+        clips = []
+        for clip in variant.get('clips', []):
+            lo = clip['source_start_frame']/clip['fps']; hi = clip['source_end_frame']/clip['fps']
+            view = {k: value for k, value in clip.items() if k in (
+                'unit_id','source_file','source_start_frame','source_end_frame','fps','transcript',
+                'source_subtitle_text','previous_source_context')}
+            view['words_and_source_context'] = [w for w in clip.get('words', [])
+                if w['end'] > lo-4 and w['start'] < hi+4]
+            clips.append(view)
+        variants.append({k: v for k, v in variant.items() if k != 'clips'} | {'clips': clips})
+    return variants
+
+
 def final_task(paths, plan_ref):
     record = load_stage(paths, plan_ref)
     if record['identity']['stage'] != 'plan':
         raise CacheIdentityError('final_review_requires_plan')
     plan = record['body']
-    payload = {'schema_version': 1, 'role': 'final_review', 'project_key': record['identity']['project_key'],
+    payload = {'schema_version': 1, 'role': 'final_review', 'review_scope': 'semantic_text_and_source_context', 'project_key': record['identity']['project_key'],
                'batch_scope': paths.registered_scope()[1],
                'config_reference': 'PROJECT_CONFIG.json', 'product_id': record['identity']['product_id'],
                'encoding_id': record['identity']['encoding_id'], 'rules_fingerprint': record['identity']['rules_fingerprint'],
                'plan_reference': plan_ref, 'plan_digest': record['body_digest'],
-               'variants': plan.get('variants', []), 'local_errors': plan_errors(plan),
-               'hard_rules': {'duration_exclusive': [45, 60], 'host_ratio_exclusive': 0.70,
+               'variants': semantic_review_variants(plan), 'local_errors': [e for e in plan_errors(plan) if e != 'AUDIO_BOUNDARY_UNVERIFIED'],
+               'hard_rules': {'duration_exclusive': (plan.get('editing_policy') or {}).get('duration_exclusive_seconds', plan.get('duration_exclusive_seconds', [45, 60])),
+                              'person_audit': {'no_person_ratio_max_inclusive': 0.10,
+                                               'closeup_duration_ratio_max_inclusive': (plan.get('editing_policy') or {}).get('closeup_duration_ratio_max_inclusive', 0.30),
+                                               'sampling_contract': 'person-presence-two-stage-record-v7'},
                               'overlap_allowed': False, 'semantic_duplicates_allowed': False,
                               'content_scope': '只保留当前商品卖点/材质/版型/工艺/穿着感受；禁止价格、促销、优惠、红包、抽奖、链接、欢迎、闲聊、后台、拍摄、无关商品和空话'},
-               'review_questions': ['检查完整开头、结尾、每个接缝词音及邻近上下文',
+               'review_questions': ['仅检查完整开头、结尾、每个接缝的语义及原源上下文，排除上句残尾或依赖；本机声学与人物门禁单独负责物理风险，不要求文本审核员提供音素精度或真人试听证明',
                    '因果、条件、转折、列举、指代、承诺是否闭合；连接词不是自动失败条件',
                    '卖点是否自然有价值；不能用粗选或 closure_check 当终审']}
     payload['task_digest'] = digest(payload)

@@ -1,4 +1,4 @@
-// Detect prominent human subjects. No identity matching or tracking is performed.
+// Detect any visible person and identify likely close-up shots. No identity matching or tracking.
 import Foundation
 import Vision
 import ImageIO
@@ -8,11 +8,11 @@ func fail(_ reason: String) -> Never {
     exit(2)
 }
 if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--version" {
-    print("apple-frame-v4-person-subject")
+    print("apple-frame-v6-person-presence-closeup-pose-fallback")
     exit(0)
 }
 guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--frame" else {
-    fail("apple-frame-v4 requires --frame PNG")
+    fail("apple-frame-v5 requires --frame PNG")
 }
 guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: CommandLine.arguments[2]) as CFURL, nil),
       let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { fail("frame decode failed") }
@@ -20,7 +20,16 @@ do {
     let humans = VNDetectHumanRectanglesRequest()
     let faces = VNDetectFaceRectanglesRequest()
     let pose = VNDetectHumanBodyPoseRequest()
-    try VNImageRequestHandler(cgImage: image).perform([humans, faces, pose])
+    try VNImageRequestHandler(cgImage: image).perform([humans, faces])
+    var poseAvailable = true
+    do {
+        try VNImageRequestHandler(cgImage: image).perform([pose])
+    } catch {
+        // Some installed Vision runtimes cannot initialize the pose model. Keep
+        // rectangle and face evidence; downstream treats an unsupported pose
+        // request as UNCERTAIN when neither detector finds a person.
+        poseAvailable = false
+    }
     func rect(_ box: CGRect, _ confidence: Double) -> [String: Double] {
         ["confidence": confidence, "height": Double(box.height),
          "width": Double(box.width), "area": Double(box.width * box.height)]
@@ -40,10 +49,11 @@ do {
     let confidentHuman = humanRows.contains { $0["confidence", default: 0] >= 0.3 }
     let confidentFace = faceRows.contains { $0["confidence", default: 0] >= 0.3 }
     let poseSignal = poseRows.contains { $0["points", default: 0] >= 2 }
-    let report: [String: Any] = ["protocol": "apple-frame-v4", "observations": [
+    let report: [String: Any] = ["protocol": "apple-frame-v6", "observations": [
         "body_candidates": humanRows,
         "face_candidates": faceRows,
         "pose_candidates": poseRows,
+        "pose_available": poseAvailable,
         "has_person_signal": confidentHuman || confidentFace || poseSignal
     ]]
     FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]))

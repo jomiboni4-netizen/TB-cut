@@ -26,11 +26,15 @@ def synthetic_vision(fps=10, classifier=None):
 
 
 def valid_plan(source='001.mp4', offset=0, text='这件衣服穿起来轻便活动不受限制'):
-    return {'variants': [{'variant_id': 'variant_1', 'clips': [{
+    plan = {'variants': [{'variant_id': 'variant_1', 'clips': [{
         'source_file': source, 'source_start_frame': int(offset*10), 'source_end_frame': int((offset+50)*10),
         'audio_start_frame': int(offset*10), 'audio_end_frame': int((offset+50)*10), 'fps': 10,
         'words': [{'start': offset+1, 'end': offset+49, 'text': text}], 'transcript': text,
         'audio_boundary_verified': True}]}]}
+    from sentence_boundaries import bounded_edges
+    clip = plan['variants'][0]['clips'][0]
+    _, _, clip['sentence_edges'] = bounded_edges(clip['words'], 0, 0, 10, padding=1.)
+    return plan
 
 
 def range_body(pid=1, encoding='001', start=0, end=100):

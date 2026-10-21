@@ -6,9 +6,11 @@ For every new Codex window or new task in this project:
 
 1. Read `AGENTS.md`.
 2. Read `PROJECT_RULES.md`.
-3. Read `PROJECT_STATE.json` if it exists; otherwise read `PROJECT_STATE.template.json`.
-4. Run `python3 scripts/project_doctor.py --root .` before any destructive or Resolve-writing action.
-5. Do not analyze media, call MiMo, or write Resolve until the above files have been read.
+3. Read `PROJECT_STATE.template.json` for the schema. Treat root `PROJECT_STATE.json` as a legacy record only; never use it to select the active project, media, batch, or Resolve timeline.
+4. Before media analysis or Resolve action, identify the current Resolve project and use its one persistent local project record under `.cache/projects/<project_key>/PROJECT_STATE.json`. This record owns confirmed media/title/subtitle paths and source/target timeline binding. A batch workspace is temporary and may contain only a project reference, product range, progress, and batch artifacts; it must not become another project registration.
+5. Run `python3 scripts/project_doctor.py --root . --workspace <workspace>` before destructive or Resolve-writing actions. Running the doctor without `--workspace` is structural-only and does not validate an active project.
+6. Before Resolve writing, run `python3 scripts/resolve_connection_doctor.py --root . --workspace <workspace>` outside the sandbox and confirm the live project and timeline identities match that workspace.
+7. Do not analyze media, call MiMo, or write Resolve until the applicable state and identity checks above have passed.
 
 Rule priority:
 
@@ -45,9 +47,10 @@ Treat phrases such as “这次 / 这一批 / 先” as batch-only:
 
 ## 4. Paths and project identity
 
-- Register confirmed title/subtitle/video paths once per Resolve project; later windows and batches inherit the verified project configuration. Ask only for missing or changed inputs. Legacy state is not an authenticated registration.
+- Register confirmed title/subtitle/video paths once per Resolve project in its project record; later windows and batches inherit that verified configuration. Ask only for missing or changed inputs. Legacy root/workspace state is not an authenticated registration.
 - Never hard-code old dates, old project names, or old media paths.
-- Resolve project/source timeline/target timeline must come from current state or explicit user instruction.
+- Resolve project/source timeline/target timeline must come from that project's record or explicit user instruction.
+- Before product selection, resolve the live project name through `scripts/project_editing_modes.py`; use only the matching mode's input-range, duration, variant-count, and close-up policies. Ambiguous/unmatched names are blockers.
 - Missing path/state is a blocking configuration error; do not guess.
 
 ## 5. Data sent to MiMo
@@ -97,5 +100,6 @@ Before Resolve write, normalize physical clips. Adjacent clips from the same sou
 
 Only `scripts/cleanup.py` may perform project cleanup by default.
 - Always support `--dry-run`.
+- A completed batch slice is eligible for cleanup seven days after its recorded completion time; retain the per-project record. Cleanup must preview exact batch targets and refuse active/incomplete batches.
 - Never delete configured source videos, subtitles, title files, Resolve projects, config/rules/state files, or final exports.
 - Cache and temporary outputs are disposable and reproducible.

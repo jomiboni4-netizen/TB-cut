@@ -25,11 +25,12 @@ def context(paths, product_id, encoding_id, stage):
     value.update({'product_id': product_id, 'encoding_id': encoding_id,
                   'store_version': digest([_sha256(Path(__file__).parent / name) for name in
                                           ('product_checkpoints.py', 'final_quality_gate.py', 'codex_worker.py', 'registered_pipeline.py',
-                                           'refine_plans_v2.py', 'audit_mimo_v2.py', 'build_expanded_codex_request.py',
+                                           'refine_plans_v2.py', 'audio_boundary_evidence.py', 'audit_mimo_v2.py', 'build_expanded_codex_request.py',
                                            'person_coverage_audit_v2.py', 'windowed_asr_v2.py', 'review_compute_cache.py',
                                            'adaptive_vision.py', 'vision_record_score_v5.py', 'apple_frame_probe.swift',
                                            'compute_store.py', 'asr_identity.py',
-                                           'asr_runtime.py','asr_worker.py','trial_session.py','resolve_trial.py')]),
+                                          'asr_runtime.py','asr_worker.py','trial_session.py','resolve_trial.py',
+                                          'owned_audio_refinement.py')]),
                   'processing_policy': digest(state.get('batch_overrides', {})),
                   'stage_policy': digest({k: state.get('runtime', {}).get(k, {}).get(stage)
                                           for k in ('stage_versions', 'model_versions')})})
