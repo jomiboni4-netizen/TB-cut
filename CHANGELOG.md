@@ -1,3 +1,7 @@
+# 2026-10-22 — manual cutpoint preview uses normal product markers
+- Allow semantic-PASS products recorded as REPAIRABLE for local ASR edge work to enter the existing manual preview gate.
+- Write standard blue product-start markers during preview so user cutpoint edits can be read back without a later marker-normalization pass; retain preview transaction status and readback checks.
+
 # 2026-10-22 — mixed semantic and human-confirmed batch ranges
 - Let the scheduler's existing range-publication stage accept an explicitly human-confirmed product range alongside semantic-inference ranges for the other products in the same batch.
 - Keep the two proof types separate and validate all published product ranges together for overlap before recording their checkpoints.

@@ -85,7 +85,7 @@ def load_preview_products(paths, variants: dict[int, list[str]]):
 
 
 ASR_CUTPOINT_REASONS = (
-    "sentence_", "asr_cut_", "word_alignment_", "overlapping_asr_tokens_",
+    "sentence_", "asr_text_edge_", "asr_cut_", "word_alignment_", "overlapping_asr_tokens_",
     "audio_cutpoint_", "audio_boundary_", "vfr_exact_mapping_not_integrated",
 )
 
@@ -107,7 +107,7 @@ def load_rough_preview_products(paths, variants: dict[int, list[str]], *, allow_
     for pid, wanted in sorted(variants.items()):
         status = resume(paths, [pid])[pid]
         reason = str(status.get("reason") or "")
-        if status.get("status") != "BLOCKED" or not reason.startswith(ASR_CUTPOINT_REASONS):
+        if status.get("status") not in ("BLOCKED", "REPAIRABLE") or not reason.startswith(ASR_CUTPOINT_REASONS):
             raise CacheIdentityError(f"preview_requires_semantic_pass_asr_cutpoint_failure:{pid}:{reason}")
         cursor_path = paths.project_records_dir / "cursors" / f"{pid}.json"
         if not cursor_path.is_file():
@@ -285,10 +285,6 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
                                  "media": media_name, "record_start": record, "record_end": record + end - start,
                                  "source_start": start, "source_end": end})
                 record += end - start
-            if variant_index > 1:
-                markers.append({"frame": variant_start, "product_index": product["product_index"],
-                                "encoding_id": product["encoding_id"], "variant_id": variant["variant_id"],
-                                "kind": "variant"})
             record += gap_frames
         markers.append({"frame": product_start, "product_index": product["product_index"],
                         "encoding_id": product["encoding_id"], "kind": "product"})
@@ -296,9 +292,7 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
     existing_custom = {row.get("customData", "") for row in (target.GetMarkers() or {}).values()
                        if isinstance(row, dict)}
     for marker in markers:
-        marker["custom_data"] = (f"tb_cut_semantic_preview:{batch_id}:product:{marker['encoding_id']}"
-                                 if marker["kind"] == "product" else
-                                 f"tb_cut_semantic_preview:{batch_id}:product:{marker['encoding_id']}:{marker['variant_id']}")
+        marker["custom_data"] = f"tb_cut_product_start:{marker['encoding_id']}"
         if marker["custom_data"] in existing_custom:
             raise SystemExit("preview_marker_duplicate")
     if not append_infos:
@@ -349,9 +343,8 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
         prefix = "ASR待修" if rough_semantic else "预审"
         name = (f"{prefix}｜商品 ID {marker['encoding_id']}｜开始" if marker["kind"] == "product"
                 else f"{prefix}｜商品 ID {marker['encoding_id']}｜{marker['variant_id']}")
-        if not target.AddMarker(marker["frame"] - int(target.GetStartFrame()), "Red",
-                                "MANUAL_CUTPOINT" if rough_semantic else "SEMANTIC_PREVIEW",
-                                name, 1, marker["custom_data"]):
+        if not target.AddMarker(marker["frame"] - int(target.GetStartFrame()), "Blue",
+                                str(marker["encoding_id"]), "", 1, marker["custom_data"]):
             raise SystemExit("preview_marker_write_failed_no_automatic_retry")
     if not manager.SaveProject():
         raise SystemExit("preview_save_failed_no_automatic_retry")
@@ -371,7 +364,10 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
     current_markers = target.GetMarkers() or {}
     for marker in markers:
         offset = marker["frame"] - int(target.GetStartFrame())
-        if (current_markers.get(int(offset), {}) or {}).get("customData") != marker["custom_data"]:
+        current_marker = current_markers.get(int(offset), {}) or {}
+        if (current_marker.get("customData") != marker["custom_data"]
+                or current_marker.get("color") != "Blue"
+                or current_marker.get("name") != str(marker["encoding_id"])):
             errors.append("preview_marker_readback_failed")
     report = {"schema_version": 1, "mode": transaction["mode"],
               "passed": not errors, "errors": errors, "project_id": stable_id(project),
@@ -548,6 +544,12 @@ def normalize_manual_markers(paths, *, check_only=False):
     transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
     if transaction.get("mode") != "manual_cutpoint_preview" or transaction.get("status") != "VERIFIED":
         raise SystemExit("manual_marker_normalization_requires_verified_preview")
+    if transaction.get("markers") and all(
+            row.get("custom_data") == f"tb_cut_product_start:{row['encoding_id']}"
+            for row in transaction["markers"]):
+        return {"status": "NORMAL_MARKERS_ALREADY_PRESENT",
+                "products": sorted({row["product_index"] for row in transaction["markers"]}),
+                "changed": False}
     marker_tx_path = output_dir / "manual_marker_transaction.json"
     if marker_tx_path.is_file():
         raise SystemExit("manual_marker_transaction_exists_inspect_before_retry")
@@ -748,11 +750,12 @@ def recover_markers(paths):
             raise SystemExit("preview_recovery_plan_digest_mismatch")
         encoding_id = plan_record["identity"]["encoding_id"]
         available = {row["variant_id"]: row for row in plan_body["variants"]}
+        marker_specs.append({"frame": product_start, "product_index": product["product_index"],
+                             "encoding_id": encoding_id, "kind": "product"})
         for variant_index, variant_id in enumerate(variants):
             variant = available.get(variant_id)
             if not variant:
                 raise SystemExit("preview_recovery_variant_missing")
-            variant_start = record
             for clip in variant["clips"]:
                 start, end = int(clip["source_start_frame"]), int(clip["source_end_frame"])
                 expected.append({"product_index": product["product_index"], "variant_id": variant_id,
@@ -760,14 +763,6 @@ def recover_markers(paths):
                                  "record_end": record + end - start,
                                  "source_start": start, "source_end": end})
                 record += end - start
-            if variant_index == 0:
-                marker_specs.append({"frame": product_start, "product_index": product["product_index"],
-                                     "encoding_id": encoding_id, "variant_id": variant_id,
-                                     "kind": "product"})
-            else:
-                marker_specs.append({"frame": variant_start, "product_index": product["product_index"],
-                                     "encoding_id": encoding_id, "variant_id": variant_id,
-                                     "kind": "variant"})
             record += gap
 
     video = list(target.GetItemListInTrack("video", 1) or [])
@@ -786,10 +781,7 @@ def recover_markers(paths):
     for offset, row in list(marker_map.items()):
         spec = specs_by_offset.get(int(offset))
         if (spec and isinstance(row, dict)
-                and row.get("customData") != (
-                    f"tb_cut_semantic_preview:{batch_id}:product:{spec['encoding_id']}"
-                    if spec["kind"] == "product" else
-                    f"tb_cut_semantic_preview:{batch_id}:product:{spec['encoding_id']}:{spec['variant_id']}")):
+                and row.get("customData") != f"tb_cut_product_start:{spec['encoding_id']}"):
             custom_data = row.get("customData")
             if custom_data not in old_custom:
                 raise SystemExit("preview_recovery_stale_marker_delete_failed")
@@ -800,20 +792,14 @@ def recover_markers(paths):
 
     marker_map = target.GetMarkers() or {}
     for spec in marker_specs:
-        custom_data = (f"tb_cut_semantic_preview:{batch_id}:product:{spec['encoding_id']}"
-                       if spec["kind"] == "product" else
-                       f"tb_cut_semantic_preview:{batch_id}:product:{spec['encoding_id']}:{spec['variant_id']}")
+        custom_data = f"tb_cut_product_start:{spec['encoding_id']}"
         offset = spec["frame"] - int(target.GetStartFrame())
         existing = marker_map.get(int(offset))
         if isinstance(existing, dict) and existing.get("customData") == custom_data:
             continue
         if existing:
             raise SystemExit("preview_recovery_marker_frame_occupied")
-        name = (f"商品 ID {spec['encoding_id']}｜预审起点｜{spec['variant_id']}"
-                if spec["kind"] == "product" else
-                f"商品 ID {spec['encoding_id']}｜{spec['variant_id']} 预审")
-        note = "仅供语义预审；商品整体审核未通过。"
-        if not target.AddMarker(offset, "Red", name, note, 1, custom_data):
+        if not target.AddMarker(offset, "Blue", str(spec["encoding_id"]), "", 1, custom_data):
             raise SystemExit("preview_recovery_marker_add_failed_no_reappend")
         marker_map = target.GetMarkers() or {}
 
@@ -821,11 +807,11 @@ def recover_markers(paths):
         raise SystemExit("preview_recovery_save_failed_no_reappend")
     marker_map = target.GetMarkers() or {}
     for spec in marker_specs:
-        custom_data = (f"tb_cut_semantic_preview:{batch_id}:product:{spec['encoding_id']}"
-                       if spec["kind"] == "product" else
-                       f"tb_cut_semantic_preview:{batch_id}:product:{spec['encoding_id']}:{spec['variant_id']}")
+        custom_data = f"tb_cut_product_start:{spec['encoding_id']}"
         offset = spec["frame"] - int(target.GetStartFrame())
-        if (marker_map.get(int(offset), {}) or {}).get("customData") != custom_data:
+        marker = marker_map.get(int(offset), {}) or {}
+        if (marker.get("customData") != custom_data or marker.get("color") != "Blue"
+                or marker.get("name") != str(spec["encoding_id"])):
             raise SystemExit("preview_recovery_marker_readback_failed_no_reappend")
     report = {"schema_version": 1, "mode": "semantic_review_preview_only", "passed": True,
               "target_timeline": target.GetName(), "target_timeline_id": stable_id(target),
