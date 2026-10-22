@@ -347,7 +347,7 @@ def run(paths, *, detector=None, group_size=3, repair_limit=2, operation=None,
             return execute_recorded(paths, mode_name, "resolve_delivery_layout_repair", invoke_layout_repair)
         if operation is not None:
             if (operation not in ("semantic-review-preview", "manual-preview-review",
-                                  "manual-preview-normalize-markers")
+                                  "manual-preview-normalize-markers", "manual-preview-label-markers")
                     or (operation == "semantic-review-preview"
                         and not preview_variants and not preview_recover_markers)):
                 raise SchedulerError("unsupported_taobao_operation_or_preview_scope_missing")
@@ -372,6 +372,10 @@ def run(paths, *, detector=None, group_size=3, repair_limit=2, operation=None,
                     command.append("--check-only")
             elif operation == "manual-preview-review":
                 command.append("--review-manual-edits")
+            elif operation == "manual-preview-label-markers":
+                command.append("--label-product-markers")
+                if preview_check_only:
+                    command.append("--check-only")
             elif preview_recover_markers:
                 command.append("--recover-markers")
             else:

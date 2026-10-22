@@ -1,33 +1,31 @@
 # Task
-将批次16–18当前全部六个已选版本写入 Resolve“成片”时间线，ASR 待手修版本使用常规商品标记，供用户修边后只读回查。
+读取用户对商品16、17的手工切点修改，统一时间线商品标记，并判断商品997158679320是否还能新增两个版本。
 
 # Repo changes
-- 修复手工切点预审入口：接受语义终审通过、ASR 边界待修且状态为 `REPAIRABLE` 的商品。
-- 手工预审写入蓝色常规商品起点标记，只标商品起点；保持 `manual_cutpoint_preview` 状态，不提升为正式成片通过。预审回读仍核验标记颜色、名称和商品标识。
-- 已更新 `CHANGELOG.md` 与本报告。代码变更尚未提交；本报告记录提交前 Git 快照。
+- 增加经淘宝调度器调用的商品标记整理操作：按登记标题表把商品起点标记统一为蓝色，名称为商品ID，备注为`商品序号｜标题`；保留片段及其他标记，并写前备份、写后回读。
+- 更新变更记录与本报告。提交前 Git 快照：`e60fdef`；本次新增改动在快照后产生。
 
 # Runtime changes
-- 商品18此前已有3个版本并已写入，不重复追加。商品16的1个已选版本和商品17的2个已选版本，本次追加到“成片”。
-- 新增3个版本、7个素材段；目标时间线写前有65条音频行和65条视频行。不同视频之间保留2秒空隙。
-- 为商品16、17新增2个蓝色常规商品起点标记。预审的ASR状态仍为待手工修边，未标记为ASR通过或正式交付通过。
-- 已保存 Resolve 写前备份；写入后音视频条目及标记逐项回读验证通过。用户手改后可由调度器只读比较预审基线与实际切点，不需要再替换标记。
+- 重新认证 Resolve 稳定项目 ID、绑定项目及“素材”/“成片”时间线后，执行只读 `manual-preview-review`。手改预审共7段，音视频行数相同、保护内容完整；5段切点改变，幅度依次约为末尾−17帧、开头−2帧、+9帧、+12帧、+91帧；另外2段未变。
+- 用户要求统一标记后，检查到18个商品起点标记中5个需要补正（商品4、5、6、16、17）。只更新这5个标记；18个商品标记复查全部符合截图格式，片段及无关标记未改。
+- 商品997158679320的唯一已登记范围约120.3秒，当前手改版本占约55.9秒，剩余源时长约64.4秒。两条额外版本最低共需超过90秒，且要求同源区间互斥，因此当前范围不可能再容纳两条；最多只有一条的理论时长空间，语义完整性尚未判定。
+- 未追加新片段或修改切点；无导出、音频增益或外部语义服务调用。
 
 # Validation
-- `project_doctor.py --workspace`：通过。
-- `resolve_connection_doctor.py --workspace`：通过；实时项目 ID、源时间线及目标“成片”时间线绑定相符。
-- 调度器 `plan`：通过，模式 `taobao_legacy`，交付入口可用。
-- 语义预审只读预检：通过，商品16/17共3个版本、7个素材段、2个商品标记，目标“成片”身份匹配。
-- 调度器预审写入与回读：`PREVIEW_WRITTEN_AND_VERIFIED`；7个素材段验证通过。
-- `git diff --check`：通过。未运行测试。
+- 项目 doctor：通过；Resolve connection doctor：通过，当前项目和目标时间线 ID 匹配。
+- 调度器 `plan`：通过，模式 `taobao_legacy`。
+- 手工切点只读回读：`MANUAL_EDIT_READBACK`，`protected_content_preserved=true`，视频/音频各7段。
+- 标记更新：`MARKERS_STANDARDIZED_AND_VERIFIED`；复查为18个商品标记、0个待更新。
+- `python -m py_compile`：通过；`git diff --check`：通过。未运行测试。
 
 # External actions
-- MiMo called: no。Resolve connected: yes。Resolve 写入：是，预审追加商品16/17；商品18此前已写入。export performed: no。
-- 专用 Chrome 本轮未使用；未发送字幕、素材描述或剪辑内容到外部服务。
+- MiMo called: no。Resolve connected: yes。Resolve markers written: yes；timeline clips written: no。export performed: no。
+- 专用 Chrome 未使用；未发送字幕、素材或剪辑内容到外部服务。
 
 # Blockers
-- 商品16/17需用户手工调整 ASR 切点。用户完成后可运行 `manual-preview-review` 只读读取并对比切点；无需再次改标记。
-- 商品18交付回执有效，但其批次 checkpoint 仍显示 `IN_PROGRESS`；本次没有重跑或重写商品18。
+- 商品997158679320当前可用范围没有足够的互斥时长制作两条额外版本。其余约64.4秒能否单独组成另一条语义完整版本，本轮未审核。
+- 商品16、17仍为人工修边预审版本；本轮读取并记录修改，没有把局部 ASR 状态提升为通过。
 
 # Git state
-- Branch: `codex/sentence-boundaries-sync`；HEAD（本次后续提交前快照）: `1ef445a`。
-- 本次新增未提交改动：`scripts/resolve_semantic_preview.py`、`CHANGELOG.md`、`tmp/review_reports/LATEST_CODEX_REPORT.md`。本轮尚未提交、推送或改写历史。
+- Branch: `codex/sentence-boundaries-sync`；提交前快照 HEAD: `e60fdef`。
+- 提交前快照之后新增未提交文件变更：`CHANGELOG.md`、`scripts/resolve_semantic_preview.py`、`scripts/workflow_scheduler.py`、`tmp/review_reports/LATEST_CODEX_REPORT.md`。`product18-main.png` 和 `archive/` 仍是本地未跟踪项；本轮未提交、推送或改写历史。

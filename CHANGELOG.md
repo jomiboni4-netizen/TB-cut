@@ -1,3 +1,9 @@
+# 2026-10-22 — 商品起点标记按标题清单统一
+- 增加调度器路由的标记整理操作：按注册标题表更新蓝色商品起点的 ID 名称与“商品序号｜标题”备注，保留片段和非商品标记，并执行备份与回读。
+
+# 2026-10-22 — product marker labels match timeline reference
+- Add a scheduler-routed marker-only operation that sets registered product markers to blue ID names and `商品序号｜标题` notes, with backup and readback while preserving all timeline clips and unrelated markers.
+
 # 2026-10-22 — manual cutpoint preview uses normal product markers
 - Allow semantic-PASS products recorded as REPAIRABLE for local ASR edge work to enter the existing manual preview gate.
 - Write standard blue product-start markers during preview so user cutpoint edits can be read back without a later marker-normalization pass; retain preview transaction status and readback checks.

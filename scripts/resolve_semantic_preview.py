@@ -831,6 +831,129 @@ def recover_markers(paths):
             "markers": len(marker_specs), "recovery": "markers_and_readback_only"}
 
 
+def label_product_markers(paths, *, check_only=False):
+    """Standardize product markers as blue ID names with sequence/title notes."""
+    from registered_pipeline import inputs
+
+    state = paths.load_state()
+    titles, _ = inputs(paths)
+    by_id = {str(row["encoding_id"]): row for row in titles["products"]}
+    resolve_config = state["resolve"]
+    resolve = connect(status_path=paths.workspace_root / "resolve_connection_status.json")
+    if not resolve:
+        raise SystemExit("product_marker_label_resolve_unavailable")
+    manager = resolve.GetProjectManager()
+    project = manager.GetCurrentProject() if manager else None
+    if (not project or stable_id(project) != state["project_identity"]["resolve_project_id"]
+            or project.GetName() != resolve_config["project_name"]):
+        raise SystemExit("product_marker_label_project_mismatch")
+    timelines = [project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)]
+    timeline_by_id = {stable_id(timeline): timeline for timeline in timelines}
+    source = timeline_by_id.get(resolve_config["source_timeline_id"])
+    target = timeline_by_id.get(resolve_config["target_timeline_id"])
+    if (not source or not target or source is target
+            or source.GetName() != resolve_config["source_timeline"]
+            or target.GetName() != resolve_config["target_timeline"]):
+        raise SystemExit("product_marker_label_timeline_mismatch")
+
+    before = {stable_id(timeline): resolve_snapshot(timeline) for timeline in timelines}
+    marker_map = target.GetMarkers() or {}
+    updates, matched_custom = [], set()
+    for frame, marker in marker_map.items():
+        custom = str(marker.get("customData") or "") if isinstance(marker, dict) else ""
+        prefix = "tb_cut_product_start:"
+        if not custom.startswith(prefix):
+            continue
+        encoding_id = custom[len(prefix):]
+        product = by_id.get(encoding_id)
+        if not product:
+            raise SystemExit("product_marker_label_unknown_encoding_id:" + encoding_id)
+        if custom in matched_custom:
+            raise SystemExit("product_marker_label_duplicate_encoding_id:" + encoding_id)
+        matched_custom.add(custom)
+        expected_note = f"商品{int(product['product_index'])}｜{product['title']}"
+        if (marker.get("color") != "Blue" or marker.get("name") != encoding_id
+                or marker.get("note") != expected_note):
+            updates.append({"frame": int(frame), "encoding_id": encoding_id,
+                            "product_index": int(product["product_index"]),
+                            "note": expected_note, "custom_data": custom,
+                            "previous": {key: marker.get(key) for key in ("color", "name", "note", "duration")}})
+    if not matched_custom:
+        raise SystemExit("product_marker_label_no_registered_markers_found")
+    summary = {"status": "PREFLIGHT_PASS" if check_only else "READY",
+               "target_timeline": target.GetName(), "registered_markers": len(matched_custom),
+               "markers_to_update": len(updates),
+               "products": [row["product_index"] for row in updates]}
+    if check_only or not updates:
+        if not updates:
+            summary["status"] = "ALREADY_STANDARD"
+        return summary
+
+    batch_id = str(state["batch"]["batch_id"])
+    output_dir = paths.cache_dir / "resolve_semantic_preview" / batch_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    transaction_path = output_dir / "product_marker_labels_transaction.json"
+    if transaction_path.exists():
+        prior = json.loads(transaction_path.read_text(encoding="utf-8"))
+        if prior.get("status") == "VERIFIED":
+            raise SystemExit("product_marker_label_transaction_already_verified_inspect_before_retry")
+        raise SystemExit("product_marker_label_transaction_pending_inspect_before_retry")
+    backup_dir = paths.cache_dir / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{project.GetName()}_before_marker_labels_{datetime.now():%Y%m%d_%H%M%S}.drp"
+    if not manager.SaveProject() or not manager.ExportProject(project.GetName(), str(backup), False):
+        raise SystemExit("product_marker_label_backup_failed")
+    if not zipfile.is_zipfile(backup):
+        raise SystemExit("product_marker_label_backup_invalid")
+    transaction = {"status": "STARTED", "project_id": stable_id(project),
+                   "target_timeline_id": stable_id(target), "source_timeline_id": stable_id(source),
+                   "backup": str(backup), "updates": updates,
+                   "target_before": before[stable_id(target)],
+                   "source_before": before[stable_id(source)]}
+    atomic_json(transaction_path, transaction)
+    for index, row in enumerate(updates):
+        transaction.update(status="APPLYING", next_update=index + 1)
+        atomic_json(transaction_path, transaction)
+        if not target.DeleteMarkerByCustomData(row["custom_data"]):
+            raise SystemExit("product_marker_label_delete_failed_inspect_transaction")
+        if not target.AddMarker(row["frame"] - int(target.GetStartFrame()), "Blue",
+                                row["encoding_id"], row["note"], 1, row["custom_data"]):
+            raise SystemExit("product_marker_label_add_failed_inspect_transaction")
+    if not manager.SaveProject():
+        raise SystemExit("product_marker_label_save_failed_inspect_transaction")
+
+    after = {stable_id(timeline): resolve_snapshot(timeline) for timeline in timelines}
+    errors = []
+    target_before, target_after = before[stable_id(target)], after[stable_id(target)]
+    if (target_before["rows"] != target_after["rows"]
+            or any(target_before[key] != target_after[key]
+                   for key in ("id", "name", "start", "end", "settings"))):
+        errors.append("product_marker_label_changed_timeline_content")
+    if before[stable_id(source)] != after[stable_id(source)]:
+        errors.append("product_marker_label_changed_source_timeline")
+    current = target.GetMarkers() or {}
+    for row in updates:
+        offset = row["frame"] - int(target.GetStartFrame())
+        marker = current.get(offset, current.get(str(offset), {})) or {}
+        if (marker.get("customData") != row["custom_data"] or marker.get("color") != "Blue"
+                or marker.get("name") != row["encoding_id"] or marker.get("note") != row["note"]):
+            errors.append("product_marker_label_readback_failed:" + row["encoding_id"])
+    updated_ids = {row["custom_data"] for row in updates}
+    before_other = {str(offset): marker for offset, marker in marker_map.items()
+                    if str(marker.get("customData") or "") not in updated_ids}
+    after_other = {str(offset): marker for offset, marker in current.items()
+                   if str(marker.get("customData") or "") not in updated_ids}
+    if before_other != after_other:
+        errors.append("product_marker_label_changed_unrelated_markers")
+    transaction.update(status="VERIFIED" if not errors else "FAILED_VERIFICATION",
+                       errors=errors, target_after=target_after)
+    atomic_json(transaction_path, transaction)
+    if errors:
+        raise SystemExit("product_marker_label_verification_failed_inspect_transaction:" + ",".join(errors))
+    summary.update(status="MARKERS_STANDARDIZED_AND_VERIFIED", backup=str(backup))
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
@@ -846,9 +969,16 @@ def main():
                         help="Read back the user's manual cutpoint edits without changing Resolve")
     parser.add_argument("--normalize-manual-markers", action="store_true",
                         help="Replace this batch's red manual preview markers with normal blue product markers")
+    parser.add_argument("--label-product-markers", action="store_true",
+                        help="Write standard product IDs and sequence/title notes on registered blue markers")
     args = parser.parse_args()
     paths = resolve_runtime_paths(args.root, args.workspace)
-    if args.normalize_manual_markers:
+    if sum((args.normalize_manual_markers, args.review_manual_edits,
+            args.label_product_markers, args.recover_markers)) > 1:
+        parser.error("choose one preview recovery, review, or marker operation")
+    if args.label_product_markers:
+        result = label_product_markers(paths, check_only=args.check_only)
+    elif args.normalize_manual_markers:
         result = normalize_manual_markers(paths, check_only=args.check_only)
     elif args.review_manual_edits:
         result = review_manual_edits(paths)
