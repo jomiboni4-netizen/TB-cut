@@ -80,6 +80,22 @@ def refine(plan, sources):
     for variant in updated['variants']:
         for clip in variant['clips']:
             if not verify_edges(clip):
+                if (clip.get('cutpoint_review', {}).get('status') == 'REPAIRABLE'
+                        and clip.get('cutpoint_review', {}).get('fallback') ==
+                        'subtitle_cue_span_for_visual_audit'):
+                    # This provisional span exists only so the independent
+                    # person audit can run. Never refine or certify it as audio.
+                    clip['audio_boundary_verified'] = False
+                    clip['owned_audio_review'] = dict(
+                        contract=CONTRACT, status='REPAIRABLE',
+                        reason='asr_edge_unresolved_manual_cutpoint_review_required',
+                        edges={name: dict(status='REPAIRABLE', word_integrity='UNVERIFIED',
+                                          reason='asr_edge_unresolved')
+                               for name in ('opening', 'ending')},
+                        exact_frames=[clip['source_start_frame'], clip['source_end_frame']])
+                    rows.append(dict(variant_id=variant['variant_id'], unit_id=clip.get('unit_id'),
+                                     **clip['owned_audio_review']))
+                    continue
                 raise ValueError('owned_audio_sentence_proof_stale')
             proof = clip['sentence_edges']
             fps = clip['fps']

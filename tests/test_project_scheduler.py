@@ -13,7 +13,9 @@ import codex_worker
 import index_titles
 import index_subtitles
 import registered_pipeline as pipeline
+import owned_audio_refinement
 import project_scheduler as scheduler
+import project_editing_modes
 from init_project import initialize
 from product_checkpoints import load_stage, resume, read_ledger, update_checkpoint, capture_stage, publish_stage
 from final_quality_gate import final_task, import_final_review, plan_errors, approved_product
@@ -43,7 +45,11 @@ class PlanContractTests(unittest.TestCase):
 
 class SchedulerTests(unittest.TestCase):
     setUpBase=resume_fixtures.ProjectResumeTests.setUp
-    register=resume_fixtures.ProjectResumeTests.register
+    def register(self,paths,identity):
+        return initialize(paths,material_folder=self.material,resolve_project_id=identity,
+            title=self.title,subtitles=[str(self.srt)],videos=[str(self.video)],
+            resolve_project='same display name',source_timeline='source',target_timeline='target',
+            batch_id='batch-a',products=[1],force=True)
     def setUp(self):
         self.setUpBase()
         self.rows=[['编码 ID','标题']]+[[f'{i:03d}',f'Synthetic {i}'] for i in range(1,13)]
@@ -56,7 +62,7 @@ class SchedulerTests(unittest.TestCase):
             def stamp(t): return f'{t//3600:02d}:{t//60%60:02d}:{t%60:02d},000'
             srt.append(f'{i}\n{stamp(start)} --> {stamp(start+50)}\n{self.texts[i]}\n')
         self.srt.write_text('\n'.join(srt))
-        initialize(self.paths,products=list(range(1,13)))
+        initialize(self.paths,products=list(range(1,13)),force=True)
         with patch.object(index_subtitles,'media_duration',return_value=2000): index_subtitles.generate(self.paths)
         parsed={'schema_version':1,'sheet':'当前商品','values':self.rows}
         with patch.object(index_titles,'parse_workbook',return_value=parsed): index_titles.generate(self.paths,'unused')
@@ -81,19 +87,27 @@ class SchedulerTests(unittest.TestCase):
             if task['role']=='selection':
                 c=task['candidates'][0]
                 ranges=[{'candidate_id':c['candidate_id'],'variant_id':'variant_1',**c['time_range']}]
-                return fake_outcome(task,selected_ranges=ranges)
+                outcome=fake_outcome(task,selected_ranges=ranges)
+                outcome['result']['semantic_map']=[{'candidate_id':c['candidate_id'],
+                    'selling_point':'Synthetic selling point','quote':c['asr_text']}]
+                return outcome
             return fake_outcome(task,verdict='REPAIRABLE' if task['product_id']==self.fail_pid else 'PASS')
         stack.enter_context(patch.object(codex_worker,'launch',side_effect=launch))
         def transcribe(media,start,end,model):
-            pid=int((start+2)//100)+1
+            pid=int((start+2.5)//100)+1
             return [{'start':(pid-1)*100+0.5,'end':(pid-1)*100+49.5,'text':self.texts[pid]}]
         stack.enter_context(patch.object(pipeline,'transcribe_window',side_effect=transcribe))
         stack.enter_context(patch.object(pipeline,'asr_model_identity',return_value={
             'name': 'large-v3-turbo', 'resolved_path': 'synthetic', 'weights_digest': digest('synthetic weights'), 'files': {}}))
-        stack.enter_context(patch.object(pipeline,'source_fps',return_value=30))
-        stack.enter_context(patch.object(pipeline,'audit_audio_start',side_effect=lambda media,start:(start,{'risk':False})))
-        stack.enter_context(patch.object(pipeline,'refine_audio_end',side_effect=lambda media,start,end,duration:(end,{'risk':False})))
+        stack.enter_context(patch.object(pipeline,'source_clock',return_value={
+            'fps':30,'average_fps':30,'mapping':'decoded-cfr-v3','frame_count':100000,
+            'pts_digest':digest(['synthetic pts',30]),'max_deviation_seconds':0}))
+        stack.enter_context(patch.object(owned_audio_refinement,'audio_waveform_frames',
+            side_effect=lambda media,start,end:[(start+i*.02,-40) for i in range(max(1,int((end-start)/.02)))]))
         stack.enter_context(synthetic_vision(30))
+        stack.enter_context(patch.object(project_editing_modes,'resolve_editing_mode',return_value=(
+            'taobao_legacy',{'duration_exclusive_seconds':[45,60],'target_variant_count':3,
+                'allow_fewer_variants_when_exhausted':True,'closeup_duration_ratio_max_inclusive':.3})))
         return stack
 
     def full(self):
@@ -105,8 +119,8 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(result['delivery_complete'])
         self.assertEqual(result['written_count'],0)
         self.assertEqual([g['products'] for g in result['groups_processed']],[[1,2,3],[4,5,6],[7,8,9],[10,11,12]])
-        self.assertEqual(len(self.calls),25)
-        self.assertEqual(len({c['digest'] for c in self.calls}),25)
+        self.assertEqual(len(self.calls),24)
+        self.assertEqual(len({c['digest'] for c in self.calls}),24)
         for path in (self.paths.project_records_dir/'tasks').glob('*.json'):
             task=json.loads(path.read_text())['task']
             self.assertNotIn('chat_history',task)
@@ -163,6 +177,23 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaisesRegex(CacheIdentityError,'local_final_veto'):
             audit_fixture(self.paths,ref)
         self.assertEqual(resume(self.paths)[1]['status'],'BLOCKED')
+
+    def test_asr_edge_miss_still_runs_vision_without_reselecting_semantics(self):
+        with self.engine():
+            with patch.object(pipeline,'transcribe_window',return_value=[
+                    {'start':0.5,'end':1.0,'text':'unrelated synthetic speech'}]):
+                result=scheduler.process_product(self.paths,{'product_id':1,'encoding_id':'001'},
+                    mode='codex',detector=self.detector)
+        self.assertEqual(result['status'],'REPAIRABLE_ASR_CUTPOINT',result)
+        self.assertTrue(result['vision_audited'])
+        self.assertFalse(result['semantic_rerun'])
+        cursor=json.loads((self.paths.project_records_dir/'cursors/1.json').read_text())
+        self.assertTrue(cursor.get('rough'))
+        self.assertTrue(cursor.get('semantic_review'))
+        self.assertTrue(cursor.get('vision'))
+        self.assertNotIn('selection_repair_context',cursor)
+        self.assertEqual([row['role'] for row in self.calls].count('selection'),1)
+        self.assertEqual([row['role'] for row in self.calls].count('final_review'),1)
 
     def test_causal_conclusion_not_keyword_rejected(self):
         self.assertEqual(plan_errors(valid_plan(text='穿着轻便活动自在')),[])

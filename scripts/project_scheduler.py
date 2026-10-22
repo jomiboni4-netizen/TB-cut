@@ -505,29 +505,15 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                             with workspace_lock(paths):
                                 atomic_json(repair_path, repair_body)
                         if repeated:
-                            # The expanded local ASR neighborhood has already
-                            # failed once. Repeating the same rough selection
-                            # cannot improve its edge alignment; return to the
-                            # complete candidate pool and require a fresh
-                            # semantic review for any changed selection.
-                            repair_issues = [
-                                f"ASR edge still cannot align after expanded local review: {reason}; "
-                                "select an alternate complete sentence from the remaining candidate pool"
-                            ]
-                            cursor['selection_repair_context'] = {
-                                'previous_selected_ranges': load_stage(
-                                    paths, cursor['rough'], product_id=pid,
-                                    encoding_id=encoding)['body'].get('selected_ranges', [])
-                            }
-                            failure = record_repair_failure('asr_text_edge', repair_issues)
-                            if failure:
-                                return failure
-                            for name in ('rough', 'semantic_review', 'asr', 'plan', 'vision', 'final_audit'):
-                                cursor.pop(name, None)
-                            cursor.pop('asr_edge_repair_request', None)
-                            with workspace_lock(paths):
-                                atomic_json(cursor_path, cursor)
-                            continue
+                            # ASR alignment is a cutpoint-only concern. Keep
+                            # the reviewed selection and expose the cutpoint
+                            # for local/manual review; never request semantic
+                            # reselection because an edge could not be found.
+                            checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
+                                       reason='asr_cutpoint_requires_manual_review:' + reason)
+                            return {'product_id': pid, 'status': 'REPAIRABLE_ASR_CUTPOINT',
+                                    'reason': reason, 'semantic_rerun': False,
+                                    'preserved_selection': True}
                         cursor['asr_edge_repair_request'] = repair_body
                         for name in ('plan', 'vision', 'final_audit'):
                             cursor.pop(name, None)
@@ -539,7 +525,57 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                                 'repair_reference': paths.reference(repair_path),
                                 'rollback_to': 'local_asr_edge_review',
                                 'semantic_rerun': False, 'repeated_same_failure': repeated}
-                    errors = plan_errors(load_stage(paths, plan_ref)['body'])
+                    plan_body = load_stage(paths, plan_ref)['body']
+                    # Person visibility is independent of ASR edge matching.
+                    # Run it against the provisional cue-span plan too, while
+                    # keeping that plan ineligible for final approval.
+                    vision_ref = stage('vision', lambda: vision_audit(
+                        paths, plan_ref, detector,
+                        allow_vfr_approximate=allow_vfr_approximate))
+                    vision_body = load_stage(paths, vision_ref, product_id=pid,
+                                             encoding_id=encoding)['body']
+                    visual_failures = [row for row in vision_body.get('variants', [])
+                                       if row.get('status') == 'REPAIRABLE']
+                    if visual_failures:
+                        repair_issues = [
+                            f"{row['variant_id']}人物画面比例超限：无人物估算"
+                            f"{row.get('no_person_ratio_estimate')}，近景估算"
+                            f"{row.get('closeup_duration_ratio_estimate')}；重组选段后复查。"
+                            for row in visual_failures]
+                        failure = record_repair_failure('vision', repair_issues)
+                        if failure:
+                            return failure
+                        continue
+                    if any(row.get('status') != 'PASS'
+                           for row in vision_body.get('variants', [])):
+                        raise CacheIdentityError('vision_uncertain_or_blocked_needs_evidence_repair')
+                    unresolved_cutpoints = [clip.get('cutpoint_review') for variant in plan_body.get('variants', [])
+                                            for clip in variant.get('clips', [])
+                                            if clip.get('cutpoint_review', {}).get('status') == 'REPAIRABLE']
+                    if unresolved_cutpoints:
+                        repair_body = {'schema_version': 1, 'failed_stage': 'asr_cutpoint',
+                            'issues': unresolved_cutpoints, 'rollback_to': 'local_audio_cutpoint_review',
+                            'invalidate': ['plan', 'final_audit'],
+                            'preserve': ['range', 'candidate', 'rough', 'semantic_review', 'asr', 'vision'],
+                            'rough_reference': rough_ref, 'asr_reference': asr_ref,
+                            'plan_reference': plan_ref, 'vision_reference': vision_ref,
+                            'semantic_rerun': False}
+                        repair_body['repair_digest'] = digest(repair_body)
+                        repair_path = paths.project_records_dir / 'tasks' / (
+                            f"asr_edge_repair_{pid}_{repair_body['repair_digest'][:12]}.json")
+                        if not repair_path.exists():
+                            with workspace_lock(paths):
+                                atomic_json(repair_path, repair_body)
+                        cursor['asr_edge_repair_request'] = repair_body
+                        with workspace_lock(paths):
+                            atomic_json(cursor_path, cursor)
+                        checkpoint(paths, pid, encoding, 'REPAIRABLE', plan_ref,
+                                   reason='asr_cutpoint_requires_manual_review')
+                        return {'product_id': pid, 'status': 'REPAIRABLE_ASR_CUTPOINT',
+                                'repair_reference': paths.reference(repair_path),
+                                'rollback_to': 'local_audio_cutpoint_review',
+                                'vision_audited': True, 'semantic_rerun': False}
+                    errors = plan_errors(plan_body)
                     if errors == ['AUDIO_BOUNDARY_UNVERIFIED']:
                         plan_body = load_stage(paths, plan_ref)['body']
                         affected = [{'variant_id': variant['variant_id'], 'unit_id': clip.get('unit_id'),
@@ -581,26 +617,6 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                         if cleared_edge is not None or cleared_audio is not None:
                             with workspace_lock(paths):
                                 atomic_json(cursor_path, cursor)
-                        vision_ref = stage('vision', lambda: vision_audit(
-                            paths, plan_ref, detector,
-                            allow_vfr_approximate=allow_vfr_approximate))
-                        vision_body = load_stage(paths, vision_ref, product_id=pid,
-                                                 encoding_id=encoding)['body']
-                        visual_failures = [row for row in vision_body.get('variants', [])
-                                           if row.get('status') == 'REPAIRABLE']
-                        if visual_failures:
-                            repair_issues = [
-                                f"{row['variant_id']}人物画面比例超限：无人物估算"
-                                f"{row.get('no_person_ratio_estimate')}，近景估算"
-                                f"{row.get('closeup_duration_ratio_estimate')}；重组选段后复查。"
-                                for row in visual_failures]
-                            failure = record_repair_failure('vision', repair_issues)
-                            if failure:
-                                return failure
-                            continue
-                        if any(row.get('status') != 'PASS'
-                               for row in vision_body.get('variants', [])):
-                            raise CacheIdentityError('vision_uncertain_or_blocked_needs_evidence_repair')
                         break
                     else:
                         repair_issues = errors

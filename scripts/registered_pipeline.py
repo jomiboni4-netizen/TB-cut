@@ -521,6 +521,7 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
                 stage='plan', version=digest([rough_ref, asr_ref, fps, SENTENCE_CONTRACT,
                                                ASR_SCOPE_POLICY,
                                                'subtitle-text-nearby-token-edges-v3',
+                                               'asr-unresolved-cutpoint-review-v1',
                                                'owned-gap-local-audio-v1',
                                                duration_policy, editing_mode, editing_policy,
                                                'vfr-average-rate-approx-v2' if allow_vfr_approximate else 'cfr-only']),
@@ -538,35 +539,58 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
         start_window = _edge_window(asr['body']['windows'], source_file, float(start_cue['start']))
         end_window = _edge_window(asr['body']['windows'], source_file, float(end_cue['end']))
         from sentence_boundaries import locate_subtitle_edge
-        start_first, _, opening_similarity = locate_subtitle_edge(
-            start_window['words'], start_anchor, float(start_cue['start']))
-        _, end_last, ending_similarity = locate_subtitle_edge(
-            end_window['words'], end_anchor, float(end_cue['end']), ending=True)
-        start_word = start_window['words'][start_first]
-        end_word = end_window['words'][end_last]
-        key = lambda word: (float(word['start']), float(word['end']), str(word['text']))
-        # Only the two selected words and their immediate outer neighbors are
-        # needed for the edge proof. Different ASR windows may assign slightly
-        # different timestamps to the same interior word; do not splice those
-        # overlapping recognitions into a fake whole-clip transcript.
-        edge_context = [start_word, end_word]
-        if start_first:
-            edge_context.append(start_window['words'][start_first-1])
-        if end_last+1 < len(end_window['words']):
-            edge_context.append(end_window['words'][end_last+1])
-        words = sorted({key(word): dict(word) for word in edge_context}.values(),
-                       key=lambda word: (float(word['start']), float(word['end'])))
-        word_indices = {key(word): i for i, word in enumerate(words)}
-        first, last = word_indices[key(start_word)], word_indices[key(end_word)]
-        if first > last:
-            raise CacheIdentityError('asr_cut_neighborhood_order_invalid')
-        boundary = {'first_word_index': first, 'last_word_index': last,
-                    'opening_anchor_similarity': opening_similarity,
-                    'ending_anchor_similarity': ending_similarity,
-                    'opening_anchor_text': start_anchor, 'ending_anchor_text': end_anchor,
-                    'opening_cue': [float(start_cue['start']), float(start_cue['end'])],
-                    'ending_cue': [float(end_cue['start']), float(end_cue['end'])],
-                    'asr_scope': 'opening_and_ending_cut_neighborhoods_only'}
+        edge_failures = {}
+        try:
+            start_first, _, opening_similarity = locate_subtitle_edge(
+                start_window['words'], start_anchor, float(start_cue['start']))
+        except ValueError as exc:
+            if str(exc) not in ('sentence_local_text_not_found_expand_asr_window',
+                                'sentence_local_text_ambiguous',
+                                'sentence_edge_inside_asr_token_requires_local_audio'):
+                raise
+            edge_failures['opening'] = str(exc)
+        try:
+            _, end_last, ending_similarity = locate_subtitle_edge(
+                end_window['words'], end_anchor, float(end_cue['end']), ending=True)
+        except ValueError as exc:
+            if str(exc) not in ('sentence_local_text_not_found_expand_asr_window',
+                                'sentence_local_text_ambiguous',
+                                'sentence_edge_inside_asr_token_requires_local_audio'):
+                raise
+            edge_failures['ending'] = str(exc)
+        aligned = not edge_failures
+        if aligned:
+            start_word = start_window['words'][start_first]
+            end_word = end_window['words'][end_last]
+            key = lambda word: (float(word['start']), float(word['end']), str(word['text']))
+            # Keep only each selected edge and its immediate outer neighbor.
+            edge_context = [start_word, end_word]
+            if start_first:
+                edge_context.append(start_window['words'][start_first-1])
+            if end_last+1 < len(end_window['words']):
+                edge_context.append(end_window['words'][end_last+1])
+            words = sorted({key(word): dict(word) for word in edge_context}.values(),
+                           key=lambda word: (float(word['start']), float(word['end'])))
+            word_indices = {key(word): i for i, word in enumerate(words)}
+            first, last = word_indices[key(start_word)], word_indices[key(end_word)]
+            if first > last:
+                raise CacheIdentityError('asr_cut_neighborhood_order_invalid')
+            boundary = {'first_word_index': first, 'last_word_index': last,
+                        'opening_anchor_similarity': opening_similarity,
+                        'ending_anchor_similarity': ending_similarity,
+                        'opening_anchor_text': start_anchor, 'ending_anchor_text': end_anchor,
+                        'opening_cue': [float(start_cue['start']), float(start_cue['end'])],
+                        'ending_cue': [float(end_cue['start']), float(end_cue['end'])],
+                        'asr_scope': 'opening_and_ending_cut_neighborhoods_only',
+                        'cutpoint_status': 'ASR_EDGE_ESTIMATE'}
+        else:
+            words, first, last = [], None, None
+            boundary = {'opening_anchor_text': start_anchor, 'ending_anchor_text': end_anchor,
+                        'opening_cue': [float(start_cue['start']), float(start_cue['end'])],
+                        'ending_cue': [float(end_cue['start']), float(end_cue['end'])],
+                        'asr_scope': 'opening_and_ending_cut_neighborhoods_only',
+                        'cutpoint_status': 'ASR_EDGE_UNRESOLVED',
+                        'edge_failures': edge_failures}
         media = Path(sources[source_file]['video_path'])
         if source_file not in frame_rates:
             frame_rates[source_file] = source_clock(media, paths,
@@ -575,7 +599,34 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
                 raise CacheIdentityError('source_average_rate_outside_registered_timeline_rate')
         clock = frame_rates[source_file]
         clip_fps = clock.get('average_fps', clock['fps']) if allow_vfr_approximate else clock['fps']
-        lo, hi, edge_proof = bounded_edges(words, first, last, clip_fps)
+        if aligned:
+            try:
+                lo, hi, edge_proof = bounded_edges(words, first, last, clip_fps)
+            except ValueError as exc:
+                if str(exc) not in ('overlapping_asr_tokens_no_safe_sentence_edge',
+                                    'word_alignment_uncertain_needs_local_audio_review',
+                                    'word_alignment_interval_too_short'):
+                    raise
+                edge_failures['physical'] = str(exc)
+                aligned = False
+                words, first, last = [], None, None
+                boundary.update({'cutpoint_status': 'ASR_EDGE_UNRESOLVED',
+                                 'edge_failures': edge_failures})
+        if not aligned:
+            # Use the selected subtitle cue span only to build a provisional
+            # picture-audit plan. These timestamps are not a cutpoint PASS.
+            matching = [part for part in ranges if part['media_stem']+'.mp4' == source_file
+                        and part['start'] <= float(start_cue['start']) < part['end']
+                        and part['start'] < float(end_cue['end']) <= part['end']]
+            if not matching:
+                raise CacheIdentityError('unresolved_asr_edge_outside_confirmed_range')
+            part = matching[0]
+            low = max(float(start_cue['start']), float(part['start']))
+            high = min(float(end_cue['end']), float(part['end']))
+            lo, hi = math.floor(low*clip_fps), math.ceil(high*clip_fps)
+            if hi <= lo:
+                raise CacheIdentityError('unresolved_asr_edge_interval_invalid')
+            edge_proof = {}
         start, end = lo/clip_fps, hi/clip_fps
         if not any(part['media_stem']+'.mp4' == source_file and part['start'] <= lo/clip_fps < hi/clip_fps <= part['end'] for part in ranges):
             raise CacheIdentityError('refined_plan_outside_confirmed_range')
@@ -587,6 +638,11 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
                 'words': words, 'sentence_edges': edge_proof, 'transcript': text,
                 'source_subtitle_text': text,
                 'audio_boundary_verified': False,
+                'cutpoint_review': ({'status': 'REPAIRABLE', 'authority': 'asr_cutpoint_only',
+                                    'fallback': 'subtitle_cue_span_for_visual_audit',
+                                    'edge_failures': edge_failures} if not aligned else
+                                   {'status': 'PENDING_LOCAL_AUDIO_REVIEW',
+                                    'authority': 'asr_cutpoint_only'}),
                 'unit_id': f"{row['variant_id']}_{len(variants.get(row['variant_id'], []))+1}",
                 'audit': {'transcript': text, 'boundary': boundary}}
         variants.setdefault(row['variant_id'], []).append(clip)

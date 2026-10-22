@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from project_registry import digest
 
-CONTRACT = 'sentence-owned-edges-v4-caption-initial-substitution'
+CONTRACT = 'sentence-owned-edges-v5-asr-optional-for-vision'
 SELECTION_RULE = (
     '每个连续片段必须是完整原声句群。尤其每版第一段，必须查看原素材前文，'
     '确认不是上一句残尾、依赖回答或省略主语的承接句；字幕分行、标点和静音均不是独立句首证明。'
