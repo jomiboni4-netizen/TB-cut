@@ -88,7 +88,7 @@ def project_preflight(paths):
 
 
 def current_project(paths, resolve):
-    config = checked_project(paths, json.loads(paths.state_path.read_text()))
+    config = checked_project(paths, paths.load_state())
     manager = resolve.GetProjectManager()
     project = manager.GetCurrentProject()
     if not project or stable_id(project) != config['resolve_project_id']:

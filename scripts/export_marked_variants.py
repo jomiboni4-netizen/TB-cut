@@ -81,7 +81,7 @@ def main() -> None:
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
     output_dir = paths.runtime_argument(args.output_dir)
-    state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    state = paths.load_state()
     resolve = connect()
     if not resolve:
         raise SystemExit("未连接达芬奇")

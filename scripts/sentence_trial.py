@@ -46,7 +46,7 @@ class Trial:
             inputs=self.run['input_content_digest'],
             producer=digest({n: _sha256(Path(__file__).with_name(n)) for n in
                 ('sentence_trial.py', 'sentence_boundaries.py', 'final_quality_gate.py', 'refine_plans_v2.py',
-                 'audio_boundary_evidence.py')}),
+                 'audio_boundary_evidence.py', 'owned_audio_refinement.py')}),
             rules=_sha256(self.paths.repo_root/'PROJECT_RULES.md'))
 
     def event(self, stage, status, **extra):
@@ -178,7 +178,7 @@ class Trial:
 
     def build(self, selection, asr, index):
         from adaptive_vision import proven_clock
-        from refine_plans_v2 import audit_audio_start, refine_audio_end, normalize_physical_clips
+        from refine_plans_v2 import normalize_physical_clips
         from final_quality_gate import plan_errors
         sources = {s['source_stem']: s for s in index['sources']}
         units = {u['unit_id']: u for u in selection['units']}; clocks = {}; variants = []; errors = []
@@ -196,22 +196,22 @@ class Trial:
                 except ValueError as exc:
                     errors.append(dict(variant=v['variant_id'], unit=uid, reason=str(exc)))
                     continue
-                _, opening = audit_audio_start(media, lo/fps)
-                _, ending = refine_audio_end(media, lo/fps, hi/fps, src['duration'])
-                ending['risk'] = ending['risk'] or ending.get('end_extension_sec', 0) > 0
                 text = ''.join(x['text'] for x in w['words'][first:last+1])
                 clips.append(dict(unit_id=uid, source_file=media.name, source_start_frame=lo,
                     source_end_frame=hi, audio_start_frame=lo, audio_end_frame=hi, fps=fps,
                     duration_sec=(hi-lo)/fps, record_duration_frames=hi-lo, words=w['words'],
                     transcript=text, sentence_edges=proof, source_subtitle_text=u['text'],
                     previous_source_context=u['previous_context'], alignment_similarity=similarity,
-                    audio_boundary_verified=not opening['risk'] and not ending['risk'],
-                    audio_audit=dict(opening=opening, ending=ending), audit=dict(transcript=text)))
+                    audio_boundary_verified=False, audit=dict(transcript=text)))
             clips, _ = normalize_physical_clips(clips)
             variants.append(dict(variant_id=v['variant_id'], product_index=self.product, focus=v['focus'],
                 clips=clips, duration_seconds=sum(c['duration_sec'] for c in clips)))
         plan = dict(product=selection['product'], variants=variants, sentence_contract=CONTRACT,
                     clock_evidence=clocks, alignment_errors=errors, historical_semantic_inputs=[])
+        from owned_audio_refinement import refine as refine_owned_audio
+        plan, audio_review = refine_owned_audio(
+            plan, {Path(row['video_path']).name: Path(row['video_path']) for row in sources.values()})
+        plan['audio_refinement'] = audio_review
         plan['local_errors'] = plan_errors(plan)
         return plan
 
@@ -249,6 +249,22 @@ class Trial:
             selection = self.stage('selection', digest([data, product]), lambda: self.select(data['index'], product, locator))
             asr = self.stage('asr', digest(selection), lambda: self.asr(selection, data['index']))
             plan = self.stage('plan', digest([selection, asr]), lambda: self.build(selection, asr, data['index']))
+            audio_only = plan['local_errors'] == ['AUDIO_BOUNDARY_UNVERIFIED'] and not plan['alignment_errors']
+            if audio_only:
+                edges = [{'variant_id': variant['variant_id'], 'unit_id': clip.get('unit_id'),
+                          'edges': {name: value for name, value in
+                                    (clip.get('owned_audio_review', {}).get('edges') or {}).items()
+                                    if value.get('status') == 'REPAIRABLE'}}
+                         for variant in plan['variants'] for clip in variant['clips']
+                         if not clip.get('audio_boundary_verified')]
+                result = dict(status='REPAIRABLE_AUDIO_CUTPOINT', plan_digest=digest(plan),
+                    local_errors=plan['local_errors'], audio_refinement=plan.get('audio_refinement'),
+                    affected_edges=edges, semantic_rerun=False, selection_preserved=True,
+                    asr_preserved=True, person_audit='NOT_RUN', resolve_write=False,
+                    trial_seconds=time.time()-start, code_development_seconds=None)
+                atomic_json(self.folder/'AUDIO_CUTPOINT_REPAIR.json', result)
+                atomic_json(self.folder/'RESULT.json', result)
+                return
             if plan['local_errors'] or plan['alignment_errors']:
                 from sentence_trial_repair import run as repair_edges
                 repaired = self.stage('frame_safe_repair', digest([plan, asr, selection]),

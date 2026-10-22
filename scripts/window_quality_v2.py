@@ -39,7 +39,7 @@ def main() -> None:
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
-    state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    state = paths.load_state()
     video_inputs = [Path(path) for path in state.get("video_paths") or []]
     media_by_name = {
         media.name: media

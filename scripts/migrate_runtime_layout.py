@@ -49,7 +49,7 @@ def plan_proven(path: Path, product_id: int, coverage: dict, sources: set[str]) 
 
 
 def migration(paths: RuntimePaths, *, apply: bool = False, baseline_preflight: Path | None = None) -> dict:
-    state = json.loads(paths.state_path.read_text(encoding="utf-8"))
+    state = paths.load_state()
     active = {int(value) for value in state.get("batch", {}).get("product_ids") or []}
     sources = source_names(state)
     coverage_path = paths.cache_dir / "person_coverage_audit.json"

@@ -16,24 +16,25 @@ from pathlib import Path
 
 from index_subtitles import expand, parse_srt, media_duration
 from index_titles import parse_workbook, workbook_guards, build_model
-from project_registry import atomic_json, digest, folder_identity, workspace_lock
+from project_registry import atomic_json, digest, workspace_lock
 from runtime_paths import resolve_runtime_paths
 from runtime_meta import _sha256
-from semantic_evidence import FORBIDDEN, clean_cue, semantic_windows
+from semantic_evidence import FORBIDDEN, clean_cue
 from workbook_runtime import preferred_node
+from init_project import initialize as register_project
 from sentence_boundaries import SELECTION_RULE
 from mimo_responses import create_response, ResponseAPIError, MODEL
 from product_semantic_preview import parse_response
 
 
-VERSION = 'cold-continuous-v3-local-mixed-review'
+VERSION = 'cold-marked-range-v4-incremental-delivery'
 MAX_A_REQUESTS = 40
 MAX_A_SECONDS = 5400
 
 
 def load_run(repo, workspace):
     paths = resolve_runtime_paths(repo, workspace)
-    state = json.loads(paths.state_path.read_text())
+    state = paths.load_state()
     run = json.loads((paths.workspace_root / 'RUN.json').read_text())
     if state['batch']['batch_id'] != run['run_id'] or run['pipeline'] != VERSION:
         raise ValueError('cold_run_identity_mismatch')
@@ -42,7 +43,7 @@ def load_run(repo, workspace):
 
 def product_cache(paths, product_id):
     """Keep products in one batch while isolating mutable per-product outputs."""
-    state = json.loads(paths.state_path.read_text())
+    state = paths.load_state()
     if product_id not in state.get('batch', {}).get('product_ids', []):
         raise ValueError('product_outside_rerun_batch')
     folder = paths.cache_dir / 'products' / f'product_{product_id}'
@@ -60,7 +61,9 @@ def selected_inputs(input_state):
     if (not Path(inputs['title_path']).is_file()
             or not inputs['subtitle_paths'] or not inputs['video_paths']
             or any(not Path(path).exists() for key in ('subtitle_paths', 'video_paths') for path in inputs[key])
-            or not all(inputs['resolve'].get(k) for k in ('project_name', 'source_timeline', 'target_timeline'))):
+            or not all(inputs['resolve'].get(k) for k in
+                       ('project_name', 'source_timeline', 'target_timeline',
+                        'source_timeline_id', 'target_timeline_id'))):
         raise ValueError('selected_inputs_incomplete')
     return inputs
 
@@ -101,36 +104,40 @@ def init(repo, project_id, input_state):
     protected = {line[3:]: _sha256(root / line[3:]) for line in status.splitlines()
                  if (root / line[3:]).is_file()}
     atomic_json(paths.workspace_root / 'GIT_BASELINE.json', {'status': status, 'files': protected})
-    project_key = str(uuid.uuid5(uuid.NAMESPACE_URL, project_id + str(Path(inputs['title_path']).parent)))
-    config = {'schema_version': 2, 'project_key': project_key, 'resolve_project_id': project_id,
-              'material_folder': folder_identity(Path(inputs['title_path']).parent), 'inputs': inputs}
-    state = {'schema_version': 1, **inputs, 'project_root': str(root),
-             'project_identity': {'contract': 2, 'project_key': project_key,
-                                  'resolve_project_id': project_id, 'config_digest': digest(config)},
-             'batch': {'batch_id': run_id, 'product_ids': [], 'completed_product_ids': [], 'failed_product_ids': []},
-             'batch_overrides': {'skip_blank_titles': True, 'preserve_blank_row_indices': True},
-             'runtime': {'pipeline_version': VERSION, 'rule_version': VERSION, 'resolve_write_enabled': False}}
     parent_state = json.loads(Path(input_state).read_text())
+    product_ids = parent_state.get('batch', {}).get('product_ids', [])
+    state = register_project(paths, material_folder=Path(inputs['title_path']).parent,
+        resolve_project_id=project_id, title=inputs['title_path'], subtitles=inputs['subtitle_paths'],
+        videos=inputs['video_paths'], resolve_project=inputs['resolve']['project_name'],
+        source_timeline=inputs['resolve']['source_timeline'], target_timeline=inputs['resolve']['target_timeline'],
+        source_timeline_id=inputs['resolve'].get('source_timeline_id'),
+        target_timeline_id=inputs['resolve'].get('target_timeline_id'), batch_id=run_id,
+        products=product_ids, force=False)
+    project_key = state['project_identity']['project_key']
+    state['runtime'].update({'pipeline_version': VERSION, 'rule_version': VERSION,
+                             'resolve_write_enabled': False})
     frame_rates=inherited_frame_rates(parent_state,project_id,input_state)
     if frame_rates: state['runtime']['frame_rate_registration']=frame_rates
     test_binding = inherited_test_binding(parent_state,project_id)
     if test_binding:
         state['runtime']['test_timeline_binding'] = test_binding
-    atomic_json(paths.workspace_root / 'PROJECT_CONFIG.json', config)
-    atomic_json(paths.state_path, state)
+    paths.write_state(state)
     manifest = []
     for path in [Path(inputs['title_path']), *expand(inputs['subtitle_paths'], '.srt'), *expand(inputs['video_paths'], '.mp4')]:
         before = path.stat()
-        fingerprint = _sha256(path)
+        # Hash small semantic inputs during init. Video content hashes are
+        # deferred until Resolve write/readback readiness has passed.
+        fingerprint = _sha256(path) if path.suffix.lower() == '.srt' or path == Path(inputs['title_path']) else None
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise ValueError('source_changed_while_hashing')
-        manifest.append({'path': str(path), 'sha256': fingerprint, 'bytes': before.st_size, 'mtime_ns': before.st_mtime_ns})
+        manifest.append({'path': str(path), 'sha256': fingerprint, 'fingerprint_deferred': fingerprint is None,
+                         'bytes': before.st_size, 'mtime_ns': before.st_mtime_ns})
     run = {'run_id': run_id, 'project_key': project_key, 'pipeline': VERSION,
            'input_content_digest': digest(manifest), 'inputs': manifest, 'historical_semantic_inputs': [],
            'budgets': {'max_A_requests': MAX_A_REQUESTS, 'max_A_seconds': MAX_A_SECONDS,
                        'A_output_tokens': 12000, 'B_output_tokens': 8000, 'request_timeout': 240},
-           'status': 'INPUTS_FINGERPRINTED'}
+           'status': 'INPUTS_REGISTERED_WAITING_RESOLVE_PREFLIGHT'}
     atomic_json(paths.workspace_root / 'RUN.json', run)
     print(str(paths.workspace_root), flush=True)
     return paths
@@ -138,7 +145,49 @@ def init(repo, project_id, input_state):
 
 def index_and_locate(paths):
     start = time.perf_counter()
-    state = json.loads(paths.state_path.read_text()); run = json.loads((paths.workspace_root / 'RUN.json').read_text())
+    state = paths.load_state(); run = json.loads((paths.workspace_root / 'RUN.json').read_text())
+    preflight_path = paths.workspace_root / 'RESOLVE_PREFLIGHT.json'
+    if not preflight_path.is_file():
+        raise ValueError('resolve_write_readback_preflight_required_before_indexing')
+    preflight = json.loads(preflight_path.read_text())
+    if (preflight.get('project_id') != state['project_identity']['resolve_project_id']
+            or preflight.get('write_readback_capability') != 'incremental_target_append_black_gap_readback_v1'
+            or not preflight.get('source_timeline_id') or not preflight.get('target_timeline_id')
+            or preflight.get('source_timeline_id') == preflight.get('target_timeline_id')
+            or preflight.get('source_timeline_name') != state['resolve']['source_timeline']
+            or preflight.get('target_timeline_name') != state['resolve']['target_timeline']
+            or not preflight.get('authorization_ready') or not preflight.get('writer_ready')):
+        raise ValueError('resolve_write_readback_preflight_failed_before_indexing')
+    range_path = paths.workspace_root / 'delivery' / 'human_ranges.json'
+    if not range_path.is_file():
+        raise ValueError('current_run_human_ranges_missing_before_indexing')
+    range_doc = json.loads(range_path.read_text(encoding='utf-8'))
+    if not isinstance(range_doc.get('products'), list):
+        raise ValueError('current_run_human_ranges_invalid')
+    expected_ids = [int(value) for value in state['batch']['product_ids']]
+    range_rows = range_doc['products']
+    range_ids = [row.get('product_index') for row in range_rows]
+    if (set(range_ids) != set(expected_ids) or len(range_ids) != len(set(range_ids))
+            or any(row.get('confirmed_by') != '用户' or not row.get('decision_id')
+                   for row in range_rows)):
+        raise ValueError('current_run_human_ranges_do_not_match_batch')
+    range_by_id = {int(row['product_index']): row for row in range_rows}
+    range_sha256 = _sha256(range_path)
+    if any(row.get('fingerprint_deferred') for row in run['inputs']):
+        finalized = []
+        for row in run['inputs']:
+            path = Path(row['path'])
+            before = path.stat()
+            if (before.st_size, before.st_mtime_ns) != (row['bytes'], row['mtime_ns']):
+                raise ValueError('source_changed_before_ready_input_fingerprint')
+            finalized.append({**row, 'sha256': _sha256(path), 'fingerprint_deferred': False})
+            after = path.stat()
+            if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+                raise ValueError('source_changed_while_hashing')
+        run['inputs'] = finalized
+        run['input_content_digest'] = digest(finalized)
+        run['status'] = 'INPUTS_FINGERPRINTED_AFTER_RESOLVE_READINESS'
+        atomic_json(paths.workspace_root / 'RUN.json', run)
     parsed = parse_workbook(Path(state['title_path']), paths.repo_root, preferred_node())
     titles = build_model(Path(state['title_path']), parsed, workbook_guards(Path(state['title_path']), parsed['sheet']),
                          skip_blank_titles=True, preserve_blank_row_indices=True)
@@ -163,21 +212,57 @@ def index_and_locate(paths):
     index = {'run_id': run['run_id'], 'input_digest': run['input_content_digest'], 'sources': sources, 'cues': cues}
     atomic_json(paths.cache_dir / 'titles.json', titles)
     atomic_json(paths.cache_dir / 'subtitle_index.json', index)
-    rough = semantic_windows(index, titles['products'], before=35, after=65, cluster_gap=60)
-    scored = []
-    for product in rough['products']:
-        windows = product['windows']; seconds = sum(w['global_end']-w['global_start'] for w in windows)
-        terms = set(t for w in windows for t in w['distinctive_terms'])
-        matched = sum(w['matched_cue_count'] for w in windows)
-        if 90 <= seconds <= MAX_A_SECONDS and 1 <= len(windows) <= MAX_A_REQUESTS and len(terms) >= 2:
-            score = matched * (1-max((w['conflict_ratio'] for w in windows), default=1)) * min(4, len(terms))
-            if score > 0:
-                scored.append({'product_index': product['product_index'], 'title': product['title'], 'score': score,
-                               'seconds': seconds, 'matched_cues': matched, 'terms': sorted(terms), 'windows': windows})
-    scored.sort(key=lambda r: (-r['score'], r['seconds'], r['product_index']))
-    atomic_json(paths.cache_dir / 'fresh_locator.json', {'all_products': rough['products'], 'shortlist': scored,
-                                                        'elapsed_seconds': time.perf_counter()-start})
-    print(json.dumps([dict(r, windows=[{k:w[k] for k in ('source_stem','global_start','global_end','conflict_ratio')} for w in r['windows']]) for r in scored[:6]], ensure_ascii=False), flush=True)
+    source_by_stem = {row['source_stem']: row for row in sources}
+    source_order = {row['source_stem']: i for i, row in enumerate(sources)}
+    cues_by_stem = {}
+    for cue in cues:
+        cues_by_stem.setdefault(cue['source_stem'], []).append(cue)
+    title_by_id = {int(row['product_index']): row for row in titles['products']}
+    located = []
+    for product_id in expected_ids:
+        marked = range_by_id[product_id]
+        if product_id not in title_by_id:
+            raise ValueError('marked_range_product_missing_from_title_index')
+        left, right = marked.get('start'), marked.get('end')
+        if (not isinstance(left, dict) or not isinstance(right, dict)
+                or left.get('source_stem') not in source_by_stem
+                or right.get('source_stem') not in source_by_stem
+                or not isinstance(left.get('time'), (int, float))
+                or not isinstance(right.get('time'), (int, float))):
+            raise ValueError('marked_range_source_identity_invalid')
+        left_stem, right_stem = left['source_stem'], right['source_stem']
+        if source_order[left_stem] > source_order[right_stem]:
+            raise ValueError('marked_range_source_order_invalid')
+        windows = []
+        for source_index in range(source_order[left_stem], source_order[right_stem] + 1):
+            source = sources[source_index]
+            lo = float(left['time']) if source['source_stem'] == left_stem else 0.0
+            hi = float(right['time']) if source['source_stem'] == right_stem else float(source['duration'])
+            if not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo < hi <= source['duration'] + .05):
+                raise ValueError('marked_range_time_outside_source')
+            hi = min(hi, float(source['duration']))
+            matched = [cue for cue in cues_by_stem.get(source['source_stem'], [])
+                       if float(cue['end']) > lo and float(cue['start']) < hi]
+            windows.append({'source_stem': source['source_stem'],
+                'global_start': source['global_start'] + lo, 'global_end': source['global_start'] + hi,
+                'matched_cue_count': len(matched), 'conflict_ratio': 0.0,
+                'distinctive_terms': [], 'range_local_start': lo, 'range_local_end': hi})
+        located.append({'product_index': product_id, 'title': title_by_id[product_id]['title'],
+            'status': 'MARKED_RANGE_READY' if any(w['matched_cue_count'] for w in windows) else 'NO_CUES_IN_MARKED_RANGE',
+            'windows': windows, 'range_decision_id': marked['decision_id']})
+    if {row['product_index'] for row in located} != set(expected_ids):
+        raise ValueError('marked_range_product_coverage_mismatch')
+    ready = [row for row in located if row['status'] == 'MARKED_RANGE_READY']
+    atomic_json(paths.cache_dir / 'fresh_locator.json', {'all_products': located,
+        'shortlist': ready, 'range_source': 'current_run_human_ranges',
+        'range_manifest_sha256': range_sha256,
+        'resolve_preflight_sha256': _sha256(preflight_path),
+        'resolve_preflight_digest': digest({k: preflight[k] for k in
+            ('project_id', 'source_timeline_id', 'target_timeline_id', 'write_readback_capability')}),
+        'elapsed_seconds': time.perf_counter()-start})
+    print(json.dumps([{'product_index': row['product_index'], 'status': row['status'],
+        'windows': [{'source_stem': w['source_stem'], 'cue_count': w['matched_cue_count']}
+                    for w in row['windows']]} for row in located], ensure_ascii=False), flush=True)
 
 
 def paragraph_chunks(rows, target=130, maximum=210, overlap=8):
@@ -208,20 +293,33 @@ def paragraph_chunks(rows, target=130, maximum=210, overlap=8):
 
 
 def select(paths, product_id):
-    state = json.loads(paths.state_path.read_text()); run = json.loads((paths.workspace_root/'RUN.json').read_text())
+    state = paths.load_state(); run = json.loads((paths.workspace_root/'RUN.json').read_text())
     output = product_cache(paths, product_id)
     data = json.loads((paths.cache_dir/'fresh_locator.json').read_text())
+    range_path = paths.workspace_root / 'delivery' / 'human_ranges.json'
+    preflight_path = paths.workspace_root / 'RESOLVE_PREFLIGHT.json'
+    if (data.get('range_source') != 'current_run_human_ranges'
+            or data.get('range_manifest_sha256') != _sha256(range_path)
+            or data.get('resolve_preflight_sha256') != _sha256(preflight_path)):
+        raise ValueError('marked_range_or_resolve_preflight_candidate_source_stale')
     chosen = next(r for r in data['all_products'] if r['product_index']==product_id)
     titles=json.loads((paths.cache_dir/'titles.json').read_text()); product=next(p for p in titles['products'] if p['product_index']==product_id)
     index=json.loads((paths.cache_dir/'subtitle_index.json').read_text()); sources={s['source_stem']:s for s in index['sources']}
     paragraphs=[];coverage=[]
     for w in chosen['windows']:
         source=sources[w['source_stem']]; lo=w['global_start']-source['global_start'];hi=w['global_end']-source['global_start']
-        rows=[r for r in index['cues'] if r['source_stem']==w['source_stem'] and r['end']>lo and r['start']<hi]
+        rows=[r for r in index['cues'] if r['source_stem']==w['source_stem']
+              and r['start']>=lo and r['end']<=hi]
+        if not rows:
+            coverage.append({'source_stem':w['source_stem'],'start':lo,'end':hi,'cue_count':0,
+                             'status':'NO_COMPLETE_CUES_INSIDE_MARKED_RANGE'})
+            continue
         for chunk in paragraph_chunks(rows):
             paragraphs.append({'paragraph_id':f"{run['run_id']}:p{len(paragraphs)+1:02d}", 'source_alias':f"src{list(sources).index(w['source_stem'])+1:02d}",
-                               'source_stem':w['source_stem'], 'rows':chunk})
-        coverage.append({'source_stem':w['source_stem'],'start':rows[0]['start'],'end':rows[-1]['end'],'cue_count':len(rows)})
+                               'source_stem':w['source_stem'], 'rows':chunk,
+                               'allowed_range':{'start':lo,'end':hi}})
+        coverage.append({'source_stem':w['source_stem'],'start':lo,'end':hi,'cue_count':len(rows),
+                         'status':'CANDIDATE_CUES_READY'})
     if len(paragraphs)>MAX_A_REQUESTS:raise ValueError('all_candidate_coverage_exceeds_A_budget')
     # Batch membership remains fixed after random selection; outputs are product scoped.
     unique_rows={r['source_id']:r for paragraph in paragraphs for r in paragraph['rows']}
@@ -229,11 +327,14 @@ def select(paths, product_id):
     fully_removed=sum(not kept for kept,_ in cleaning.values())
     partial_review=sum(bool(kept) and ''.join(part['text'] for part in kept)!=unique_rows[uid]['text']
                        for uid,(kept,_) in cleaning.items())
-    atomic_json(output/'candidate_paragraphs.json',{'project_key':run['project_key'],'run_id':run['run_id'],'product':product,
+    result={'project_key':run['project_key'],'run_id':run['run_id'],'product':product,
         'paragraphs':paragraphs,'coverage':coverage,'all_fresh_locator_windows_included':True,
         'presemantic_removed_cues':fully_removed,'mixed_cues_needing_local_cutpoint_review':partial_review,
-        'outbound_policy':VERSION})
-    print(json.dumps({'product':product,'paragraph_count':len(paragraphs),'coverage':coverage},ensure_ascii=False))
+        'status':'CANDIDATES_READY' if paragraphs else 'NO_COMPLETE_CUES_INSIDE_MARKED_RANGE',
+        'outbound_policy':VERSION}
+    atomic_json(output/'candidate_paragraphs.json',result)
+    print(json.dumps({'product_index':product_id,'status':result['status'],
+                      'paragraph_count':len(paragraphs),'coverage':coverage},ensure_ascii=False))
 
 
 def stage_a_payload(paragraph, product, run):
@@ -320,6 +421,10 @@ def validate_unit(unit, paragraph, run, number):
     by_id={r['source_id']:r for r in paragraph['rows']};ids=unit.get('source_ids') or []
     if not ids or len(ids)!=len(set(ids)) or any(i not in by_id for i in ids):raise ValueError('unknown_or_reused_source_id')
     rows=[by_id[i] for i in ids]
+    allowed = paragraph.get('allowed_range') or {}
+    if (not isinstance(allowed.get('start'), (int, float)) or not isinstance(allowed.get('end'), (int, float))
+            or any(row['start'] < allowed['start'] or row['end'] > allowed['end'] for row in rows)):
+        raise ValueError('unit_outside_current_marked_range')
     if len({r['source_stem'] for r in rows})!=1:raise ValueError('multi_source_fake_continuity')
     ordinals=[r['ordinal'] for r in rows]
     if ordinals!=list(range(ordinals[0],ordinals[-1]+1)):raise ValueError('phrase_splice_or_reordered_source')
@@ -465,6 +570,12 @@ def main():
     elif args.operation=='A':
         output=product_cache(paths,args.product)
         document=json.loads((output/'candidate_paragraphs.json').read_text());accepted=[];rejected=[];request_failures=[];seen=set()
+        if not document.get('paragraphs'):
+            atomic_json(output/'stage_A_source_verified.json',{'run_id':run['run_id'],'units':[],
+                'source_rejected':[],'request_failures':[],'paragraphs_completed':0,'paragraphs_total':0,
+                'all_coverage_complete':True,'status':'NO_CANDIDATES_IN_MARKED_RANGE'})
+            print('A skipped: no complete subtitle cue inside the marked range',flush=True)
+            return
         for n,paragraph in enumerate(document['paragraphs'],1):
             payload=stage_a_payload(paragraph,document['product'],run)
             try:
@@ -501,6 +612,11 @@ def main():
     elif args.operation=='B':
         output=product_cache(paths,args.product)
         document=json.loads((output/'candidate_paragraphs.json').read_text())
+        if not document.get('paragraphs'):
+            atomic_json(output/'stage_B_selection.json',{'run_id':run['run_id'],'status':'BLOCKED',
+                'reason':'NO_CANDIDATES_IN_MARKED_RANGE','selected_variants':[]})
+            print('B blocked: no complete subtitle cues inside the marked range',flush=True)
+            return
         local=json.loads((output/'local_A_review.json').read_text())
         if local['run_id']!=run['run_id']:raise ValueError('local_A_wrong_run')
         eligible,withheld=eligible_for_stage_b(local['kept_units'])

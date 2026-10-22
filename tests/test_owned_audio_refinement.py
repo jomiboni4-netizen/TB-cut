@@ -35,5 +35,12 @@ class OwnedAudioTests(unittest.TestCase):
         self.assertEqual(frame,25)
         self.assertEqual(report['status'],'PASS_LOCAL_RISK_GATE')
 
+    def test_half_frame_tolerance_resolves_adjacent_asr_word_edge(self):
+        levels = [(.96,-18),(.98,-18),(1.,-18),(1.02,-18)]
+        frame, report = choose_edge(levels,25,25,1.005,1.01,frame_tolerance=.02)
+        self.assertEqual(frame,25)
+        self.assertEqual(report['legal_frame_bounds'],[25,25])
+        self.assertEqual(report['status'],'PASS_CONTINUOUS_SPEECH_WORD_GAP')
+
 
 if __name__=='__main__':unittest.main()

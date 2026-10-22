@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Preflight or explicitly publish human-confirmed ranges for the active batch."""
+"""Validate and publish human-confirmed or user-authorized semantic ranges."""
 from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,8 @@ def canonical_hash(value: dict) -> str:
 
 
 def verify_confirmation(row: dict) -> bool:
+    if verify_semantic_inference(row):
+        return True
     proof=row.get("human_confirmation")
     if not isinstance(proof,dict) or proof.get("schema_version")!=1 or proof.get("source")!="explicit_human_manifest":
         return False
@@ -49,6 +52,147 @@ def verify_confirmation(row: dict) -> bool:
     return row.get("boundary_provenance",{}).get("start",{}).get("kind")=="human_confirmed" and row.get("boundary_provenance",{}).get("end",{}).get("kind")=="human_confirmed"
 
 
+SEMANTIC_AUTHORITY = "user_directed_semantic_inference"
+
+
+def verify_semantic_inference(row: dict) -> bool:
+    proof = row.get("semantic_range_proof")
+    if not isinstance(proof, dict) or proof.get("schema_version") != 1 or proof.get("source") != SEMANTIC_AUTHORITY:
+        return False
+    decision = proof.get("decision")
+    if not isinstance(decision, dict) or canonical_hash(decision) != proof.get("decision_sha256"):
+        return False
+    if type(decision.get("product_index")) is not int or not isinstance(decision.get("authorization"), str):
+        return False
+    if not decision["authorization"].strip() or not isinstance(decision.get("title_anchors"), list) or not decision["title_anchors"]:
+        return False
+    for side in ("start", "end"):
+        point = decision.get(side)
+        boundary = row.get("boundary_provenance", {}).get(side, {})
+        if (not isinstance(point, dict) or set(point) != {"source_stem", "time"}
+                or not isinstance(point.get("source_stem"), str)
+                or type(point.get("time")) not in (int, float)
+                or boundary.get("kind") != SEMANTIC_AUTHORITY
+                or boundary.get("source_stem") != point["source_stem"]):
+            return False
+        if round(float(point["time"]), 3) != row.get(f"{side}_source_local"):
+            return False
+    if not isinstance(decision.get("start_anchor"), dict) or not isinstance(decision.get("end_anchor"), dict):
+        return False
+    if any(not isinstance(anchor, dict) or not all(isinstance(anchor.get(k), str) and anchor[k].strip()
+           for k in ("source_stem", "quote")) or type(anchor.get("time")) not in (int, float)
+           for anchor in [decision["start_anchor"], decision["end_anchor"], *decision["title_anchors"]]):
+        return False
+    return (row.get("range_basis") == SEMANTIC_AUTHORITY
+            and row.get("boundary_provenance", {}).get("start", {}).get("kind") == SEMANTIC_AUTHORITY
+            and row.get("boundary_provenance", {}).get("end", {}).get("kind") == SEMANTIC_AUTHORITY)
+
+
+def _validate_anchor(anchor, index, allowed_global, title_terms=None):
+    sources = {row["source_stem"]: row for row in index.get("sources", [])}
+    source = sources.get(anchor["source_stem"])
+    if not source:
+        raise RangeOverrideError("semantic_anchor_source_unknown")
+    local = float(anchor["time"])
+    global_point = float(source["global_start"]) + local
+    if not allowed_global[0] - 0.001 <= global_point <= allowed_global[1] + 0.001:
+        raise RangeOverrideError("semantic_anchor_outside_product_range")
+    quote = re.sub(r"\s+", "", anchor["quote"])
+    matched = any(cue["source_stem"] == anchor["source_stem"]
+                  and re.sub(r"\s+", "", str(cue.get("text", ""))) == quote
+                  and float(cue["start"]) - 0.01 <= local <= float(cue["end"]) + 0.01
+                  for cue in index.get("cues", []))
+    if not matched:
+        raise RangeOverrideError("semantic_anchor_not_in_current_subtitle_index")
+    if title_terms and not any(term.casefold() in quote.casefold() for term in title_terms):
+        raise RangeOverrideError("semantic_title_anchor_does_not_match_current_title")
+
+
+def validate_semantic_inferred_document(document, titles, index, product_ids=None, *, project_key=None, batch_id=None):
+    if document.get("range_authority") != SEMANTIC_AUTHORITY:
+        raise RangeOverrideError("semantic_range_authority_missing")
+    rows = document.get("products")
+    title_by_id = {r["product_index"]: r for r in titles}
+    expected = set(title_by_id) if product_ids is None else set(product_ids)
+    if not expected or not isinstance(rows, list) or {r.get("product_index") for r in rows} != expected or len(rows) != len(expected):
+        raise RangeOverrideError("semantic_range_product_set_mismatch")
+    sources = source_map(index)
+    from semantic_evidence import title_features
+    for row in rows:
+        pid = row["product_index"]
+        title = title_by_id.get(pid)
+        if not title or any(row.get(k) != title.get(k) for k in ("encoding_id", "title")):
+            raise RangeOverrideError("semantic_range_title_identity_mismatch")
+        if not verify_semantic_inference(row):
+            raise RangeOverrideError("semantic_range_proof_invalid")
+        proof = row["semantic_range_proof"]["decision"]
+        if proof.get("product_index") != pid or proof.get("project_key") != project_key or proof.get("batch_id") != batch_id:
+            raise RangeOverrideError("semantic_range_scope_mismatch")
+        for side in ("start", "end"):
+            point = proof[side]
+            if row.get(f"global_{side}") != global_time(point, sources):
+                raise RangeOverrideError("semantic_range_global_time_mismatch")
+            if row["boundary_provenance"][side] != {"kind": SEMANTIC_AUTHORITY, "source_stem": point["source_stem"]}:
+                raise RangeOverrideError("semantic_range_boundary_provenance_mismatch")
+        validate_range(row, sources)
+        bounds = (float(row["global_start"]), float(row["global_end"]))
+        terms = [term for term in title_features(title["title"]) if len(term) > 1]
+        _validate_anchor(proof["start_anchor"], index, bounds)
+        for anchor in proof["title_anchors"]:
+            _validate_anchor(anchor, index, bounds, terms)
+        _validate_anchor(proof["end_anchor"], index, bounds)
+    validate_global_ranges(rows)
+    ordered = sorted(rows, key=lambda r: r["product_index"])
+    if any(a["global_start"] > b["global_start"] for a, b in zip(ordered, ordered[1:])):
+        raise RangeOverrideError("semantic_product_order_conflict")
+
+
+def build_semantic_inferred_ranges(manifest, index, titles_doc, product_ids, *, project_key, batch_id):
+    if manifest.get("schema_version") != 1 or manifest.get("authority") != SEMANTIC_AUTHORITY:
+        raise RangeOverrideError("semantic_range_manifest_authority_invalid")
+    authorization = manifest.get("authorization")
+    if not isinstance(authorization, str) or not authorization.strip():
+        raise RangeOverrideError("semantic_range_user_authorization_missing")
+    titles = titles_doc.get("products")
+    sources = source_map(index)
+    title_by_id = {row["product_index"]: row for row in titles or []}
+    expected = set(product_ids)
+    decisions = manifest.get("products")
+    if not expected or not isinstance(decisions, list) or len(decisions) != len(expected):
+        raise RangeOverrideError("semantic_range_manifest_incomplete")
+    if {row.get("product_index") for row in decisions} != expected:
+        raise RangeOverrideError("semantic_range_manifest_scope_mismatch")
+    rows = []
+    for source_decision in decisions:
+        pid = source_decision["product_index"]
+        title = title_by_id.get(pid)
+        if not title:
+            raise RangeOverrideError("semantic_range_product_missing_from_titles")
+        decision = {"product_index": pid, "project_key": project_key, "batch_id": batch_id,
+                    "authorization": authorization, "start": source_decision["start"], "end": source_decision["end"],
+                    "start_anchor": source_decision["start_anchor"], "title_anchors": source_decision["title_anchors"],
+                    "end_anchor": source_decision["end_anchor"]}
+        start, end = global_time(decision["start"], sources), global_time(decision["end"], sources)
+        start_source = decision["start"]["source_stem"]
+        end_source = decision["end"]["source_stem"]
+        proof = {"schema_version": 1, "source": SEMANTIC_AUTHORITY,
+                 "decision": decision, "decision_sha256": canonical_hash(decision)}
+        row = {**title, "global_start": start, "global_end": end,
+               "product_range_duration": round(end-start, 3), "product_start_anchor": start,
+               "range_basis": SEMANTIC_AUTHORITY, "ranges": split_range(start, end, list(sources.values())),
+               "start_source_local": round(float(decision["start"]["time"]), 3),
+               "end_source_local": round(float(decision["end"]["time"]), 3),
+               "boundary_provenance": {"start": {"kind": SEMANTIC_AUTHORITY, "source_stem": start_source},
+                                       "end": {"kind": SEMANTIC_AUTHORITY, "source_stem": end_source}},
+               "semantic_range_proof": proof}
+        rows.append(row)
+    result = {"schema_version": 1, "range_authority": SEMANTIC_AUTHORITY,
+              "products": sorted(rows, key=lambda r: r["product_index"]),
+              "semantic_manifest_sha256": canonical_hash(manifest)}
+    validate_semantic_inferred_document(result, titles, index, expected, project_key=project_key, batch_id=batch_id)
+    return result
+
+
 def validate_confirmed_document(document: dict, titles: list[dict], index: dict, product_ids=None) -> None:
     rows=document.get("products")
     title_by_id={r["product_index"]:r for r in titles}
@@ -61,11 +205,15 @@ def validate_confirmed_document(document: dict, titles: list[dict], index: dict,
     if len(set(indexes))!=len(indexes) or set(indexes)!=expected_ids:
         raise RangeOverrideError("human_ranges_product_set_mismatch")
     if any(not verify_confirmation(row) for row in rows):
-        raise RangeOverrideError("human_confirmation_proof_missing_or_invalid")
+        raise RangeOverrideError("range_proof_missing_or_invalid")
     sources=source_map(index)
+    semantic_rows = []
     for row in rows:
         if any(row.get(k)!=title_by_id[row["product_index"]].get(k) for k in ("encoding_id","title")):
-            raise RangeOverrideError("human_range_title_identity_mismatch")
+            raise RangeOverrideError("range_title_identity_mismatch")
+        if verify_semantic_inference(row):
+            semantic_rows.append(row)
+            continue
         payload=row["human_confirmation"]["decision"]
         for side in ("start","end"):
             if row["boundary_provenance"][side]!={"kind":"human_confirmed","source_stem":payload[side]["source_stem"]}:
@@ -73,6 +221,9 @@ def validate_confirmed_document(document: dict, titles: list[dict], index: dict,
             if row[f"global_{side}"]!=global_time(payload[side],sources):
                 raise RangeOverrideError("human_confirmation_global_time_mismatch")
         validate_range(row,sources)
+    if semantic_rows:
+        validate_semantic_inferred_document({"range_authority": SEMANTIC_AUTHORITY, "products": semantic_rows},
+                                            titles, index, {r["product_index"] for r in semantic_rows})
     validate_global_ranges(rows)
 
 

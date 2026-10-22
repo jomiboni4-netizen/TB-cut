@@ -22,6 +22,25 @@ from runtime_meta import CacheIdentityError
 from resolve_write_v2 import load_products
 
 
+class PlanContractTests(unittest.TestCase):
+    def test_old_sentence_edge_plan_cannot_drive_cache_or_repair(self):
+        self.assertFalse(scheduler.current_plan_contract({'identity': {
+            'stage': 'plan', 'model_version': 'sentence-owned-edges-v2-frame-estimate'}}))
+        self.assertTrue(scheduler.current_plan_contract({'identity': {
+            'stage': 'plan', 'model_version': scheduler.SENTENCE_CONTRACT}}))
+
+    def test_worker_identity_retry_never_accepts_wrong_task(self):
+        task = {'task_digest': 'expected'}
+        wrong = {'result': {'task_digest': 'other', 'verdict': 'PASS'}}
+        correct = {'result': {'task_digest': 'expected', 'verdict': 'PASS'}}
+        with patch.object(codex_worker, 'launch', side_effect=[wrong, correct]) as launch:
+            self.assertIs(codex_worker.matching_outcome(task), correct)
+            self.assertEqual(launch.call_count, 2)
+        with patch.object(codex_worker, 'launch', return_value=wrong):
+            with self.assertRaisesRegex(CacheIdentityError, 'worker_response_identity_mismatch'):
+                codex_worker.matching_outcome(task)
+
+
 class SchedulerTests(unittest.TestCase):
     setUpBase=resume_fixtures.ProjectResumeTests.setUp
     register=resume_fixtures.ProjectResumeTests.register

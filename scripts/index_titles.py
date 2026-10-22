@@ -12,7 +12,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
-from runtime_meta import validate_cache, write_metadata
+from runtime_meta import CacheIdentityError, validate_cache, write_metadata
 from runtime_paths import resolve_runtime_paths
 from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 from workbook_runtime import preferred_node
@@ -110,9 +110,12 @@ def build_model(source: Path, parsed: dict, numeric_evidence: dict, *, skip_blan
     if not isinstance(rows, list) or not rows or any(not isinstance(row, list) for row in rows):
         raise TitlesError("titles_rows_invalid")
     headers = rows[0]
-    if any(headers.count(name) != 1 for name in ("编码 ID", "标题")):
+    # Current Taobao workbook uses the concise header "ID"; legacy registered
+    # workbooks use "编码 ID". Both identify the same product encoding field.
+    id_headers = [name for name in ("编码 ID", "ID") if headers.count(name) == 1]
+    if len(id_headers) != 1 or headers.count("标题") != 1:
         raise TitlesError("required_header_missing_or_duplicate")
-    id_col, title_col = headers.index("编码 ID"), headers.index("标题")
+    id_col, title_col = headers.index(id_headers[0]), headers.index("标题")
     products, placeholders, seen = [], [], set()
     for physical_row, row in enumerate(rows[1:], 2):
         value = row[id_col] if id_col < len(row) else None
@@ -142,7 +145,9 @@ def build_model(source: Path, parsed: dict, numeric_evidence: dict, *, skip_blan
         products.append({"product_index": product_index, "encoding_id": encoding, "title": title})
     if not products:
         raise TitlesError("titles_has_no_products")
-    model = {"schema_version": 2, "generator": "index_titles.py:v2", "source": str(source), "sheet": parsed["sheet"], "products": products}
+    # v4 adds the current Taobao workbook's exact "ID" header while retaining
+    # the legacy "编码 ID" contract. Bumping provenance invalidates old caches.
+    model = {"schema_version": 2, "generator": "index_titles.py:v4", "source": str(source), "sheet": parsed["sheet"], "products": products}
     if preserve_blank_row_indices:
         model["placeholders"] = placeholders
     return model
@@ -167,9 +172,13 @@ def _generate_locked(paths, node):
     source = Path(raw_source).expanduser().resolve()
     output = paths.upstream_cache_dir / 'titles.json'
     if snapshot.identity.get('schema_version') == 2 and output.exists():
-        validate_cache(paths, output, expected=snapshot.identity)
-        snapshot.check()
-        return output
+        try:
+            validate_cache(paths, output, expected=snapshot.identity)
+        except CacheIdentityError as exc:
+            print(f"标题索引身份或生成版本已过期，将从已登记工作簿重建：{exc}")
+        else:
+            snapshot.check()
+            return output
     parsed = parse_workbook(source, paths.repo_root, node)
     overrides = snapshot.state.get("batch_overrides") or {}
     skip_blank_titles = overrides.get("skip_blank_titles", False)
@@ -182,7 +191,7 @@ def _generate_locked(paths, node):
                         skip_blank_titles=skip_blank_titles,
                         preserve_blank_row_indices=preserve_blank_row_indices)
     if preserve_blank_row_indices:
-        model["generator"] = "index_titles.py:v3"
+        model["generator"] = "index_titles.py:v5"
     content = (json.dumps(model, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
     output = paths.upstream_cache_dir / "titles.json"
     with tempfile.TemporaryDirectory(prefix=".titles-", dir=paths.upstream_cache_dir) as temporary:

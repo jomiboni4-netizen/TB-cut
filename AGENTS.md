@@ -7,10 +7,12 @@ For every new Codex window or new task in this project:
 1. Read `AGENTS.md`.
 2. Read `PROJECT_RULES.md`.
 3. Read `PROJECT_STATE.template.json` for the schema. Treat root `PROJECT_STATE.json` as a legacy record only; never use it to select the active project, media, batch, or Resolve timeline.
-4. Before media analysis or Resolve action, identify the current Resolve project and use its one persistent local project record under `.cache/projects/<project_key>/PROJECT_STATE.json`. This record owns confirmed media/title/subtitle paths and source/target timeline binding. A batch workspace is temporary and may contain only a project reference, product range, progress, and batch artifacts; it must not become another project registration.
+4. Before media analysis or Resolve action, read the live stable Resolve project ID and use its one bound project workspace under `.cache/projects/<project_key>/` (`PROJECT_STATE.json` and `PROJECT_CONFIG.json`). The live Resolve project ID is the sole project authenticator; folder paths, file availability, project display names, and timeline bindings are configuration or safety checks, not project identity. New batch workspaces contain only `PROJECT_REF.json`, `BATCH_STATE.json`, and batch artifacts; media/title paths and dependencies load from the bound project workspace through `RuntimePaths.load_state()`. Never seed a new batch from an old workspace or root legacy state.
+   For future cutpoint work, read that project's `MANUAL_CUTPOINT_LESSONS.json` when present; treat it as observations from user edits, not a universal frame offset or an ASR PASS certificate.
 5. Run `python3 scripts/project_doctor.py --root . --workspace <workspace>` before destructive or Resolve-writing actions. Running the doctor without `--workspace` is structural-only and does not validate an active project.
-6. Before Resolve writing, run `python3 scripts/resolve_connection_doctor.py --root . --workspace <workspace>` outside the sandbox and confirm the live project and timeline identities match that workspace.
+6. Before Resolve writing, run `python3 scripts/resolve_connection_doctor.py --root . --workspace <workspace>` outside the sandbox and confirm the live stable Resolve project ID matches that workspace. Validate configured timeline IDs separately as write-target safety checks.
 7. Do not analyze media, call MiMo, or write Resolve until the applicable state and identity checks above have passed.
+8. For an editing batch, Codex must start with `scripts/taobao_scheduler.py` or `scripts/dudu_scheduler.py` according to the uniquely matched Resolve project mode. Run its `plan` command before `run`; use `diagnose` after a failure and resume only from its reported valid rollback point. Do not manually chain stage CLIs around the scheduler. A mode mismatch or reported unmigrated delivery stage is a real blocker, not permission to bypass the scheduler.
 
 Rule priority:
 
@@ -23,7 +25,7 @@ If a current user instruction conflicts with a persistent rule, obey the current
 - Resolve 连接统一走 `scripts/resolve_connection.py`；只读入口为 `scripts/resolve_connection_doctor.py`。遵循 `PROJECT_RULES.md` 的沙盒外运行、自动网络回退和重连诊断要求；不要另写仅测试本机的临时连接脚本。
 - Codex is the orchestrator and exception handler, not the default worker for bulk subtitle/media analysis.
 - Prefer local scripts/models whenever they can complete a task reliably.
-- MiMo is an authorized semantic reviewer/selector, not the main conversation model and not the final hard-rule authority.
+- Codex owns all semantic understanding, candidate selection, and semantic review for editing tasks. Do not call MiMo for editing semantics; only change this persistent rule after the user explicitly asks to revise it.
 - Local hard rules have final veto power before Resolve write.
 - Resolve source timeline is read-only. Only the explicitly configured target timeline may be written.
 
@@ -53,23 +55,10 @@ Treat phrases such as “这次 / 这一批 / 先” as batch-only:
 - Before product selection, resolve the live project name through `scripts/project_editing_modes.py`; use only the matching mode's input-range, duration, variant-count, and close-up policies. Ambiguous/unmatched names are blockers.
 - Missing path/state is a blocking configuration error; do not guess.
 
-## 5. Data sent to MiMo
+## 5. External semantic services
 
-Long-term authorization covers only locally pre-cleaned:
-- product title
-- candidate subtitle text
-- subtitle timecodes
-- failure reasons
-- variant/repair summaries
-
-Do not send by default:
-- video/audio
-- whole raw SRT
-- whole ASR transcript
-- cookies/tokens/passwords
-- unrelated local identifiers
-
-Use request fingerprint + cache. Identical MiMo requests must not be resent.
+- Do not send editing content to MiMo or another external semantic-review service. Codex performs semantic understanding and review locally within the project workflow.
+- This prohibition covers product titles, candidate subtitles, timecodes, failure reasons, repair summaries, and media descriptions.
 
 ## 6. Hard stop conditions
 

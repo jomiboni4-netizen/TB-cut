@@ -17,54 +17,49 @@ from runtime_publication import BuildSnapshot, generator_lock, publish_pair
 from runtime_meta import metadata_path
 from apply_range_overrides_v2 import signature, source_map, validate_global_ranges, validate_range
 from publish_confirmed_ranges import validate_confirmed_document
-from semantic_evidence import FORBIDDEN, clean_cue
+from semantic_evidence import clean_cue
 
 
-def build_wide_candidates(cues: list[dict], stem: str, title: str) -> tuple[list[dict], list[dict]]:
-    """Keep useful clauses from mixed cues; preserve source references for audit."""
-    kept_runs: list[list[dict]] = []
-    removed: list[dict] = []
-    current: list[dict] = []
-    for index, cue in enumerate(cues):
-        cue_ref = f"{stem}:{index + 1}"
-        kept, excluded = clean_cue(cue, cue_ref)
-        removed.extend({**row, "text": cue.get("text"), "source_stem": stem} for row in excluded)
-        if not kept:
-            if current:
-                kept_runs.append(current)
-                current = []
+def build_wide_candidates(cues: list[dict], stem: str, title: str,
+                          permitted_range: dict | None = None) -> tuple[list[dict], list[dict]]:
+    """Keep original subtitle wording for semantic review; annotate forbidden clauses."""
+    if not cues:
+        return [], []
+    rows, annotations = [], []
+    ordered = sorted(cues, key=lambda item: (float(item["start"]), float(item["end"])))
+    lower = float(permitted_range["start"]) if permitted_range else min(float(c["start"]) for c in ordered)
+    upper = float(permitted_range["end"]) if permitted_range else max(float(c["end"]) for c in ordered)
+    for index, cue in enumerate(ordered, 1):
+        cue_ref = f"{stem}:{index}"
+        _cleaned, excluded = clean_cue(cue, cue_ref)
+        annotations.extend({**row, "source_stem": stem} for row in excluded)
+        start, end = float(cue["start"]), float(cue["end"])
+        if end <= lower or start >= upper:
             continue
-        for part in kept:
-            current.append({**cue, **part, "source_stem": stem})
-    if current:
-        kept_runs.append(current)
-
-    candidates: list[dict] = []
+        rows.append({**cue, "cue_ref": cue_ref, "source_stem": stem,
+                     "context_only": start < lower or end > upper})
+    if not rows:
+        return [], annotations
+    text = "".join(str(row.get("text") or "") for row in rows)
     title_terms = [term for term in re.split(r"[/\s]+", title or "") if len(term) >= 2]
-    for index, run in enumerate(kept_runs, 1):
-        start, end = float(run[0]["start"]), float(run[-1]["end"])
-        text = "".join(str(row.get("text") or "") for row in run)
-        candidates.append({
-            "candidate_id": f"s{stem}_wide_{index:03d}",
-            "source_file": f"{stem}.mp4",
-            "time_range": {"start": round(start, 3), "end": round(end, 3)},
-            "asr_text": text,
-            "local_title_matches": [term for term in title_terms if term in text],
-            "subtitle": [
-                {"start": float(row["start"]), "end": float(row["end"]), "text": str(row["text"]),
-                 "cue_ref": row.get("cue_ref"),
-                 "needs_cutpoint_check": bool(row.get("needs_cutpoint_check")),
-                 "source_cue_ref": row.get("source_cue_ref")}
-                for row in run
-            ],
-            "semantic_boundary": {
-                "start_reason": "product_range_start" if index == 1 else "after_forbidden_content",
-                "end_reason": "product_range_end" if index == len(kept_runs) else "forbidden_content",
-                "duration_sec": round(end - start, 3),
-                "standalone_candidate": False,
-            },
-        })
-    return candidates, removed
+    start = max(lower, min(float(row["start"]) for row in rows))
+    end = min(upper, max(float(row["end"]) for row in rows))
+    candidate = {
+        "candidate_id": f"s{stem}_wide_{round(start * 1000):010d}_{round(end * 1000):010d}",
+        "source_file": f"{stem}.mp4",
+        "time_range": {"start": round(start, 3), "end": round(end, 3)},
+        "asr_text": text,
+        "local_title_matches": [term for term in title_terms if term in text],
+        "forbidden_annotations": annotations,
+        "subtitle": [{"start": float(row["start"]), "end": float(row["end"]),
+                      "text": str(row["text"]), "cue_ref": row.get("cue_ref"),
+                      "needs_cutpoint_check": bool(row.get("needs_cutpoint_check")),
+                      "source_cue_ref": row.get("source_cue_ref"),
+                      "context_only": bool(row.get("context_only"))} for row in rows],
+        "semantic_boundary": {"start_reason": "product_range_start", "end_reason": "product_range_end",
+                              "duration_sec": round(end-start, 3), "standalone_candidate": False},
+    }
+    return [candidate], annotations
 
 
 def validate_accepted_ranges(document, meta, titles, index, product_ids):
@@ -92,18 +87,24 @@ def validate_accepted_ranges(document, meta, titles, index, product_ids):
     return document
 
 
-def expanded_request(product, candidates, removed, range_digest):
+def expanded_request(product, candidates, removed, range_digest, editing_mode, editing_policy):
     duration=round(float(product["global_end"])-float(product["global_start"]),3)
     rules={"product_title":product["title"],"product_index":product["product_index"],
            "encoding_id":product["encoding_id"],"phase":"完整商品范围宽候选池语义选择",
            "requirements":[
-             "仅在已验证的当前商品区间内选择","每条成片严格大于45秒且小于60秒",
+             "仅在已验证的当前商品区间内选择",
+             f"每条成片严格大于{editing_policy['duration_exclusive_seconds'][0]}秒且小于{editing_policy['duration_exclusive_seconds'][1]}秒",
              "候选不限长度，允许从长语义块内部选择完整句群，不可截断依赖","每条开头独立、结尾完整",
-             "禁止价格、优惠、抽奖、链接号和直播流程话术","不同版本源时间零重叠且口播语义不重复",
-             "仅 MiMo 负责语义选择；不得修改商品范围、决定物理切点或控制 Resolve"]}
+             f"目标时长约{editing_policy.get('target_duration_seconds', editing_policy['duration_exclusive_seconds'][1])}秒；完整自然语义优先于贴近目标时长",
+             f"目标版本数为{editing_policy['target_variant_count']}；仅按项目模式允许时，且完整候选池耗尽后才可减少",
+             "保留完整字幕语境并标注禁用话术；理解后避开禁用片段，不得把它剪入成片",
+             "不同版本源时间零重叠且口播语义不重复",
+             "输出卖点清单及其候选编号、逐字原文证据；不得修改商品范围、决定物理切点或控制 Resolve"]}
     pool_duration=round(sum(float(r["time_range"]["end"])-float(r["time_range"]["start"]) for r in candidates),3)
-    return {"schema_version":1,"pipeline_version":"2.1","product_index":product["product_index"],
-            "rules":rules,"model":"mimo-v2.6-pro","product_range":{"start":product["global_start"],
+    rules["editing_mode"] = editing_mode
+    rules["editing_policy"] = editing_policy
+    return {"schema_version":2,"pipeline_version":"2.2","product_index":product["product_index"],
+            "rules":rules,"model":"codex","product_range":{"start":product["global_start"],
             "end":product["global_end"],"duration":duration,"basis":product.get("range_basis")},
             "product_range_sha256":range_digest,"candidates":candidates,"local_forbidden_cues":removed,
             "candidate_pool_summary":{"segment_count":len(candidates),"duration":pool_duration,
@@ -129,6 +130,9 @@ def build_requests(paths, product_ids):
         if set(ranges)!=set(batch_ids):raise CacheIdentityError("accepted_range_product_set_incomplete")
         if not requested.issubset(ranges):raise ValueError("unknown_or_missing_product_range")
         source_rows={r["source_stem"]:r for r in index["sources"]}
+        from project_editing_modes import resolve_editing_mode
+        editing_mode, editing_policy = resolve_editing_mode(
+            (snapshot.state.get("resolve") or {}).get("project_name"))
 
         cues=index["cues"];by_source={}
         for cue in cues:by_source.setdefault(str(cue["source_stem"]),[]).append(cue)
@@ -143,12 +147,16 @@ def build_requests(paths, product_ids):
                 for source_range in product["ranges"]:
                     stem=str(source_range["media_stem"])
                     if stem not in source_rows:raise CacheIdentityError("accepted_range_source_unknown")
+                    approximate = editing_mode == "dudu_marked_range"
                     source_cues=[cue for cue in by_source.get(stem,[])
-                        if float(cue["start"])>=float(source_range["start"])
-                        and float(cue["end"])<=float(source_range["end"])]
-                    kept,rejected=build_wide_candidates(source_cues,stem,title["title"])
+                        if float(cue["end"])>float(source_range["start"])
+                        and float(cue["start"])<float(source_range["end"])
+                        and (approximate or (float(cue["start"])>=float(source_range["start"])
+                        and float(cue["end"])<=float(source_range["end"])))]
+                    kept,rejected=build_wide_candidates(source_cues,stem,title["title"],
+                        permitted_range=source_range if approximate else None)
                     candidates.extend(kept);removed.extend(rejected)
-                request=expanded_request(product,candidates,removed,range_digest)
+                request=expanded_request(product,candidates,removed,range_digest,editing_mode,editing_policy)
                 output=paths.cache_dir/f"product_{pid:02d}_rough"/"codex_expanded_request.json"
                 output.parent.mkdir(parents=True,exist_ok=True)
                 target=temp/f"product_{pid:02d}_codex_expanded_request.json"

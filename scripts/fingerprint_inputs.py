@@ -21,7 +21,7 @@ def main():
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
     expected_identity(paths)  # Registered downstream migration is required before I/O.
-    state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    state = paths.load_state()
     input_paths = []
     if state.get("title_path"): input_paths.append(state["title_path"])
     input_paths += state.get("subtitle_paths") or []

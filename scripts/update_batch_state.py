@@ -10,8 +10,8 @@ from runtime_meta import CacheIdentityError
 
 def reconcile(paths):
     with workspace_lock(paths):
-        state_bytes = paths.state_path.read_bytes()
-        state = json.loads(state_bytes)
+        state_bytes = paths.state_snapshot_bytes()
+        state = paths.load_state()
         checked_project(paths, state)
         rows = resume(paths)
         batch = state['batch']
@@ -22,11 +22,11 @@ def reconcile(paths):
                                              for status in sorted({r['status'] for r in rows.values()})}
         state.setdefault('runtime', {})['checkpoint_revision'] = read_ledger(paths)['revision']
         def check():
-            if paths.state_path.read_bytes() != state_bytes or resume(paths) != rows:
+            if paths.state_snapshot_bytes() != state_bytes or resume(paths) != rows:
                 raise CacheIdentityError('progress_inputs_changed_before_state_publication')
             if read_ledger(paths)['revision'] != state['runtime']['checkpoint_revision']:
                 raise CacheIdentityError('checkpoint_revision_conflict')
-        atomic_json(paths.state_path, state, before_commit=check)
+        paths.write_state(state, before_commit=check)
         return rows
 
 
