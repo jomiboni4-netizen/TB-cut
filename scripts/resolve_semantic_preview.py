@@ -87,6 +87,7 @@ def load_preview_products(paths, variants: dict[int, list[str]]):
 ASR_CUTPOINT_REASONS = (
     "sentence_", "asr_text_edge_", "asr_cut_", "word_alignment_", "overlapping_asr_tokens_",
     "audio_cutpoint_", "audio_boundary_", "vfr_exact_mapping_not_integrated",
+    "asr_cutpoint_requires_manual_review",
 )
 
 
@@ -113,7 +114,7 @@ def load_rough_preview_products(paths, variants: dict[int, list[str]], *, allow_
         if not cursor_path.is_file():
             raise CacheIdentityError(f"preview_cursor_missing:{pid}")
         cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
-        if cursor.get("plan") or not all(cursor.get(name) for name in ("rough", "semantic_review", "asr")):
+        if not all(cursor.get(name) for name in ("rough", "semantic_review", "asr")):
             raise CacheIdentityError(f"preview_pre_asr_stage_set_invalid:{pid}")
         rough_ref, semantic_ref = cursor["rough"], cursor["semantic_review"]
         rough = load_stage(paths, rough_ref, product_id=pid)
@@ -291,10 +292,12 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
 
     existing_custom = {row.get("customData", "") for row in (target.GetMarkers() or {}).values()
                        if isinstance(row, dict)}
+    new_markers = []
     for marker in markers:
         marker["custom_data"] = f"tb_cut_product_start:{marker['encoding_id']}"
-        if marker["custom_data"] in existing_custom:
-            raise SystemExit("preview_marker_duplicate")
+        if marker["custom_data"] not in existing_custom:
+            new_markers.append(marker)
+    markers = new_markers
     if not append_infos:
         raise SystemExit("preview_append_plan_empty")
     if check_only:
@@ -418,7 +421,7 @@ def recover_manual_cutpoint_preview(paths, transaction, transaction_path, output
             or source.GetName() != state["resolve"]["source_timeline"]):
         raise SystemExit("manual_preview_recovery_timeline_mismatch")
     expected, markers = transaction.get("expected"), transaction.get("markers")
-    if not isinstance(expected, list) or not expected or not isinstance(markers, list) or not markers:
+    if not isinstance(expected, list) or not expected or not isinstance(markers, list):
         raise SystemExit("manual_preview_recovery_plan_missing")
     before = transaction.get("target_before")
     if not isinstance(before, dict) or not snapshot_preserved(before, resolve_snapshot(target)):
@@ -832,7 +835,7 @@ def recover_markers(paths):
 
 
 def label_product_markers(paths, *, check_only=False):
-    """Standardize product markers as blue ID names with sequence/title notes."""
+    """Rename ID-only product markers to ID plus title, preserving all other fields."""
     from registered_pipeline import inputs
 
     state = paths.load_state()
@@ -871,18 +874,18 @@ def label_product_markers(paths, *, check_only=False):
         if custom in matched_custom:
             raise SystemExit("product_marker_label_duplicate_encoding_id:" + encoding_id)
         matched_custom.add(custom)
-        expected_note = f"商品{int(product['product_index'])}｜{product['title']}"
-        if (marker.get("color") != "Blue" or marker.get("name") != encoding_id
-                or marker.get("note") != expected_note):
+        expected_name = f"{encoding_id}｜{product['title']}"
+        if marker.get("name") == encoding_id:
             updates.append({"frame": int(frame), "encoding_id": encoding_id,
                             "product_index": int(product["product_index"]),
-                            "note": expected_note, "custom_data": custom,
+                            "name": expected_name, "custom_data": custom,
                             "previous": {key: marker.get(key) for key in ("color", "name", "note", "duration")}})
     if not matched_custom:
         raise SystemExit("product_marker_label_no_registered_markers_found")
     summary = {"status": "PREFLIGHT_PASS" if check_only else "READY",
                "target_timeline": target.GetName(), "registered_markers": len(matched_custom),
-               "markers_to_update": len(updates),
+               "markers_to_update": len(updates), "updated_fields": ["name"],
+               "name_format": "ID｜title",
                "products": [row["product_index"] for row in updates]}
     if check_only or not updates:
         if not updates:
@@ -908,6 +911,7 @@ def label_product_markers(paths, *, check_only=False):
     transaction = {"status": "STARTED", "project_id": stable_id(project),
                    "target_timeline_id": stable_id(target), "source_timeline_id": stable_id(source),
                    "backup": str(backup), "updates": updates,
+                   "operation": "rename_only_id_names_to_id_plus_title_v1",
                    "target_before": before[stable_id(target)],
                    "source_before": before[stable_id(source)]}
     atomic_json(transaction_path, transaction)
@@ -916,8 +920,11 @@ def label_product_markers(paths, *, check_only=False):
         atomic_json(transaction_path, transaction)
         if not target.DeleteMarkerByCustomData(row["custom_data"]):
             raise SystemExit("product_marker_label_delete_failed_inspect_transaction")
-        if not target.AddMarker(row["frame"] - int(target.GetStartFrame()), "Blue",
-                                row["encoding_id"], row["note"], 1, row["custom_data"]):
+        previous = row["previous"]
+        if not target.AddMarker(row["frame"] - int(target.GetStartFrame()),
+                                previous.get("color") or "Blue", row["name"],
+                                previous.get("note") or "", previous.get("duration") or 1,
+                                row["custom_data"]):
             raise SystemExit("product_marker_label_add_failed_inspect_transaction")
     if not manager.SaveProject():
         raise SystemExit("product_marker_label_save_failed_inspect_transaction")
@@ -935,8 +942,11 @@ def label_product_markers(paths, *, check_only=False):
     for row in updates:
         offset = row["frame"] - int(target.GetStartFrame())
         marker = current.get(offset, current.get(str(offset), {})) or {}
-        if (marker.get("customData") != row["custom_data"] or marker.get("color") != "Blue"
-                or marker.get("name") != row["encoding_id"] or marker.get("note") != row["note"]):
+        previous = row["previous"]
+        if (marker.get("customData") != row["custom_data"] or marker.get("name") != row["name"]
+                or marker.get("color") != previous.get("color")
+                or marker.get("note") != previous.get("note")
+                or marker.get("duration") != previous.get("duration")):
             errors.append("product_marker_label_readback_failed:" + row["encoding_id"])
     updated_ids = {row["custom_data"] for row in updates}
     before_other = {str(offset): marker for offset, marker in marker_map.items()

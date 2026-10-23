@@ -15,7 +15,8 @@ from product_checkpoints import (current_range_path, load_stage, read_ledger, re
 from final_quality_gate import (semantic_selection_task, publish_semantic_review,
                                 import_final_review, approved_product)
 from codex_worker import execute
-from registered_pipeline import (inputs, candidates, selection_task, rough_selection, local_asr, physical_plan, vision_audit)
+from registered_pipeline import (inputs, candidates, selection_task, rough_selection, local_asr,
+                                 physical_plan, vision_audit, visual_repair_samples)
 from compute_metrics import Metrics, scope, span, count
 from sentence_boundaries import CONTRACT as SENTENCE_CONTRACT
 
@@ -301,6 +302,14 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
             repair_rounds = 0
             if repair_limit < 1 or repair_attempts < 0:
                 raise CacheIdentityError('repair_attempt_state_invalid')
+            total_repair_limit = repair_limit * 3
+            if repair_attempts >= total_repair_limit:
+                checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
+                           reason='total_repair_limit_reached')
+                return {'product_id': pid, 'status': 'REPAIRABLE',
+                        'reason': 'total_repair_limit_reached',
+                        'repair_attempts': repair_attempts,
+                        'total_repair_limit': total_repair_limit}
             if (last_repair_key and repair_issues
                     and int(repair_attempts_by_key.get(last_repair_key, 0)) >= repair_limit):
                 checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
@@ -340,11 +349,12 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                     atomic_json(cursor_path, cursor)
                 checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
                            reason=','.join(issues)[:180])
-                if (repair_rounds >= repair_limit
+                if (repair_rounds >= repair_limit or repair_attempts >= total_repair_limit
                         or repair_attempts_by_key[repair_key] >= repair_limit):
                     return {'product_id': pid, 'status': 'REPAIRABLE', 'errors': issues,
                             'repair_attempts': repair_attempts, 'repair_limit_reached': True,
-                            'same_failure_limit_reached': repair_attempts_by_key[repair_key] >= repair_limit}
+                            'same_failure_limit_reached': repair_attempts_by_key[repair_key] >= repair_limit,
+                            'total_repair_limit_reached': repair_attempts >= total_repair_limit}
                 return None
             while True:
                 current_repair_attempt = repair_attempts
@@ -398,9 +408,17 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                                 continue
                             if previous_selected_ranges:
                                 break
+                    visual_samples = []
+                    if repair_issues and all('人物画面比例超限' in str(issue) for issue in repair_issues) and cursor.get('vision'):
+                        prior_vision = load_stage(paths, cursor['vision'], product_id=pid,
+                                                  encoding_id=encoding)
+                        visual_samples = visual_repair_samples(prior_vision['body'])
+                    if repair_issues and all('人物画面比例超限' in str(issue) for issue in repair_issues) and not visual_samples:
+                        raise CacheIdentityError('visual_repair_samples_missing')
                     task = selection_task(paths, candidate_ref, issues=repair_issues,
                                           repair_attempt=current_repair_attempt, semantic_map=semantic_map,
-                                          previous_selected_ranges=previous_selected_ranges)
+                                          previous_selected_ranges=previous_selected_ranges,
+                                          visual_samples=visual_samples)
                     task_path = paths.project_records_dir / 'tasks' / f'{task["task_digest"]}.json'
                     with workspace_lock(paths):
                         atomic_json(task_path, {'status': 'REVIEW_PENDING', 'task': task})
@@ -447,7 +465,8 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                         rough_ref = stage('rough', lambda: rough_selection(
                             paths, candidate_ref, receipt, issues=repair_issues,
                             repair_attempt=current_repair_attempt, semantic_map=semantic_map,
-                            previous_selected_ranges=previous_selected_ranges))
+                            previous_selected_ranges=previous_selected_ranges,
+                            visual_samples=visual_samples))
                         if cursor.pop('selection_repair_context', None) is not None:
                             with workspace_lock(paths):
                                 atomic_json(cursor_path, cursor)

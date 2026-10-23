@@ -1,0 +1,91 @@
+{
+  "project": "20260701-淘宝切片",
+  "timeline": "测试",
+  "fps": 30.0,
+  "source": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+  "destination_tracks": {
+    "video": 2,
+    "audio": 2
+  },
+  "record_start_frame": 0,
+  "record_end_frame": 5514,
+  "groups": [
+    {
+      "id": "p2-v1",
+      "product": "品2",
+      "title": "竹节冰蓝+棉亚麻氨纶",
+      "record_start_frame": 0,
+      "record_end_frame": 1787,
+      "duration_seconds": 59.57,
+      "span_count": 2,
+      "spans": [
+        {
+          "source_start_frame": 50108,
+          "source_end_frame": 50557,
+          "record_start_frame": 0,
+          "record_end_frame": 449,
+          "text": "一个讲解 首先我们的这个 蓝色 主杰冰蓝色 它的一个面料 是棉 加亚麻 还有安伦 这样子的一个 面料的一个配比 所以我们可以往前走一点点 我们的 莫姨可以往前走一点"
+        },
+        {
+          "source_start_frame": 50600,
+          "source_end_frame": 51938,
+          "record_start_frame": 449,
+          "record_end_frame": 1787,
+          "text": "大家可以看一下这个 这个颜色 因为它里面是有到 亚麻的一个 魂放的一个面料的 所以说你会看到 它里面有到一些 这种 这种就是 主杰 主杰的那种感觉 对 然后你们可以看到 它这个版型 它是那种 有一点你很 牙皮的直捅的 它版型就是那种 比较经典的直捅的 就是从你的 前面阵身 然后直接一个 就是微微的 稍微带一点点幅度 不是很夸张的 中低腰的一条直捅 是的 然后你们可以看到 就是这个裤子 它前面两个口袋 后面也是两个 四方形 四方方的这样子的 一个口袋 为什么叫前口袋 因为它跟 我们市面上 见到的这种口袋 是完全不一样的"
+        }
+      ]
+    },
+    {
+      "id": "p2-v2",
+      "product": "品2",
+      "title": "直筒版型+前口袋设计",
+      "record_start_frame": 1937,
+      "record_end_frame": 3571,
+      "duration_seconds": 54.47,
+      "span_count": 1,
+      "spans": [
+        {
+          "source_start_frame": 50600,
+          "source_end_frame": 52234,
+          "record_start_frame": 1937,
+          "record_end_frame": 3571,
+          "text": "大家可以看一下这个 这个颜色 因为它里面是有到 亚麻的一个 魂放的一个面料的 所以说你会看到 它里面有到一些 这种 这种就是 主杰 主杰的那种感觉 对 然后你们可以看到 它这个版型 它是那种 有一点你很 牙皮的直捅的 它版型就是那种 比较经典的直捅的 就是从你的 前面阵身 然后直接一个 就是微微的 稍微带一点点幅度 不是很夸张的 中低腰的一条直捅 是的 然后你们可以看到 就是这个裤子 它前面两个口袋 后面也是两个 四方形 四方方的这样子的 一个口袋 为什么叫前口袋 因为它跟 我们市面上 见到的这种口袋 是完全不一样的 然后一般你这面 市面上看到的口袋 都是侧插口袋 很少会有到 这种前口袋 因为这种前口袋 会增加你整体的 视觉的这种 时髦的一种感觉"
+        }
+      ]
+    },
+    {
+      "id": "p2-v3",
+      "product": "品2",
+      "title": "尺码洗护+白色搭配建议",
+      "record_start_frame": 3721,
+      "record_end_frame": 5364,
+      "duration_seconds": 54.77,
+      "span_count": 3,
+      "spans": [
+        {
+          "source_start_frame": 51448,
+          "source_end_frame": 52234,
+          "record_start_frame": 3721,
+          "record_end_frame": 4507,
+          "text": "中低腰的一条直捅 是的 然后你们可以看到 就是这个裤子 它前面两个口袋 后面也是两个 四方形 四方方的这样子的 一个口袋 为什么叫前口袋 因为它跟 我们市面上 见到的这种口袋 是完全不一样的 然后一般你这面 市面上看到的口袋 都是侧插口袋 很少会有到 这种前口袋 因为这种前口袋 会增加你整体的 视觉的这种 时髦的一种感觉"
+        },
+        {
+          "source_start_frame": 52781,
+          "source_end_frame": 53046,
+          "record_start_frame": 4507,
+          "record_end_frame": 4772,
+          "text": "就是算是常规的 所以说 你们可以参考一下 如果说身高1米6 4以下的 你可以选择一个 胶小版本的裤子 可以直接冷水 先我手写"
+        },
+        {
+          "source_start_frame": 53778,
+          "source_end_frame": 54370,
+          "record_start_frame": 4772,
+          "record_end_frame": 5364,
+          "text": "但其实我是觉得 就是这么看下来 其实是有一个点 就是不要担心 显黑这个问题 如果说你一旦 比如说咱们是 有一点点黄黑皮的 这种姐妹 你特别喜欢这种 特别的颜色的 有什么办法去解决 我不化妆 有什么办法解决 下面穿白色的裤子 或者是白色的裙子"
+        }
+      ]
+    }
+  ],
+  "clip_info_count": 12,
+  "dry_run": true
+}

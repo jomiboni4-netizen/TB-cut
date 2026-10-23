@@ -19,7 +19,7 @@ from compute_metrics import span
 from compute_store import media_signature, identity as compute_identity, cached, containing_asr
 from asr_identity import model_identity as asr_model_identity, PARAMETERS as ASR_PARAMETERS
 
-ASR_SCOPE_POLICY = 'subtitle-text-nearby-edges-v3-phonetic-tolerant'
+ASR_SCOPE_POLICY = 'subtitle-text-nearby-edges-v4-multilevel-model-fallback'
 
 
 def publish(paths, product_id, encoding_id, stage, body, dependencies=(), model_version='local-v3', snapshot=None):
@@ -177,8 +177,51 @@ def repair_boundary_targets(issues):
     return targets
 
 
+def selection_repair_instruction(issues):
+    if not issues:
+        return ''
+    if all('人物画面比例超限' in str(issue) for issue in issues):
+        return ('仅重组被指出的 variant 的字幕语义选段，保留 locked_selected_ranges 原样，'
+                '参考 visual_repair_samples 中的源时间与 PERSON_VISIBLE/NO_PERSON 采样，'
+                '优先避开已知无人物区间并保持版本间源区间互斥。采样稀疏，不证明整段人物比例。'
+                '本任务只判断新组合的字幕语义、相关性和时长；不要要求人物画面证据，'
+                '也不要声称人物比例已修复。返回语义上可用的选段后，'
+                '本机人物检测会独立复核，不通过则继续返工。')
+    return ('逐条落实 issues 中审核给出的源时间点与修复方向；repair_boundary_targets 是必须落实的边界约束。'
+            '只修改对应 variant 的 selected_ranges，把 start/end 移到建议边界，切掉残留的多余字或下一句起头；'
+            '若建议保留完整词/因果结果，则按建议恢复。其他 variant 保持 locked_selected_ranges 原样。'
+            '不要只改说明文字，也不要原样复用该 variant 已失败的范围。修复后重查各段拼接的句意与承接。')
+
+
+def visual_repair_samples(vision_body):
+    """Return bounded source-time hints from the failed local person audit."""
+    clocks = vision_body.get('clocks', {})
+    result = []
+    for variant in vision_body.get('variants', []):
+        if variant.get('status') == 'PASS':
+            continue
+        seen = set()
+        for sample in variant.get('samples', []):
+            source = sample.get('source_file')
+            clock = clocks.get(source, {})
+            fps = clock.get('fps')
+            label = sample.get('classification', {}).get('label')
+            if not source or not isinstance(fps, (int, float)) or fps <= 0 or label not in ('PERSON_VISIBLE', 'NO_PERSON'):
+                continue
+            second = round(float(sample['frame']) / fps, 1)
+            key = (variant['variant_id'], source, second, label)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({'variant_id': variant['variant_id'], 'source_file': source,
+                           'source_time': second, 'label': label})
+            if len(seen) >= 50:
+                break
+    return result
+
+
 def selection_task(paths, candidate_ref, issues=None, repair_attempt=0, semantic_map=None,
-                   previous_selected_ranges=None):
+                   previous_selected_ranges=None, visual_samples=None):
     candidate = load_stage(paths, candidate_ref)
     identity = candidate['identity']
     state = paths.load_state()
@@ -220,6 +263,7 @@ def selection_task(paths, candidate_ref, issues=None, repair_attempt=0, semantic
                                for cue in source.get('subtitle', [])]
         selection_candidates.append(compact)
     task = {'role': 'selection', 'schema_version': 1, 'project_key': identity['project_key'],
+            'selection_instruction_version': 'visual-repair-samples-v3',
             'config_reference': 'PROJECT_CONFIG.json', 'product_id': identity['product_id'],
             'encoding_id': identity['encoding_id'], 'rules_fingerprint': identity['rules_fingerprint'],
             'candidate_reference': candidate_ref, 'candidate_digest': candidate['body_digest'],
@@ -242,6 +286,7 @@ def selection_task(paths, candidate_ref, issues=None, repair_attempt=0, semantic
             'semantic_map_from_previous_attempt': semantic_map or [],
             'semantic_map_contract': 'Return a concise product selling-point map with exact candidate_id and verbatim quote evidence. Preserve valid prior points; never invent claims.',
             'previous_selected_ranges': previous_selected_ranges,
+            'visual_repair_samples': visual_samples or [],
             'locked_selected_ranges': locked_selected_ranges,
             'repairable_variant_ids': affected_variants,
             'repair_boundary_targets': repair_boundary_targets(issues),
@@ -251,7 +296,7 @@ def selection_task(paths, candidate_ref, issues=None, repair_attempt=0, semantic
                 '按 variant_1、variant_2、variant_3 顺序从候选池分配字幕范围；每确认一条后，立即从后续可选范围中排除其全部源区间。三条成片的同源区间必须两两互斥。'),
             'issues': issues, 'target_stage': 'rough',
             'repair_attempt': int(repair_attempt),
-            'repair_instruction': ('逐条落实 issues 中审核给出的源时间点与修复方向；repair_boundary_targets 是必须落实的边界约束。只修改对应 variant 的 selected_ranges，把 start/end 移到建议边界，切掉残留的多余字或下一句起头；若建议保留完整词/因果结果，则按建议恢复。其他 variant 保持 locked_selected_ranges 原样。不要只改说明文字，也不要原样复用该 variant 已失败的范围。修复后重查各段拼接的句意与承接。' if issues else ''),
+            'repair_instruction': selection_repair_instruction(issues),
             'sentence_opening_rule': SELECTION_RULE,
             'hard_rules': f"The applicable_shared_rules field is the complete self-contained rule set for this task; do not block because no external rule file is available. Use exact variant_id values from allowed_variant_ids. Produce {requested} distinct final video for this product when the full candidate pool supports it; each final duration must be >{duration_policy[0]} and <{duration_policy[1]} seconds. Aim near {editing_policy.get('target_duration_seconds', editing_policy['duration_exclusive_seconds'][1])} seconds, but preserve complete, natural semantic units over reaching the target. Respect editing mode {editing_mode}. Read the continuous original subtitles to understand context; forbidden_annotations are warnings for exclusion from the cut, not instructions to erase surrounding meaning. Context-only subtitles are evidence only and cannot be selected outside time_range. No banned content, no repeated or unrelated content. Return selected_ranges and the evidence-backed semantic_map; do not invent source times or claims."}
     task['task_digest'] = digest(task)
@@ -259,11 +304,12 @@ def selection_task(paths, candidate_ref, issues=None, repair_attempt=0, semantic
 
 
 def rough_selection(paths, candidate_ref, receipt_ref, issues=None, repair_attempt=0, semantic_map=None,
-                    previous_selected_ranges=None):
+                    previous_selected_ranges=None, visual_samples=None):
     candidate = load_stage(paths, candidate_ref)
     task = selection_task(paths, candidate_ref, issues=issues, repair_attempt=repair_attempt,
                           semantic_map=semantic_map,
-                          previous_selected_ranges=previous_selected_ranges)
+                          previous_selected_ranges=previous_selected_ranges,
+                          visual_samples=visual_samples)
     response = verify_receipt(paths, receipt_ref, task)['result']
     if response['verdict'] != 'PASS' or not response.get('selected_ranges'):
         raise CacheIdentityError('selection_repair_or_blocked')
@@ -401,15 +447,10 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
     for job in jobs:
         job['start'], job['end'] = snap_interval(job['start'], job['end'], sources[job['source_file']]['duration'])
     weights = asr_model_identity(model_name)
-    from adaptive_vision import decoder_identity
-    parameters = {**ASR_PARAMETERS, 'scope': ASR_SCOPE_POLICY, 'decoder': decoder_identity(),
-                  'sample_rate': 16000, 'channels': 1}
-    def create_model():
-        with span('asr_model_load'):
-            return load_model(weights['resolved_path'])
-    model = LazyModel(create_model)
+    fallback_model_name = 'medium' if model_name != 'medium' else 'large-v3-turbo'
+    parameters = current_asr_parameters()
     args = dict(product_id=rough['identity']['product_id'], encoding_id=rough['identity']['encoding_id'], stage='asr',
-                version=digest([ASR_SCOPE_POLICY, jobs, parameters]),
+                version=digest([ASR_SCOPE_POLICY, jobs, parameters, model_name, fallback_model_name]),
                 model_version=digest(weights), dependencies=[rough_ref])
     snapshot = capture_stage(paths, **args)
     from product_checkpoints import stage_path
@@ -419,20 +460,25 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
         return paths.reference(output)
     windows = []
     signatures = {n: media_signature(sources[n]['video_path']) for n in {j['source_file'] for j in jobs}}
-    def compute_jobs(requests):
+    def compute_jobs(requests, selected_model, selected_weights, level):
+        def create_model():
+            with span('asr_model_load'):
+                return load_model(selected_weights['resolved_path'])
+        model = LazyModel(create_model)
+        selected_parameters = {**parameters, 'model_name': selected_model, 'fallback_level': level}
         for job in merge_windows(requests):
-            expected = compute_identity(paths, 'asr', signatures[job['source_file']], weights,
-                                        parameters, [job['start'], job['end']])
+            expected = compute_identity(paths, 'asr', signatures[job['source_file']], selected_weights,
+                                        selected_parameters, [job['start'], job['end']])
             window = containing_asr(paths, expected)
             if window is None:
                 def compute():
                     with span('asr_transcription', job['end']-job['start']):
-                        if weights.get('runtime_python'):
+                        if selected_weights.get('runtime_python'):
                             from asr_runtime import request
-                            result = request({'operation': 'transcribe', 'model': model_name,
+                            result = request({'operation': 'transcribe', 'model': selected_model,
                                               'media': sources[job['source_file']]['video_path'],
                                               'start': job['start'], 'end': job['end']})
-                            expected_weights = {k:v for k,v in weights.items()
+                            expected_weights = {k:v for k,v in selected_weights.items()
                                                 if k not in ('runtime_python', 'runtime_sha256')}
                             if result['model'] != expected_weights:
                                 raise CacheIdentityError('asr_worker_model_changed')
@@ -442,12 +488,13 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
                                 Path(sources[job['source_file']]['video_path']),
                                 job['start'], job['end'], model)
                         return {**job, 'window_start': job['start'],
-                                'window_end': job['end'], 'words': words}
+                                'window_end': job['end'], 'words': words,
+                                'asr_model': selected_model, 'fallback_level': level}
                 window, _ = cached(paths, expected, compute)
-            windows.append(window)
-    compute_jobs(jobs)
+            windows.append({**window, 'asr_model': selected_model, 'fallback_level': level})
+    compute_jobs(jobs, model_name, weights, 'initial_window')
     from sentence_boundaries import locate_subtitle_edge
-    expansion_jobs, expansion_reasons = [], []
+    expansion_jobs, expansion_reasons, fallback_attempts = [], [], []
     for spec in edge_specs:
         window = _edge_window(windows, spec['source_file'], spec['cue_time'])
         try:
@@ -467,18 +514,93 @@ def local_asr(paths, rough_ref, model_name='large-v3-turbo'):
         job['start'], job['end'] = snap_interval(
             job['start'], job['end'], sources[job['source_file']]['duration'])
     if expansion_jobs:
-        compute_jobs(expansion_jobs)
+        compute_jobs(expansion_jobs, model_name, weights, 'expanded_window')
+    unresolved = []
+    for spec in edge_specs:
+        window = _edge_window(windows, spec['source_file'], spec['cue_time'])
+        window_level = window.get('fallback_level', 'initial_window')
+        search_seconds = (10.0 if window_level == 'alternate_local_model'
+                          else 6.0 if window_level == 'expanded_window' else 2.5)
+        try:
+            _, _, similarity = locate_subtitle_edge(
+                window['words'], spec['anchor'], spec['cue_time'], ending=spec['ending'],
+                search_seconds=search_seconds)
+            fallback_attempts.append({'source_file': spec['source_file'],
+                                      'edge': 'ending' if spec['ending'] else 'opening',
+                                      'model': window.get('asr_model', model_name), 'level': window_level,
+                                      'status': 'MATCHED', 'similarity': similarity})
+        except ValueError as exc:
+            if str(exc) not in ('sentence_local_text_not_found_expand_asr_window',
+                                'sentence_local_text_ambiguous',
+                                'sentence_edge_inside_asr_token_requires_local_audio'):
+                raise
+            unresolved.append(spec)
+            fallback_attempts.append({'source_file': spec['source_file'],
+                                      'edge': 'ending' if spec['ending'] else 'opening',
+                                      'model': window.get('asr_model', model_name), 'level': window_level,
+                                      'status': 'UNRESOLVED', 'reason': str(exc)})
+    alternate_weights = None
+    if unresolved:
+        try:
+            alternate_weights = asr_model_identity(fallback_model_name)
+            alternate_jobs = [{'source_file': spec['source_file'],
+                               'start': max(0., spec['cue_time']-12.),
+                               'end': min(spec['duration'], spec['cue_time']+12.)}
+                              for spec in unresolved]
+            for job in alternate_jobs:
+                job['start'], job['end'] = snap_interval(
+                    job['start'], job['end'], sources[job['source_file']]['duration'])
+            compute_jobs(alternate_jobs, fallback_model_name, alternate_weights, 'alternate_local_model')
+            still_unresolved = []
+            for spec in unresolved:
+                window = _edge_window(windows, spec['source_file'], spec['cue_time'])
+                try:
+                    _, _, similarity = locate_subtitle_edge(
+                        window['words'], spec['anchor'], spec['cue_time'], ending=spec['ending'],
+                        search_seconds=10.0)
+                    fallback_attempts.append({'source_file': spec['source_file'],
+                                              'edge': 'ending' if spec['ending'] else 'opening',
+                                              'model': fallback_model_name,
+                                              'level': 'alternate_local_model', 'status': 'MATCHED',
+                                              'similarity': similarity})
+                except ValueError as exc:
+                    if str(exc) not in ('sentence_local_text_not_found_expand_asr_window',
+                                        'sentence_local_text_ambiguous',
+                                        'sentence_edge_inside_asr_token_requires_local_audio'):
+                        raise
+                    still_unresolved.append(spec)
+                    fallback_attempts.append({'source_file': spec['source_file'],
+                                              'edge': 'ending' if spec['ending'] else 'opening',
+                                              'model': fallback_model_name,
+                                              'level': 'alternate_local_model', 'status': 'UNRESOLVED',
+                                              'reason': str(exc)})
+            unresolved = still_unresolved
+        except (CacheIdentityError, OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            fallback_attempts.append({'model': fallback_model_name, 'level': 'alternate_local_model',
+                                      'status': 'UNAVAILABLE',
+                                      'reason': f'{type(exc).__name__}:{exc}'})
     if asr_model_identity(model_name) != weights:
         raise CacheIdentityError('asr_weights_changed_during_compute')
+    if alternate_weights is not None and asr_model_identity(fallback_model_name) != alternate_weights:
+        raise CacheIdentityError('asr_fallback_weights_changed_during_compute')
     return publish_stage(paths, **args, snapshot=snapshot,
                          body={'windows': windows, 'model': weights,
-                               'parameters': parameters, 'expansion_reasons': expansion_reasons})
+                               'alternate_model': alternate_weights,
+                               'parameters': parameters, 'expansion_reasons': expansion_reasons,
+                               'fallback_attempts': fallback_attempts,
+                               'unresolved_edges': [{'source_file': spec['source_file'],
+                                                    'edge': 'ending' if spec['ending'] else 'opening',
+                                                    'cue_time': spec['cue_time'],
+                                                    'fallback': 'manual_cutpoint_review'}
+                                                   for spec in unresolved]})
 
 
 def current_asr_parameters():
     from adaptive_vision import decoder_identity
     return {**ASR_PARAMETERS, 'scope': ASR_SCOPE_POLICY, 'decoder': decoder_identity(),
-            'sample_rate': 16000, 'channels': 1}
+            'sample_rate': 16000, 'channels': 1,
+            'fallback_ladder': ['initial_window', 'expanded_window', 'alternate_local_model',
+                                'manual_cutpoint_review']}
 
 
 def source_clock(media, paths=None, *, allow_vfr_approximate=False, preferred_fps=None):
@@ -520,8 +642,7 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
     args = dict(product_id=rough['identity']['product_id'], encoding_id=rough['identity']['encoding_id'],
                 stage='plan', version=digest([rough_ref, asr_ref, fps, SENTENCE_CONTRACT,
                                                ASR_SCOPE_POLICY,
-                                               'subtitle-text-nearby-token-edges-v3',
-                                               'asr-unresolved-cutpoint-review-v1',
+                                               'subtitle-time-nearest-token-edges-execution-only-v1',
                                                'owned-gap-local-audio-v1',
                                                duration_policy, editing_mode, editing_policy,
                                                'vfr-average-rate-approx-v2' if allow_vfr_approximate else 'cfr-only']),
@@ -538,59 +659,58 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
         end_anchor, end_cue = _subtitle_edge_anchor(retained, ending=True)
         start_window = _edge_window(asr['body']['windows'], source_file, float(start_cue['start']))
         end_window = _edge_window(asr['body']['windows'], source_file, float(end_cue['end']))
-        from sentence_boundaries import locate_subtitle_edge
-        edge_failures = {}
-        try:
-            start_first, _, opening_similarity = locate_subtitle_edge(
-                start_window['words'], start_anchor, float(start_cue['start']))
-        except ValueError as exc:
-            if str(exc) not in ('sentence_local_text_not_found_expand_asr_window',
-                                'sentence_local_text_ambiguous',
-                                'sentence_edge_inside_asr_token_requires_local_audio'):
-                raise
-            edge_failures['opening'] = str(exc)
-        try:
-            _, end_last, ending_similarity = locate_subtitle_edge(
-                end_window['words'], end_anchor, float(end_cue['end']), ending=True)
-        except ValueError as exc:
-            if str(exc) not in ('sentence_local_text_not_found_expand_asr_window',
-                                'sentence_local_text_ambiguous',
-                                'sentence_edge_inside_asr_token_requires_local_audio'):
-                raise
-            edge_failures['ending'] = str(exc)
-        aligned = not edge_failures
-        if aligned:
-            start_word = start_window['words'][start_first]
-            end_word = end_window['words'][end_last]
-            key = lambda word: (float(word['start']), float(word['end']), str(word['text']))
-            # Keep only each selected edge and its immediate outer neighbor.
-            edge_context = [start_word, end_word]
-            if start_first:
-                edge_context.append(start_window['words'][start_first-1])
-            if end_last+1 < len(end_window['words']):
-                edge_context.append(end_window['words'][end_last+1])
-            words = sorted({key(word): dict(word) for word in edge_context}.values(),
-                           key=lambda word: (float(word['start']), float(word['end'])))
-            word_indices = {key(word): i for i, word in enumerate(words)}
-            first, last = word_indices[key(start_word)], word_indices[key(end_word)]
-            if first > last:
-                raise CacheIdentityError('asr_cut_neighborhood_order_invalid')
-            boundary = {'first_word_index': first, 'last_word_index': last,
-                        'opening_anchor_similarity': opening_similarity,
-                        'ending_anchor_similarity': ending_similarity,
-                        'opening_anchor_text': start_anchor, 'ending_anchor_text': end_anchor,
-                        'opening_cue': [float(start_cue['start']), float(start_cue['end'])],
-                        'ending_cue': [float(end_cue['start']), float(end_cue['end'])],
-                        'asr_scope': 'opening_and_ending_cut_neighborhoods_only',
-                        'cutpoint_status': 'ASR_EDGE_ESTIMATE'}
-        else:
-            words, first, last = [], None, None
-            boundary = {'opening_anchor_text': start_anchor, 'ending_anchor_text': end_anchor,
-                        'opening_cue': [float(start_cue['start']), float(start_cue['end'])],
-                        'ending_cue': [float(end_cue['start']), float(end_cue['end'])],
-                        'asr_scope': 'opening_and_ending_cut_neighborhoods_only',
-                        'cutpoint_status': 'ASR_EDGE_UNRESOLVED',
-                        'edge_failures': edge_failures}
+        edge_search = lambda window: (10.0 if window.get('fallback_level') == 'alternate_local_model'
+                                      else 6.0 if window.get('fallback_level') == 'expanded_window'
+                                      else 2.5)
+        range_parts = [part for part in ranges if part['media_stem']+'.mp4' == source_file
+                       and part['start'] <= float(start_cue['start'])
+                       and float(end_cue['end']) <= part['end']]
+        if not range_parts:
+            raise CacheIdentityError('selected_subtitle_interval_not_inside_one_confirmed_range')
+        product_part = min(range_parts, key=lambda part: part['end']-part['start'])
+        def nearest_edge(window, cue_time, *, ending):
+            words = window.get('words') or []
+            search = edge_search(window)
+            eligible = [(i, word) for i, word in enumerate(words)
+                        if product_part['start'] <= float(word['start'])
+                        and float(word['end']) <= product_part['end']
+                        and abs(float(word['end'] if ending else word['start']) - cue_time) <= search]
+            if not eligible:
+                eligible = [(i, word) for i, word in enumerate(words)
+                            if product_part['start'] <= float(word['start'])
+                            and float(word['end']) <= product_part['end']]
+            if not eligible:
+                raise CacheIdentityError('asr_execution_cutpoint_neighborhood_empty')
+            return min(eligible, key=lambda row: (
+                abs(float(row[1]['end'] if ending else row[1]['start']) - cue_time), row[0]))[0]
+        # Time proximity only: ASR supplies execution coordinates, while
+        # semantic review remains bound to the selected subtitle content.
+        start_first = nearest_edge(start_window, float(start_cue['start']), ending=False)
+        end_last = nearest_edge(end_window, float(end_cue['end']), ending=True)
+        start_word = start_window['words'][start_first]
+        end_word = end_window['words'][end_last]
+        key = lambda word: (float(word['start']), float(word['end']), str(word['text']))
+        edge_context = [start_word, end_word]
+        if start_first:
+            edge_context.append(start_window['words'][start_first-1])
+        if end_last+1 < len(end_window['words']):
+            edge_context.append(end_window['words'][end_last+1])
+        words = sorted({key(word): dict(word) for word in edge_context}.values(),
+                       key=lambda word: (float(word['start']), float(word['end'])))
+        word_indices = {key(word): i for i, word in enumerate(words)}
+        first, last = word_indices[key(start_word)], word_indices[key(end_word)]
+        if first > last:
+            raise CacheIdentityError('asr_cut_neighborhood_order_invalid')
+        boundary = {'first_word_index': first, 'last_word_index': last,
+                    'opening_asr_model': start_window.get('asr_model'),
+                    'ending_asr_model': end_window.get('asr_model'),
+                    'opening_fallback_level': start_window.get('fallback_level'),
+                    'ending_fallback_level': end_window.get('fallback_level'),
+                    'opening_cue': [float(start_cue['start']), float(start_cue['end'])],
+                    'ending_cue': [float(end_cue['start']), float(end_cue['end'])],
+                    'asr_scope': 'opening_and_ending_cut_neighborhoods_only',
+                    'cutpoint_status': 'ASR_TIME_NEAREST_EXECUTION_ESTIMATE',
+                    'cutpoint_selection': 'nearest_token_edge_by_time_only'}
         media = Path(sources[source_file]['video_path'])
         if source_file not in frame_rates:
             frame_rates[source_file] = source_clock(media, paths,
@@ -599,34 +719,9 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
                 raise CacheIdentityError('source_average_rate_outside_registered_timeline_rate')
         clock = frame_rates[source_file]
         clip_fps = clock.get('average_fps', clock['fps']) if allow_vfr_approximate else clock['fps']
-        if aligned:
-            try:
-                lo, hi, edge_proof = bounded_edges(words, first, last, clip_fps)
-            except ValueError as exc:
-                if str(exc) not in ('overlapping_asr_tokens_no_safe_sentence_edge',
-                                    'word_alignment_uncertain_needs_local_audio_review',
-                                    'word_alignment_interval_too_short'):
-                    raise
-                edge_failures['physical'] = str(exc)
-                aligned = False
-                words, first, last = [], None, None
-                boundary.update({'cutpoint_status': 'ASR_EDGE_UNRESOLVED',
-                                 'edge_failures': edge_failures})
-        if not aligned:
-            # Use the selected subtitle cue span only to build a provisional
-            # picture-audit plan. These timestamps are not a cutpoint PASS.
-            matching = [part for part in ranges if part['media_stem']+'.mp4' == source_file
-                        and part['start'] <= float(start_cue['start']) < part['end']
-                        and part['start'] < float(end_cue['end']) <= part['end']]
-            if not matching:
-                raise CacheIdentityError('unresolved_asr_edge_outside_confirmed_range')
-            part = matching[0]
-            low = max(float(start_cue['start']), float(part['start']))
-            high = min(float(end_cue['end']), float(part['end']))
-            lo, hi = math.floor(low*clip_fps), math.ceil(high*clip_fps)
-            if hi <= lo:
-                raise CacheIdentityError('unresolved_asr_edge_interval_invalid')
-            edge_proof = {}
+        lo, hi, edge_proof = bounded_edges(words, first, last, clip_fps,
+                                            lower_bound=product_part['start'],
+                                            upper_bound=product_part['end'])
         start, end = lo/clip_fps, hi/clip_fps
         if not any(part['media_stem']+'.mp4' == source_file and part['start'] <= lo/clip_fps < hi/clip_fps <= part['end'] for part in ranges):
             raise CacheIdentityError('refined_plan_outside_confirmed_range')
@@ -638,11 +733,9 @@ def physical_plan(paths, rough_ref, asr_ref, *, fps=None, allow_vfr_approximate=
                 'words': words, 'sentence_edges': edge_proof, 'transcript': text,
                 'source_subtitle_text': text,
                 'audio_boundary_verified': False,
-                'cutpoint_review': ({'status': 'REPAIRABLE', 'authority': 'asr_cutpoint_only',
-                                    'fallback': 'subtitle_cue_span_for_visual_audit',
-                                    'edge_failures': edge_failures} if not aligned else
-                                   {'status': 'PENDING_LOCAL_AUDIO_REVIEW',
-                                    'authority': 'asr_cutpoint_only'}),
+                'cutpoint_review': {'status': 'PENDING_LOCAL_AUDIO_REVIEW',
+                                    'authority': 'asr_execution_only',
+                                    'selection': 'nearest_token_edge_by_time_only'},
                 'unit_id': f"{row['variant_id']}_{len(variants.get(row['variant_id'], []))+1}",
                 'audit': {'transcript': text, 'boundary': boundary}}
         variants.setdefault(row['variant_id'], []).append(clip)

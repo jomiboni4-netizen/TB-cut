@@ -15,6 +15,7 @@ from runtime_meta import expected_identity, write_metadata
 
 
 PRODUCT = re.compile(r"商品(\d+)")
+PRODUCT_MARKER = "tb_cut_product_start:"
 
 
 def timeline_by_name(project, name: str):
@@ -25,11 +26,22 @@ def timeline_by_name(project, name: str):
     raise SystemExit(f"找不到时间线：{name}")
 
 
+def timeline_by_id(project, timeline_id: str):
+    for index in range(1, project.GetTimelineCount() + 1):
+        timeline = project.GetTimelineByIndex(index)
+        if timeline.GetUniqueId() == timeline_id:
+            return timeline
+    return None
+
+
 def build_manifest(timeline) -> dict:
     fps = float(timeline.GetSetting("timelineFrameRate") or 30)
     clips = sorted(list(timeline.GetItemListInTrack("video", 1) or []), key=lambda item: int(item.GetStart()))
     audio = sorted(list(timeline.GetItemListInTrack("audio", 1) or []), key=lambda item: int(item.GetStart()))
-    markers = sorted((timeline.GetMarkers() or {}).items(), key=lambda pair: int(pair[0]))
+    markers = sorted(
+        ((frame, marker) for frame, marker in (timeline.GetMarkers() or {}).items()
+         if str((marker or {}).get("customData") or "").startswith(PRODUCT_MARKER)),
+        key=lambda pair: int(pair[0]))
     variants: list[dict] = []
     for marker_index, (frame, marker) in enumerate(markers):
         start_bound = int(frame)
@@ -44,9 +56,15 @@ def build_manifest(timeline) -> dict:
             groups[-1].append(item)
         product_match = PRODUCT.search(str(marker.get("note") or ""))
         product_index = int(product_match.group(1)) if product_match else None
-        encoding_id = str(marker.get("name") or "").strip()
-        if not encoding_id:
+        custom_data = str(marker.get("customData") or "")
+        encoding_id = (custom_data[len(PRODUCT_MARKER):]
+                       if custom_data.startswith(PRODUCT_MARKER)
+                       else str(marker.get("name") or "").split("｜", 1)[0].strip())
+        encoding_id = encoding_id.strip()
+        if not re.fullmatch(r"\d+", encoding_id):
             raise SystemExit(f"{frame} 帧标记缺少编码ID")
+        if marker.get("color") != "Blue" or int(marker.get("duration") or 0) != 1:
+            raise SystemExit(f"{encoding_id} 商品起点标记不是蓝色单帧标记")
         for ordinal, group in enumerate(groups, 1):
             mark_in = int(group[0].GetStart())
             end_exclusive = int(group[-1].GetEnd())
@@ -86,9 +104,15 @@ def main() -> None:
     if not resolve:
         raise SystemExit("未连接达芬奇")
     project = resolve.GetProjectManager().GetCurrentProject()
-    if not project or project.GetName() != state["resolve"]["project_name"]:
+    if (not project or project.GetUniqueId() != state["project_identity"]["resolve_project_id"]
+            or project.GetName() != state["resolve"]["project_name"]):
         raise SystemExit("当前达芬奇项目不匹配")
-    timeline = timeline_by_name(project, state["resolve"]["target_timeline"])
+    source = timeline_by_id(project, state["resolve"]["source_timeline_id"])
+    timeline = timeline_by_id(project, state["resolve"]["target_timeline_id"])
+    if (not source or source.GetName() != state["resolve"]["source_timeline"]
+            or not timeline or timeline.GetName() != state["resolve"]["target_timeline"]
+            or source.GetUniqueId() == timeline.GetUniqueId()):
+        raise SystemExit("素材/成片稳定时间线身份不匹配")
     project.SetCurrentTimeline(timeline)
     manifest = build_manifest(timeline)
     manifest.update({
@@ -106,6 +130,11 @@ def main() -> None:
     print(json.dumps({"variant_count": manifest["variant_count"], "counts": counts, "durations": [row["duration_seconds"] for row in manifest["variants"]]}, ensure_ascii=False))
     if not args.render:
         return
+
+    collisions = [row["name"] for row in manifest["variants"]
+                  if (output_dir / f"{row['name']}.mp4").exists()]
+    if collisions:
+        raise SystemExit("导出目标已有同名文件，拒绝覆盖：" + ",".join(collisions))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if not project.SetCurrentRenderFormatAndCodec("mp4", "H264"):

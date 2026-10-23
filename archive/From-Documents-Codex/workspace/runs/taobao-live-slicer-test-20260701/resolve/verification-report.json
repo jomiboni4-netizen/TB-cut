@@ -1,0 +1,165 @@
+{
+  "project": "20260701-淘宝切片",
+  "timeline": "测试",
+  "timeline_start": 0,
+  "timeline_end": 7380,
+  "counts": {
+    "video": 6,
+    "audio": 6
+  },
+  "gaps": {
+    "video": [],
+    "audio": []
+  },
+  "overlaps": {
+    "video": [],
+    "audio": []
+  },
+  "offline": [],
+  "items": [
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 0,
+      "end": 1260,
+      "duration": 1260,
+      "sourceStart": 12150,
+      "sourceEnd": 13410,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 1260,
+      "end": 2340,
+      "duration": 1080,
+      "sourceStart": 20250,
+      "sourceEnd": 21330,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 2340,
+      "end": 3600,
+      "duration": 1260,
+      "sourceStart": 43470,
+      "sourceEnd": 44730,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 3600,
+      "end": 4860,
+      "duration": 1260,
+      "sourceStart": 48780,
+      "sourceEnd": 50040,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 4860,
+      "end": 6120,
+      "duration": 1260,
+      "sourceStart": 50940,
+      "sourceEnd": 52200,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 6120,
+      "end": 7380,
+      "duration": 1260,
+      "sourceStart": 53010,
+      "sourceEnd": 54270,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 0,
+      "end": 1260,
+      "duration": 1260,
+      "sourceStart": 12150,
+      "sourceEnd": 13410,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 1260,
+      "end": 2340,
+      "duration": 1080,
+      "sourceStart": 20250,
+      "sourceEnd": 21330,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 2340,
+      "end": 3600,
+      "duration": 1260,
+      "sourceStart": 43470,
+      "sourceEnd": 44730,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 3600,
+      "end": 4860,
+      "duration": 1260,
+      "sourceStart": 48780,
+      "sourceEnd": 50040,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 4860,
+      "end": 6120,
+      "duration": 1260,
+      "sourceStart": 50940,
+      "sourceEnd": 52200,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 6120,
+      "end": 7380,
+      "duration": 1260,
+      "sourceStart": 53010,
+      "sourceEnd": 54270,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "online": true
+    }
+  ]
+}

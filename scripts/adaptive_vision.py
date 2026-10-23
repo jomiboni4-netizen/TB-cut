@@ -5,10 +5,13 @@ import hmac
 import json
 import math
 import platform
+import shutil
+import urllib.request
 from fractions import Fraction
 from pathlib import Path
 import subprocess
 import tempfile
+import base64
 from project_registry import digest
 from runtime_meta import CacheIdentityError, _sha256
 from compute_store import media_signature, identity, cached, check_media
@@ -17,12 +20,13 @@ from vision_record_score_v5 import (CONTRACT, POLICY, ABSENT_LABELS, estimate,
                                     expected_refinement_times, initial_record_times,
                                     map_record_time)
 
-FRAME_CACHE_PROTOCOL = 'person-presence-closeup-strata-v5'
+FRAME_CACHE_PROTOCOL = 'person-presence-closeup-strata-v6-local-qwen-absence-second-opinion'
 # Legacy v4 adapter digest is retained only for reproducing old evidence identities.
 _V4_ADAPTER_SHA256 = '464bb0bae7b7cbc46bd996174f0d747b7d3c21e7e4deabb84f6713d292234c5d'
 _V4_CLASSIFIER_AST_SHA256 = 'e61b0e6bf0972a660516580b94f94708c89ce0eada81adcc21e938fd20ddb646'
 _CLASSIFIER_FUNCTIONS = {'decoder_identity', 'subject_thresholds', 'classify_observations',
-                         'classify_frame', 'validate_classification'}
+                         'classify_frame', 'classify_with_qwen', 'qwen_model_identity',
+                         'validate_classification'}
 LABELS = {'HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP', 'CLOTHING_CLOSEUP', 'OTHER_PERSON', 'NO_PERSON', 'UNCERTAIN', 'DETECTOR_ERROR'}
 _decoders = {}
 
@@ -122,8 +126,56 @@ def classifier_identity(detector):
             'adapter_sha256': classifier_adapter_digest(),
             'decoder': decoder_identity(),
             'runtime': {'os': platform.platform(), 'macos': platform.mac_ver()[0]},
-            'protocol': 'apple-frame-v6-person-presence-closeup-pose-fallback',
+            'protocol': 'apple-frame-v6-plus-local-qwen3-vl-8b-absence-review-v1',
+            'local_absence_review': qwen_model_identity(),
             'parameters': subject_thresholds()}
+
+
+def qwen_model_identity():
+    """Identify the locally installed Qwen vision model without contacting a remote service."""
+    ollama = shutil.which('ollama')
+    if not ollama:
+        raise CacheIdentityError('local_qwen_ollama_missing')
+    result = subprocess.run([ollama, 'list'], text=True, capture_output=True, check=True)
+    for line in result.stdout.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == 'qwen3-vl:8b':
+            return {'model': fields[0], 'local_model_id': fields[1], 'purpose': 'absence_second_opinion'}
+    raise CacheIdentityError('local_qwen3_vl_8b_missing')
+
+
+def classify_with_qwen(image):
+    """Second-check an Apple no-person sample using the loopback-only Ollama API."""
+    model = qwen_model_identity()
+    payload = json.dumps({
+        'model': model['model'], 'stream': False, 'format': 'json', 'keep_alive': '5m',
+        'prompt': ('Inspect this single video frame. Decide whether any real human is visible, '
+                   'including a partial body, hand, or a person wearing/modeling clothing. '
+                   'Do not infer a person from a garment on a hanger or mannequin. '
+                   'Return JSON only: {"person_present":true|false|null,"closeup":true|false|null}. '
+                   'Use null when the image is ambiguous.'),
+        'images': [base64.b64encode(Path(image).read_bytes()).decode('ascii')]
+    }).encode('utf-8')
+    request = urllib.request.Request('http://127.0.0.1:11434/api/generate', data=payload,
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(request, timeout=120) as response:
+        result = json.loads(response.read())
+    raw = result.get('response', '')
+    try:
+        verdict = json.loads(raw)
+        person = verdict.get('person_present')
+        closeup = verdict.get('closeup')
+    except (TypeError, ValueError):
+        person = closeup = None
+    evidence = {'model': model, 'response_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest()}
+    if person is True:
+        return {'label': 'PERSON_CLOSEUP' if closeup is True else 'PERSON_VISIBLE',
+                'subject_evidence': True, 'reason': 'local_qwen_confirms_person', 'evidence': evidence}
+    if person is False:
+        return {'label': 'NO_PERSON', 'subject_evidence': False,
+                'reason': 'local_qwen_confirms_no_person', 'evidence': evidence}
+    return {'label': 'UNCERTAIN', 'subject_evidence': False,
+            'reason': 'local_qwen_absence_review_uncertain', 'evidence': evidence}
 
 
 def subject_thresholds():
@@ -197,7 +249,12 @@ def classify_frame(media, frame, detector, *, fps=None):
                 value = json.loads(result.stdout)
             if value.get('protocol') != 'apple-frame-v6' or not isinstance(value.get('observations'), dict):
                 raise CacheIdentityError('detector_frame_protocol_missing')
-            return classify_observations(value['observations'], thresholds)
+            classification = classify_observations(value['observations'], thresholds)
+            if classification['label'] in {'NO_PERSON', 'CLOTHING_CLOSEUP'}:
+                second_opinion = classify_with_qwen(image)
+                second_opinion['apple_vision'] = classification
+                return second_opinion
+            return classification
     except Exception as exc:
         detail = getattr(exc, 'stderr', '') or str(exc)
         if isinstance(detail, bytes): detail = detail.decode('utf-8', errors='replace')

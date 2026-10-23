@@ -1,11 +1,11 @@
 {
   "vision": {
     "primary": "apple_vision",
-    "fallback_1": "qwen_4b_vision",
-    "fallback_2": "qwen_8b_vision",
-    "policy": "Only escalate uncertain/low-confidence samples. Keep all inference local."
+    "secondary": "qwen3-vl:8b",
+    "secondary_for": ["NO_PERSON", "CLOTHING_CLOSEUP"],
+    "policy": "Use the local qwen3-vl:8b model to second-check Apple Vision no-person and clothing-only samples; keep all inference local and record model identity and per-sample result."
   },
   "asr": {
-    "policy": "Windowed local ASR/VAD around selected semantic ranges only; no full-media retranscription by default."
+    "policy": "Windowed local ASR/VAD generates execution-time cut-coordinate suggestions only; it is not a semantic or final-quality audit layer. No full-media retranscription by default."
   }
 }

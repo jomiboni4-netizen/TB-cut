@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from project_registry import digest
 
-CONTRACT = 'sentence-owned-edges-v5-asr-optional-for-vision'
+CONTRACT = 'sentence-owned-edges-v7-range-bounded-time-nearest-asr-execution'
 SELECTION_RULE = (
     '每个连续片段必须是完整原声句群。尤其每版第一段，必须查看原素材前文，'
     '确认不是上一句残尾、依赖回答或省略主语的承接句；字幕分行、标点和静音均不是独立句首证明。'
@@ -189,13 +189,17 @@ def _locate_subtitle_edge_once(words, target, cue_time, *, ending, search_second
     return best[3], best[4], best[0]
 
 
-def bounded_edges(words, first, last, fps, padding=.08):
+def bounded_edges(words, first, last, fps, padding=.08, *, lower_bound=None, upper_bound=None):
     """Padding lives only in the gap between the selected and excluded words."""
     if not fps > 0 or not 0 <= first <= last < len(words):
         raise ValueError('sentence_edge_input_invalid')
     onset, offset = float(words[first]['start']), float(words[last]['end'])
     previous = float(words[first-1]['end']) if first else max(0., onset-padding)
     following = float(words[last+1]['start']) if last+1 < len(words) else offset+padding
+    if lower_bound is not None:
+        previous = max(previous, float(lower_bound))
+    if upper_bound is not None:
+        following = min(following, float(upper_bound))
     tolerance = .5/fps  # Frame rounding only; not a claim of phoneme accuracy.
     if previous > onset + 2*tolerance + 1e-9 or following < offset - 2*tolerance - 1e-9:
         raise ValueError('overlapping_asr_tokens_no_safe_sentence_edge')

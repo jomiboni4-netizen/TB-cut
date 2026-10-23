@@ -134,13 +134,49 @@ def validate_semantic_inferred_document(document, titles, index, product_ids=Non
                 raise RangeOverrideError("semantic_range_global_time_mismatch")
             if row["boundary_provenance"][side] != {"kind": SEMANTIC_AUTHORITY, "source_stem": point["source_stem"]}:
                 raise RangeOverrideError("semantic_range_boundary_provenance_mismatch")
-        validate_range(row, sources)
         bounds = (float(row["global_start"]), float(row["global_end"]))
+        windows = proof.get("candidate_windows", [])
+        if windows:
+            outer_row = {**row, "ranges": split_range(bounds[0], bounds[1], list(sources.values()))}
+            validate_range(outer_row, sources)
+            expected_ranges = []
+            for window in windows:
+                source = sources[window["source_stem"]]
+                expected_ranges.extend(split_range(float(source["global_start"]) + float(window["start"]),
+                                                   float(source["global_start"]) + float(window["end"]),
+                                                   list(sources.values())))
+            expected_ranges.sort(key=lambda part: (float(sources[part["media_stem"]]["global_start"]) + float(part["start"]),
+                                                   float(sources[part["media_stem"]]["global_start"]) + float(part["end"])))
+            actual_ranges = row.get("ranges", [])
+            if len(actual_ranges) != len(expected_ranges) or any(
+                    a.get("media_stem") != b["media_stem"] or abs(float(a.get("start", -1)) - b["start"]) > 0.001
+                    or abs(float(a.get("end", -1)) - b["end"]) > 0.001
+                    for a, b in zip(actual_ranges, expected_ranges)):
+                raise RangeOverrideError("semantic_candidate_ranges_do_not_match_proof")
+        else:
+            validate_range(row, sources)
         terms = [term for term in title_features(title["title"]) if len(term) > 1]
         _validate_anchor(proof["start_anchor"], index, bounds)
         for anchor in proof["title_anchors"]:
             _validate_anchor(anchor, index, bounds, terms)
         _validate_anchor(proof["end_anchor"], index, bounds)
+        if not isinstance(windows, list):
+            raise RangeOverrideError("semantic_candidate_windows_invalid")
+        for window in windows:
+            if not isinstance(window, dict) or set(window) != {"source_stem", "start", "end", "start_anchor", "end_anchor"}:
+                raise RangeOverrideError("semantic_candidate_window_shape_invalid")
+            source = sources.get(window["source_stem"])
+            if not source or not isinstance(window["start"], (int, float)) or not isinstance(window["end"], (int, float)) or window["start"] >= window["end"]:
+                raise RangeOverrideError("semantic_candidate_window_bounds_invalid")
+            window_global_start = float(source["global_start"]) + float(window["start"])
+            window_global_end = float(source["global_start"]) + float(window["end"])
+            if window_global_start < bounds[0] or window_global_end > bounds[1]:
+                raise RangeOverrideError("semantic_candidate_window_outside_authorized_range")
+            for edge in ("start_anchor", "end_anchor"):
+                anchor = window[edge]
+                if anchor.get("source_stem") != window["source_stem"]:
+                    raise RangeOverrideError("semantic_candidate_window_anchor_source_mismatch")
+                _validate_anchor(anchor, index, bounds)
     validate_global_ranges(rows)
     ordered = sorted(rows, key=lambda r: r["product_index"])
     if any(a["global_start"] > b["global_start"] for a, b in zip(ordered, ordered[1:])):
@@ -172,14 +208,26 @@ def build_semantic_inferred_ranges(manifest, index, titles_doc, product_ids, *, 
                     "authorization": authorization, "start": source_decision["start"], "end": source_decision["end"],
                     "start_anchor": source_decision["start_anchor"], "title_anchors": source_decision["title_anchors"],
                     "end_anchor": source_decision["end_anchor"]}
+        if "candidate_windows" in source_decision:
+            decision["candidate_windows"] = source_decision["candidate_windows"]
         start, end = global_time(decision["start"], sources), global_time(decision["end"], sources)
         start_source = decision["start"]["source_stem"]
         end_source = decision["end"]["source_stem"]
         proof = {"schema_version": 1, "source": SEMANTIC_AUTHORITY,
                  "decision": decision, "decision_sha256": canonical_hash(decision)}
+        authorized_ranges = split_range(start, end, list(sources.values()))
+        if decision.get("candidate_windows"):
+            authorized_ranges = []
+            for window in decision["candidate_windows"]:
+                source = sources[window["source_stem"]]
+                authorized_ranges.extend(split_range(float(source["global_start"]) + float(window["start"]),
+                                                     float(source["global_start"]) + float(window["end"]),
+                                                     list(sources.values())))
+            authorized_ranges.sort(key=lambda part: (float(sources[part["media_stem"]]["global_start"]) + float(part["start"]),
+                                                     float(sources[part["media_stem"]]["global_start"]) + float(part["end"])))
         row = {**title, "global_start": start, "global_end": end,
                "product_range_duration": round(end-start, 3), "product_start_anchor": start,
-               "range_basis": SEMANTIC_AUTHORITY, "ranges": split_range(start, end, list(sources.values())),
+               "range_basis": SEMANTIC_AUTHORITY, "ranges": authorized_ranges,
                "start_source_local": round(float(decision["start"]["time"]), 3),
                "end_source_local": round(float(decision["end"]["time"]), 3),
                "boundary_provenance": {"start": {"kind": SEMANTIC_AUTHORITY, "source_stem": start_source},

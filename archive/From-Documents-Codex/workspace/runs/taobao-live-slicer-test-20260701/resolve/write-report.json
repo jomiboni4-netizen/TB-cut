@@ -1,0 +1,198 @@
+{
+  "ok": true,
+  "saved": true,
+  "project": "20260701-淘宝切片",
+  "timeline": "测试",
+  "source_path": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+  "source_fps": 30.0,
+  "segments": [
+    {
+      "product": "1号商品",
+      "variant": "1-袖型版型",
+      "start": 405.0,
+      "end": 447.0,
+      "purpose": "七分袖、利落版型、CBK风格",
+      "record_start_frame": 0,
+      "record_end_frame": 1260
+    },
+    {
+      "product": "1号商品",
+      "variant": "2-面料搭配",
+      "start": 675.0,
+      "end": 711.0,
+      "purpose": "60真丝+40羊毛、呼吸性、半裙/T恤裙搭配",
+      "record_start_frame": 1260,
+      "record_end_frame": 2340
+    },
+    {
+      "product": "1号商品",
+      "variant": "3-颜色显瘦",
+      "start": 1449.0,
+      "end": 1491.0,
+      "purpose": "颜色对比、袖口收住、显瘦卖点",
+      "record_start_frame": 2340,
+      "record_end_frame": 3600
+    },
+    {
+      "product": "2号商品",
+      "variant": "1-口碑展示",
+      "start": 1626.0,
+      "end": 1668.0,
+      "purpose": "前口袋牛仔裤、返场口碑、走动展示",
+      "record_start_frame": 3600,
+      "record_end_frame": 4860
+    },
+    {
+      "product": "2号商品",
+      "variant": "2-面料版型",
+      "start": 1698.0,
+      "end": 1740.0,
+      "purpose": "竹节冰蓝、棉亚麻氨纶、直筒版型、口袋设计",
+      "record_start_frame": 4860,
+      "record_end_frame": 6120
+    },
+    {
+      "product": "2号商品",
+      "variant": "3-洗护颜色",
+      "start": 1767.0,
+      "end": 1809.0,
+      "purpose": "冷水轻柔手洗、白色参考、黄黑皮搭配建议",
+      "record_start_frame": 6120,
+      "record_end_frame": 7380
+    }
+  ],
+  "readback": [
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 0,
+      "end": 1260,
+      "duration": 1260,
+      "sourceStart": 12150,
+      "sourceEnd": 13410,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 1260,
+      "end": 2340,
+      "duration": 1080,
+      "sourceStart": 20250,
+      "sourceEnd": 21330,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 2340,
+      "end": 3600,
+      "duration": 1260,
+      "sourceStart": 43470,
+      "sourceEnd": 44730,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 3600,
+      "end": 4860,
+      "duration": 1260,
+      "sourceStart": 48780,
+      "sourceEnd": 50040,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 4860,
+      "end": 6120,
+      "duration": 1260,
+      "sourceStart": 50940,
+      "sourceEnd": 52200,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 6120,
+      "end": 7380,
+      "duration": 1260,
+      "sourceStart": 53010,
+      "sourceEnd": 54270,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 0,
+      "end": 1260,
+      "duration": 1260,
+      "sourceStart": 12150,
+      "sourceEnd": 13410,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 1260,
+      "end": 2340,
+      "duration": 1080,
+      "sourceStart": 20250,
+      "sourceEnd": 21330,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 2340,
+      "end": 3600,
+      "duration": 1260,
+      "sourceStart": 43470,
+      "sourceEnd": 44730,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 3600,
+      "end": 4860,
+      "duration": 1260,
+      "sourceStart": 48780,
+      "sourceEnd": 50040,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 4860,
+      "end": 6120,
+      "duration": 1260,
+      "sourceStart": 50940,
+      "sourceEnd": 52200,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 6120,
+      "end": 7380,
+      "duration": 1260,
+      "sourceStart": 53010,
+      "sourceEnd": 54270,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4"
+    }
+  ]
+}
