@@ -1,5 +1,9 @@
 # Pipeline dependencies and runtime cache identity
 
+## 当前淘宝注册调度链（2026-10-22）
+
+实际注册调度顺序为：完整商品字幕候选池 → Codex 组合与单商品语义终审 → 首尾切点局部 ASR → 物理切点/声学边界精修 → 最终方案人物复核 → 本地硬门禁 → 已接通的交付适配器。语义终审回执绑定不可变 rough selection 摘要；PASS 后不在写入前重复做 Codex 语义终审。ASR 每段只处理首尾各 2.5 秒窗口，按源区间身份复用；人物比例超限会锁定通过版本，仅重组选受影响版本。各阶段计时保留每次调度耗时，不能把历史缺失的耗时估算成实测值。
+
 依据：逐个检查当前 `scripts/` 的实际读取、写入与分支。表中 `<N>` 是商品编号，`R=.cache/product_<N>_rough/`，`W=.cache/product_<N>_windowed/`；`meta` 指同名文件后加 `.meta.json` 的身份文件。`PROJECT_STATE.json` 是本地状态，不进 Git。`config/*.json` 目前主要供规则说明和身份指纹；多数剪辑脚本的阈值仍写在源码中。
 
 | stage | script | required inputs | generated outputs | validation | next stage |
@@ -9,7 +13,7 @@
 | subtitle index | `index_subtitles.py` | `PROJECT_STATE.json`，SRT，与 SRT 同名的 MP4，`ffprobe` | `.cache/subtitle_index.json` + meta；更新本地状态中的字幕指纹/阶段 | SRT 内容指纹；新增批次、输入、规则、pipeline、meta schema、文件摘要检查；旧索引在再次运行本 stage 时从原始输入重建 | product ranges、expanded candidates |
 | title index | `index_titles.py` → `inspect_title_workbook.mjs --json` | 当前 state 的 `title_path`；已有 Node 与 `@oai/artifact-tool`；Python 标准库 | `.cache/titles.json` + meta | 唯一可见 sheet、第一行表头、无损 ID、空行/缺字段/重复检查；当前 identity | product ranges、Resolve write |
 | boundary suggestions / accepted ranges | `locate_link_intros.py`, `publish_confirmed_ranges.py`, `apply_range_overrides_v2.py` | authenticated subtitle index/titles; source-local human manifest for exactly current `batch.product_ids`, or authenticated override | locator: `boundary_suggestions.json`; publisher or explicit override: `product_ranges.json` | locator builds wide semantic windows from title attributes over continuous subtitle text; Excel row/encoding identify the catalog item but not its live time, and link mentions are auxiliary-only. Ambiguous evidence remains `PRODUCT_UNCERTAIN`. Rough windows are never accepted ranges; human publisher validates explicitly before physical editing | expanded requests and windowed ASR |
-| expanded candidates | `build_expanded_codex_request.py` | 已验证的 `product_ranges.json`、`subtitle_index.json`、**已有 `R/mimo_request.json`** | `R/codex_expanded_request.json` + meta | 输入身份、商品 ID、范围/索引 schema；禁用话术按句内子句剔除，混合句保留有效部分、原始来源引用及切点复核标记；无时长上限 | MiMo semantic stage A |
+| expanded candidates | `build_expanded_codex_request.py` | 已验证的 `product_ranges.json`、`subtitle_index.json`、标题索引与 Resolve 项目模式 | `R/codex_expanded_request.json` + meta | 保留连续原字幕和逐字禁用子句注记；不在语义选择前删除相邻语境；时长与版本数从项目模式读取；旧候选协议重建 | Codex semantic selection |
 | MiMo semantic stages | `mimo_review_v2.py`, `product_semantic_preview.py` | 每商品单独的本地预清洗标题、候选句群、时间引用；`MIMO_API_KEY`；MiMo v2.6 Pro | ignored per-product request/response/metrics and Markdown/JSON preview | A only assigns product ownership, extracts exact cited complete groups and relations; B only assembles from A-validated groups. Request fingerprint reuse; no video/audio or whole SRT. `closure_check` is untrusted | local hard audit, independent Codex review |
 | semantic audit | `audit_mimo_v2.py` | 已验证的 request 与 MiMo 响应 | 指定 selection/audit JSON + meta | 输入身份；不使用 MiMo 的 `closure_check` 作证据；检查候选边界、禁用内容、时长、物理/语义重叠。硬规则通过但无独立 Codex 记录时标记 `REVIEW_PENDING` | repair or final quality gate |
 | repair | `build_repair_request_v2.py`、`mimo_review_v2.py`、`merge_repair_result_v2.py`、`audit_mimo_v2.py`；后期失败可用 `collect_post_audit_failures.py`，必要时 `drop_failed_variants_v2.py` | 已验证的请求、selection、audit、返修响应；后期失败还需已验证的终审/人物审计；`drop` 还需 `EXHAUSTED` 证明 | 返修请求、响应、合并响应、复审/失败摘要及 meta | 返修上限、锁定通过版本、候选池剩余量；仅 `EXHAUSTED` 且证明完整搜索才可减条数 | `promote_rough_selection.py` |
@@ -69,13 +73,13 @@
 
 正式入口：`python3 -B scripts/index_titles.py --root <repo> --workspace <workspace> --node <node-executable>`。必须使用 Codex 托管运行时解析到的 `@oai/artifact-tool`，并通过包身份和实际 API 能力检查；不按版本号阻断，不更换 XLSX parser，不使用旧缓存兜底。
 
-Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。仅当本批状态显式设置 `batch_overrides.skip_blank_titles=true` 时，空标题行跳过且不占商品编号；该策略进入输入指纹。输出保留 `source`、`sheet`、`products`，新增 `schema_version=2` 和 `generator=index_titles.py:v2`；采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
+Python 使用标准库读取 OOXML 的结构、原始数字和 number format 作为无损校验依据；业务单元格值由现有 Node workbook 路径提供。唯一可见 sheet、第一行精确表头、空行与连续编号、重复/缺字段、文本 ID 和数字零填充规则以 `PROJECT_RULES.md` 为准。公式、合并及隐藏结构拒绝处理。仅当本批状态显式设置 `batch_overrides.skip_blank_titles=true` 时，空标题行跳过且不占商品编号；该策略进入输入指纹。输出保留 `source`、`sheet`、`products`，新增 `schema_version=2`；当前生成器为 `index_titles.py:v4`（保留原工作簿行号时为 `v5`），并接受恰好一个 `编码 ID` 或 `ID` 表头。旧生成器缓存会因 provenance 不匹配自动从登记的工作簿重建。采用 UTF-8、两空格缩进及末尾换行。重复运行的 artifact 字节一致；metadata 的创建时间可变化。
 
 两个生成器从开始到完成持有同一 cache 目录锁；并发调用立即失败。开始时固定 state bytes、expected identity 和完整 rules/config 摘要。subtitle 解析使用固定的 SRT bytes，并确认这些 bytes 与固定 input identity 一致；视频身份仍为路径、大小、纳秒修改时间，不是视频内容摘要。artifact/meta 在临时目录生成。发布前及发布各步骤之间重查 state、SRT、标题、视频身份和规则，变化则失败，发布前变化不写 artifact/meta/state。
 
 发布是两个独立 rename，subtitle state 是第三个独立 rename，**不是跨文件事务，也不保证断电持久性**。先写 `<artifact>.invalid`；读者遇到标记即拒绝。发生发布错误时尽力恢复旧文件（包括 subtitle state），始终保留失效标记；rollback 自身失败也不能覆盖原始 publication error。即使残留 artifact 字节恰好匹配旧 SHA，标记仍阻止认证。只有完整受控重建成功才清除标记，禁止手工删标记或补签 metadata。锁约束协作生成器，不阻止外部编辑器；外部输入在最后检查后仍可改变，此后消费者重新计算 identity 时拒绝不匹配缓存，不能将文件系统描述为输入/输出跨文件事务。
 
-`runtime_meta.load_checked_json()` 解析与 SHA 校验使用同一份 bytes，不再校验后重开文件。标题的两个消费者（范围生成、Resolve 写入）和 workspace preflight 均通过统一验证，要求 producer、titles schema/generator、连续商品编号、唯一字符串 ID、有效标题和 source/sheet。这些是来源约定，不是抵御恶意伪造的数字签名。subtitle 新增 generator 标记，旧生成器产物不能仅凭通用 identity 复用。升级记录见 `docs/CACHE_SAFETY_UPGRADE.json`；真实 state/cache 未改写。
+`runtime_meta.load_checked_json()` 解析与 SHA 校验使用同一份 bytes，不再校验后重开文件。标题的两个消费者（范围生成、Resolve 写入）和 workspace preflight 均通过统一验证，要求 producer、titles schema/generator、连续商品编号、唯一字符串 ID、有效标题和 source/sheet。这些是来源约定，不是抵御恶意伪造的数字签名。subtitle 索引要求 `index_subtitles.py:v3` generator 标记；旧生成器产物不能仅凭通用 identity 复用。视频与字幕均按文件名数字区间排序后拼接全局时间。升级记录见 `docs/CACHE_SAFETY_UPGRADE.json`；真实 state/cache 未改写。
 
 ## Workbook runtime compatibility
 
@@ -174,7 +178,7 @@ does not assert Runtime READY or revalidate any real human boundary decisions.
 
 本节优先于上文旧版固定路径说明；新合同标识为 `project-resume-v2`，登记与阶段记录 schema 为 2。原 pipeline `2.1` 的剪辑硬规则没有改变。版本记录见 `docs/PROJECT_RESUME_UPGRADE.json`。
 
-- `init_project.py` 首次需要明确的素材文件夹、稳定 Resolve ID（用户离线确认，不接受显示名称作唯一身份）、标题/字幕/视频来源、项目和时间线名、批次和商品清单。保存本地忽略的 `PROJECT_CONFIG.json` 与 `PROJECT_STATE.json`。项目 UUID、目录真实路径/设备/inode、Resolve ID 与配置摘要共同核验；新窗口只需同一 `--workspace`。输入更新需明确 `--force`，缺失标题可只补标题；`--force` 不能切换项目身份。登记只验证配置，不表示已核对真实 Resolve。
+- `init_project.py` 首次登记稳定 Resolve ID、素材文件夹、标题/字幕/视频来源、时间线绑定、批次和商品清单。保存本地忽略的 `PROJECT_CONFIG.json` 与 `PROJECT_STATE.json`。项目身份只由稳定 Resolve ID 决定；按当前打开项目 ID 找到唯一绑定工作区。目录 inode 和显示名称不参与身份认证；素材路径可用性与时间线写入目标另行核验。素材路径更新需明确 `--force`；`--force` 不能切换项目身份。
 - 新缓存目录为 `.cache/projects/<project_key>/batches/<batch_scope>/`；scope 包含批次 ID、商品清单与覆盖参数。reports/plans/exports 同样按项目和批次隔离。原固定文件名留在各自作用域，不回退查找旧根缓存。
 - 两个真实上游生成器 `index_subtitles.py`、`index_titles.py` 已接入 `.cache/projects/<project_key>/inputs/<digest>/`。摘要包括整个配置输入、规则与生成器/helper/工作簿解析依赖版本；元数据明确 `scope=project_input`，只允许这两个 producer 跨批次复用。批次商品集合与批次 ID 不影响上游命中；批次审核仍严格校验批次。范围、方案和审核不使用这个豁免。模型与切点参数不靠移除 batch 校验解决冲突。
 - 当前上游依赖粒度仍保守：一个源输入、全局规则或解析代码改变会生成新的项目索引命名空间；尚未做到单个源文件增量索引。视频仍用路径、大小和纳秒修改时间，无法识别刻意保持大小/时间的字节替换。没有声称所有计算缓存已精细迁移。
@@ -199,11 +203,13 @@ does not assert Runtime READY or revalidate any real human boundary decisions.
 
 - `project_scheduler.py --workspace <workspace> --mode package|codex`：从认证标题索引得到全部非空商品，必要时沿用原项目配置更新完整目标清单。内部默认 3 款、可设 2 款；分组不改 batch identity。一组中失败或 REPAIRABLE 保留其他有效成果，并停止进入下一组。总控结果仅含编号、状态、数量和短错误，没有聊天/字幕/原始模型日志。
 - `--product <index>` 是独立单商品入口；配置仍来自同一登记 workspace。每个商品用独立目录锁，checkpoint 用 workspace 锁/revision；不同商品可通过多个独立进程执行，同商品并发立即阻塞。默认 package 模式只发布结构化工作单，保存 REVIEW_PENDING/商品 BLOCKED，不冒充已自动执行。
-- `codex_worker.py` 使用新 `codex exec --ephemeral --json --sandbox read-only --ignore-user-config` 进程，不用 resume/fork。隔离的临时工作目录只含本任务规则和 JSON schema，当前商品清理后的任务从 stdin 进入；禁止工具行为，收到工具事件、失败/超时、错误身份或缺完成事件就拒绝结果。每个商品选择与终审再分开上下文；最终还有独立项目语义复核上下文。
+- `codex_worker.py` 使用新 `codex exec --ephemeral --json --sandbox read-only --ignore-user-config` 进程，不用 resume/fork。隔离的临时工作目录只含本任务规则和 JSON schema，当前商品清理后的任务从 stdin 进入；禁止工具行为，收到工具事件、失败/超时、错误身份或缺完成事件就拒绝结果。每个商品选择与终审分开上下文；商品级语义终审通过后不重复执行项目级语义复核。
 - CLI 成功结果绑定 task 摘要、不同 thread ID、完成事件摘要和返回结果；本地随机密钥封存执行记录。严格导入校验封存、任务角色、当前方案/输入及结果字段。该记录是本机执行来源完整性约定，不是防止本机所有者恶意伪造的远端数字签名。CLI 缺失/不可用时工作单留待审核；不会自动换模型或使用启发式冒充 Codex。
 - 工作单只带当前商品的确认范围、认证候选或精修方案、规则/配置引用、有效阶段引用与简短问题；不传前一商品对话。超过 128KB 必须拆任务并 BLOCKED，不能截掉候选。任务、执行记录与详细文本只在本地忽略目录保存。
 
 ### 已接入的关键质量链
+
+`registered_pipeline.py` 支持两类明确区分的范围来源：人工确认，或当前批次经用户授权的语义推断。语义推断必须保留标题特征锚点与精确字幕锚点、来源本地时间及授权来源；校验当前商品标题/索引、批次范围、商品顺序、来源覆盖和全局无重叠。锚点或身份不确定时阻塞，不伪装成人工确认。发布器将语义范围作为当前商品 range checkpoint，候选阶段仍按独立质量规则执行。
 
 `registered_pipeline.py` 复用真实 `build_confirmed_ranges` 人工证明/源覆盖验证、`build_wide_candidates` 全范围清理、现有本机 Whisper 加载及合并窗口、`refine_words`、RMS 开头/句尾检查和 `normalize_physical_clips`。它把 range → candidate → Codex rough → local ASR → physical plan → exact vision → independent Codex final review → final audit 写入第 1 轮不可变商品记录，而非把旧固定路径产物贴新身份。
 
@@ -217,7 +223,9 @@ ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需�
 
 ### 项目完成与统计
 
-全部目标商品都通过后，仍需独立项目 Codex 审核当前最终文字摘要/方案和单商品审核引用，检查跨商品、跨组语义重复；没有该执行记录保持 PROJECT_CODEX_REVIEW_PENDING。本地还检查跨组实际源秒范围重叠。区分 final_review_complete、written_count、export_verified_count；delivery_complete 始终因未迁移真实写入/导出复验而阻塞，不能宣称全部交付。
+商品级 Codex 语义终审及本地硬门禁通过后，项目级只检查商品清单与跨商品/跨组实际源帧重叠；不得再次发起 Codex 语义终审，也不得以字符串相似度代替语义判断。通过后进入 Resolve 身份核对、写入和写后回读。区分 final_review_complete、written_count、export_verified_count；未完成的导出验证仍单独反映在 delivery_complete 中。
+
+淘宝注册追加器按全批次视频顺序在每两条成片视频之间留 2 秒（项目帧率换算），商品边界共用一个间隔；一条视频内部的物理素材段连续。纯布局修复依据写入回读快照识别待审预览，只重排已通过的源帧和同步音画并移动商品标记，不读取标题缓存或重新审核语义。
 
 每商品按阶段记录实测耗时、模型/ASR/物理/人物/终审阶段、缓存命中和失效原因、失败状态及修复计数入口。不宣称优化幅度。商品级 REPAIRABLE 需要修正当前方案并重新提交，自动全池返修编排尚未完成。
 
@@ -261,7 +269,7 @@ ASR/物理阶段计算前 capture_stage，完成后复核依赖；模型按需�
 - `sentence_audio_diagnostic.py` 对明确工作区内的既有方案做局部核实，不重新选句、不改原始ASR或切点。风险窗复用带素材/模型/参数/范围身份及完整性封存的源级计算，缓存齐全时不加载模型。原方案、输入正文摘要、源媒体内容、模型及执行期间生产者均需核对。
 - 结果仅为 `DIAGNOSTIC_ONLY`，声音完整性仍是 `UNVERIFIED`，不签发最终门禁或写入许可。新算法使旧声音汇总失效；身份匹配的原ASR和未改动方案的语义证据仍可用于各自职责范围。真实阶段计时及失败、缓存命中留本地，不发布私有运行正文。
 
-`owned_audio_refinement.py`在已选择句子的词间合法帧内核实局部电平，只修物理边缘；原ASR时间与语义归属不变。修边后方案摘要变更，最终语义和人物证据必须绑定新摘要。旧方案仅保留为返工历史。局部风险通过不等于音素精度认证。
+`owned_audio_refinement.py`先记录20ms RMS/峰值/样本范围波形，再按“词完整优先、静音/低能量优先；连续口播时取相邻ASR词界之间最低能量帧”确定物理切点。连续口播回退只改切点，不改ASR词或语义组合；找不到合法词间帧时生成音频专属返修记录，保留选段/ASR/卖点清单，不退回语义选段。修边后方案摘要变更，最终语义和人物证据必须绑定新摘要。该记录不证明音素精度。
 
 Resolve回读原始整数源帧不改写；当其恰好少一帧时，只有精确源时间乘FPS及左侧偏移均在百万分之一帧内与计划一致，才接受浮点截断解释；缺失、冲突或实际偏移均拒绝。
 

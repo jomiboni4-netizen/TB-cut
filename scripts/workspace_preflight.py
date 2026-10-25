@@ -29,6 +29,11 @@ MAIN_SCRIPTS = (
 def inspect(paths: RuntimePaths) -> list[str]:
     reasons: list[str] = []
     active: set[int] = set()
+    def artifact_ref(path: Path) -> str:
+        try:
+            return paths.reference(path)
+        except ArtifactPathError:
+            return str(path)
     for rel in REPO_FILES:
         if not (paths.repo_root / rel).is_file():
             reasons.append(f"repo_file_missing: {rel}")
@@ -36,7 +41,7 @@ def inspect(paths: RuntimePaths) -> list[str]:
         reasons.append(f"workspace_state_missing: {paths.state_path}")
     else:
         try:
-            state = json.loads(paths.state_path.read_text(encoding="utf-8"))
+            state = paths.load_state()
             active = {int(value) for value in state.get("batch", {}).get("product_ids") or []}
             expected = expected_identity(paths)
         except (CacheIdentityError, OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
@@ -58,7 +63,7 @@ def inspect(paths: RuntimePaths) -> list[str]:
                 try:
                     validate_cache(paths, artifact, expected=expected)
                 except (CacheIdentityError, OSError, ValueError, TypeError) as exc:
-                    reasons.append(f"cache_identity_invalid: {artifact.relative_to(paths.workspace_root)}: {exc}")
+                    reasons.append(f"cache_identity_invalid: {artifact_ref(artifact)}: {exc}")
     for name in MAIN_SCRIPTS:
         script = paths.repo_root / "scripts" / name
         if not script.is_file():
@@ -77,9 +82,9 @@ def inspect(paths: RuntimePaths) -> list[str]:
                     reference = row["path"] if isinstance(row, dict) else row
                     resolved = paths.resolve_reference(reference)
                     if resolved.legacy_absolute:
-                        reasons.append(f"legacy_absolute_plan_path: {manifest.relative_to(paths.workspace_root)}")
+                        reasons.append(f"legacy_absolute_plan_path: {artifact_ref(manifest)}")
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, ArtifactPathError) as exc:
-                reasons.append(f"plan_reference_invalid: {manifest.relative_to(paths.workspace_root)}: {exc}")
+                reasons.append(f"plan_reference_invalid: {artifact_ref(manifest)}: {exc}")
     # Only runtime directory references are relocatable. External media paths and
     # the state project's repo_root are intentional absolute paths.
     runtime_roots = tuple(base / name for base in (paths.workspace_root, paths.repo_root) for name in (".cache", "reports", "plans", "exports"))
@@ -100,9 +105,9 @@ def inspect(paths: RuntimePaths) -> list[str]:
             continue
         try:
             if has_repo_runtime_path(json.loads(artifact.read_text(encoding="utf-8"))):
-                reasons.append(f"repo_absolute_path_in_runtime_json: {artifact.relative_to(paths.workspace_root)}")
+                reasons.append(f"repo_absolute_path_in_runtime_json: {artifact_ref(artifact)}")
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            reasons.append(f"runtime_json_unreadable: {artifact.relative_to(paths.workspace_root)}: {exc}")
+            reasons.append(f"runtime_json_unreadable: {artifact_ref(artifact)}: {exc}")
     return list(dict.fromkeys(reasons))
 
 

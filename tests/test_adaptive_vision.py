@@ -44,14 +44,106 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertAlmostEqual(clock['video_first_pts'], 0.162)
         self.assertAlmostEqual(clock['fps'], 25)
 
-    def audit(self, plan=None, classify=None, paths=None, fps=10):
+    def test_batched_review_sends_apple_absences_directly_to_codex(self):
+        import tempfile
+        from compute_store import identity, media_signature
+        events = []
+        codex_model = {'provider': 'synthetic-codex'}
+        pending = []
+        cache_values = {}
+        for index in range(6):
+            image = self.material/f'pending-{index}.png'
+            image.write_bytes(b'synthetic panel')
+            record = {'variant_id': 'variant_1', 'sample_kind': 'initial',
+                      'stratum_index': index, 'source_file': '001.mp4', 'frame': index,
+                      'clip': {'fps': 10}}
+            key = ('variant_1', 'initial', index)
+            expected = identity(self.paths, 'vision_frame', media_signature(self.video),
+                                {'synthetic': 'classifier'}, {'protocol': vision.FRAME_CACHE_PROTOCOL}, index)
+            pending.append({'record': record, 'key': key, 'expected': expected,
+                            'image_path': image, 'apple': classification('NO_PERSON'),
+                            'codex': None})
+        classifier = {'final_absence_review': codex_model}
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(vision, 'compose_contact_sheet', side_effect=lambda _p, images, out: events.append(('sheet', len(images))) or Path(out)), \
+             patch.object(vision, 'classify_with_codex_batch',
+                          side_effect=lambda images, _sheet, _model: (
+                              events.append(('codex', len(images))) or
+                              [classification('PERSON_VISIBLE') if str(image).endswith('0.png') else classification('NO_PERSON') for image in images])):
+            vision.review_pending_frames(self.paths, pending, classifier, folder, cache_values)
+        self.assertEqual(sorted(events), sorted([('sheet', 4), ('codex', 4),
+                                                 ('sheet', 2), ('codex', 2)]))
+        self.assertEqual(cache_values[pending[0]['key']][0]['label'], 'PERSON_VISIBLE')
+        self.assertEqual(cache_values[pending[1]['key']][0]['label'], 'NO_PERSON')
+        self.assertEqual(pending[0]['codex']['label'], 'PERSON_VISIBLE')
+
+    def test_codex_person_finding_overrides_apple_absence(self):
+        import tempfile
+        from compute_store import identity, media_signature
+        image = self.material/'codex-override.png'
+        image.write_bytes(b'synthetic panel')
+        record = {'variant_id': 'variant_1', 'sample_kind': 'initial', 'stratum_index': 0,
+                  'source_file': '001.mp4', 'frame': 7, 'clip': {'fps': 10}}
+        key = ('variant_1', 'initial', 0)
+        expected = identity(self.paths, 'vision_frame', media_signature(self.video),
+                            {'synthetic': 'classifier'}, {'protocol': vision.FRAME_CACHE_PROTOCOL}, 7)
+        pending = [{'record': record, 'key': key, 'expected': expected, 'image_path': image,
+                    'apple': classification('NO_PERSON'), 'codex': None}]
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(vision, 'compose_contact_sheet', side_effect=lambda _p, _i, out: Path(out)), \
+             patch.object(vision, 'classify_with_codex_batch', return_value=[classification('PERSON_VISIBLE')]):
+            cache_values = {}
+            vision.review_pending_frames(self.paths, pending,
+                                         {'final_absence_review': {'provider': 'codex'}}, folder, cache_values)
+        self.assertEqual(cache_values[key][0]['label'], 'PERSON_VISIBLE')
+
+    def test_batched_response_missing_duplicate_or_malformed_panels_stay_uncertain(self):
+        model = {'provider': 'synthetic'}
+        malformed = vision._labels_from_batch_response('not json', 2, model, 'synthetic')
+        self.assertEqual([row['label'] for row in malformed], ['UNCERTAIN', 'UNCERTAIN'])
+        missing = vision._labels_from_batch_response(
+            '{"frames":[{"panel":1,"person_present":false,"closeup":false}]}', 2, model, 'synthetic')
+        self.assertEqual([row['label'] for row in missing], ['NO_PERSON', 'UNCERTAIN'])
+        duplicate = vision._labels_from_batch_response(
+            '{"frames":[{"panel":1,"person_present":false,"closeup":false},'
+            '{"panel":1,"person_present":true,"closeup":false}]}', 2, model, 'synthetic')
+        self.assertEqual([row['label'] for row in duplicate], ['UNCERTAIN', 'UNCERTAIN'])
+
+    def audit(self, plan=None, classify=None, paths=None, fps=10, codex_classify=None):
         plan = plan or valid_plan()
         paths = paths or self.paths
         detector = self.material/'frame-detector'
         if not detector.exists(): detector.write_text('synthetic detector v1')
-        with synthetic_vision(fps, classify) as boundary:
+        with synthetic_vision(fps, classify, codex_classify) as boundary:
             body = vision.audit(paths, plan, {'001.mp4': self.video}, detector)
         return body, boundary.call_count
+
+    def test_codex_overturns_initial_no_person_without_generating_refinement(self):
+        calls = [0]
+        def apple():
+            calls[0] += 1
+            return classification('NO_PERSON' if calls[0] == 1 else 'HOST_VISIBLE')
+        body, decoded = self.audit(
+            classify=apple,
+            codex_classify=lambda _apple, _image: classification('PERSON_VISIBLE'))
+        row = body['variants'][0]
+        self.assertEqual(decoded, 10)
+        self.assertEqual([round_row['new_points'] for round_row in row['rounds']], [10])
+        self.assertEqual(row['samples'][0]['classification']['label'], 'PERSON_VISIBLE')
+
+    def test_codex_confirmed_initial_no_person_refines_only_that_stratum(self):
+        calls = [0]
+        def apple():
+            calls[0] += 1
+            return classification('NO_PERSON' if calls[0] == 1 else 'HOST_VISIBLE')
+        body, decoded = self.audit(
+            classify=apple,
+            codex_classify=lambda apple, _image: classification(apple['label']))
+        row = body['variants'][0]
+        self.assertEqual(decoded, 20)
+        self.assertEqual([round_row['new_points'] for round_row in row['rounds']], [10, 10])
+        self.assertEqual({sample['stratum_index'] for sample in row['samples']
+                          if sample['sample_kind'] == 'refinement'}, {0})
 
     def test_one_minute_all_people_uses_only_ten_initial_samples(self):
         plan = valid_plan(); plan['variants'][0]['clips'][0]['source_end_frame'] = 600
@@ -74,7 +166,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         body, calls = self.audit(classify=mixed)
         row = body['variants'][0]
         self.assertEqual(row['status'], 'PASS')
-        self.assertAlmostEqual(row['no_person_ratio_estimate'], .09)
+        self.assertEqual(row['no_person_ratio_estimate'], 0.0)
         self.assertEqual([r['new_points'] for r in row['rounds']], [10, 10])
         self.assertEqual(calls, 20)
         self.assertEqual(len({s['frame'] for s in row['samples']}), calls)
@@ -99,7 +191,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertEqual(body['variants'][0]['status'], 'PASS')
         self.assertEqual(body['variants'][0]['person_presence_ratio_estimate'], 1.0)
 
-    def test_other_person_counts_as_person_and_clothing_triggers_refinement(self):
+    def test_other_person_counts_as_person_and_clothing_does_not_trigger_refinement(self):
         detector = self.material/'frame-detector'; detector.write_text('other-person classifier')
         body, calls = self.audit(classify=lambda *args, **kwargs: classification('OTHER_PERSON'))
         self.assertEqual(calls, 10)
@@ -107,7 +199,7 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertEqual(body['variants'][0]['status'], 'PASS')
         detector.write_text('clothing-only classifier')
         body, calls = self.audit(classify=lambda *args, **kwargs: classification('CLOTHING_CLOSEUP'))
-        self.assertEqual(calls, 110)
+        self.assertEqual(calls, 10)
         self.assertEqual(body['variants'][0]['status'], 'REPAIRABLE')
 
     def test_error_blocks_and_is_not_reusable_cache(self):
@@ -139,11 +231,62 @@ class AdaptiveVisionTests(unittest.TestCase):
                 if command[0].endswith('ffmpeg'):
                     Path(command[-1]).write_bytes(b'frame')
                     return Mock(stdout='', stderr='')
-                return Mock(stdout=json.dumps({'protocol':'apple-frame-v5','observations':observations}), stderr='')
-            with patch.object(vision.subprocess, 'run', side_effect=run):
+                return Mock(stdout=json.dumps({'protocol':'apple-frame-v6','observations':observations}), stderr='')
+            with patch.object(vision.subprocess, 'run', side_effect=run), \
+                 patch.object(vision, 'classify_with_codex', side_effect=lambda _image: classification(label)):
                 result = vision.classify_frame(self.video, 0, detector)
             self.assertEqual(result['label'], label)
             self.assertEqual(result.get('subject_evidence', False), label in ('HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP'))
+
+    def test_frame_review_sends_only_confirmed_apple_absence_to_codex(self):
+        from unittest.mock import Mock
+        detector = self.material/'escalation-detector'; detector.write_text('synthetic')
+        def run_with_apple(label):
+            has_person = label in ('PERSON_VISIBLE', 'PERSON_CLOSEUP', 'OTHER_PERSON')
+            observations = {'best_body': {'confidence': .95} if has_person else {},
+                            'best_face': ({'confidence': .95, 'area': .5} if label == 'PERSON_CLOSEUP' else {}),
+                            'best_pose': {}, 'has_person_signal': has_person,
+                            'pose_available': False if label == 'UNCERTAIN' else True}
+            def run(command, **kwargs):
+                if command[0].endswith('ffmpeg'):
+                    Path(command[-1]).write_bytes(b'frame')
+                    return Mock(stdout='', stderr='')
+                return Mock(stdout=json.dumps({'protocol':'apple-frame-v6','observations':observations}), stderr='')
+            with patch.object(vision.subprocess, 'run', side_effect=run), \
+                 patch.object(vision, 'classify_observations', return_value=classification(label)), \
+                 patch.object(vision, 'classify_with_codex', return_value=classification('PERSON_VISIBLE')) as codex_call:
+                result = vision.classify_frame(self.video, 0, detector)
+            return result, codex_call
+        for positive in ('PERSON_VISIBLE', 'PERSON_CLOSEUP'):
+            result, codex_call = run_with_apple(positive)
+            codex_call.assert_not_called()
+        result, codex_call = run_with_apple('NO_PERSON')
+        codex_call.assert_called_once()
+        self.assertEqual(result['label'], 'PERSON_VISIBLE')
+        self.assertTrue(result['review_trace']['codex']['called'])
+        for not_confirmed_absent in ('UNCERTAIN', 'CLOTHING_CLOSEUP', 'DETECTOR_ERROR'):
+            result, codex_call = run_with_apple(not_confirmed_absent)
+            codex_call.assert_not_called()
+            self.assertEqual(result['label'], not_confirmed_absent)
+            self.assertFalse(result['review_trace']['codex']['called'])
+
+    def test_visual_metrics_use_codex_fallback_without_qwen(self):
+        from unittest.mock import Mock
+        detector = self.material/'metrics-detector'; detector.write_text('synthetic')
+        observations = {'best_body': {}, 'best_face': {}, 'best_pose': {}, 'has_person_signal': False}
+        def run(command, **kwargs):
+            if command[0].endswith('ffmpeg'):
+                Path(command[-1]).write_bytes(b'frame')
+                return Mock(stdout='', stderr='')
+            return Mock(stdout=json.dumps({'protocol':'apple-frame-v6','observations':observations}), stderr='')
+        metrics = Metrics()
+        with patch.object(vision.subprocess, 'run', side_effect=run), \
+             patch.object(vision, 'classify_with_codex', return_value=classification('NO_PERSON')), \
+             scope(metrics):
+            result = vision.classify_frame(self.video, 0, detector)
+        self.assertEqual(metrics.rows['codex_fallback']['calls'], 1)
+        self.assertEqual(metrics.rows['codex_fallback']['units'], 1)
+        self.assertEqual(result['review_trace']['apple_vision']['label'], 'NO_PERSON')
 
     def test_different_people_require_no_identity_match(self):
         body, _ = self.audit(classify=lambda *args, **kwargs: classification('HOST_VISIBLE'))
@@ -266,7 +409,9 @@ class AdaptiveVisionTests(unittest.TestCase):
         self.assertEqual(repeat_calls, 0)
         self.assertEqual(second.rows['cache']['hits'], calls+1)
         self.assertGreaterEqual(first.rows['cache']['seconds'], 0)
-        self.assertEqual(second.rows['qwen_fallback']['calls'], 0)
+        self.assertFalse(any(hasattr(vision, name) for name in (
+            'classify_with_qwen', 'classify_with_qwen_batch', 'qwen_model_identity',
+            'unload_qwen_model')))
 
     def test_person_pass_without_codex_receipt_cannot_approve(self):
         ref = self.plan_ref()
@@ -313,8 +458,9 @@ class AsrReuseIntegrationTests(unittest.TestCase):
                 asr = pipeline.local_asr(self.paths, narrower)
             record = load_stage(self.paths, asr)
             self.assertIn(narrower, [d['path'] for d in record['identity']['dependencies']])
-            self.assertEqual(len(record['body']['windows']), 1)
-            self.assertEqual(record['body']['windows'][0]['window_start'], 0)
+            self.assertEqual(len(record['body']['windows']), 2)
+            self.assertTrue(all(window['fallback_level'] == 'initial_window'
+                                for window in record['body']['windows']))
 
     def test_model_weights_change_invalidates_approval_and_rebuilds_dependent_plan(self):
         product = {'product_id': 1, 'encoding_id': '001'}
@@ -328,7 +474,7 @@ class AsrReuseIntegrationTests(unittest.TestCase):
                 result = scheduler.process_product(self.paths, product, mode='codex', detector=self.detector)
                 self.assertEqual(result['status'], 'FINAL_PASS', result)
                 self.assertNotEqual(resume(self.paths)[1]['plan_ref'], old)
-                self.assertEqual(pipeline.transcribe_window.call_count, 2)
+                self.assertEqual(pipeline.transcribe_window.call_count, 4)
 
     def test_other_product_reuses_frame_computation_but_cannot_approve_overlapping_plan(self):
         import codex_worker

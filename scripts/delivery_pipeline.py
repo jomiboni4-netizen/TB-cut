@@ -22,8 +22,8 @@ from runtime_meta import _sha256
 PRODUCERS = {
     'assembly': ['delivery_editorial.py','delivery_fps.py','delivery_assembly.py','sentence_boundaries.py','refine_plans_v2.py'],
     'audio': ['owned_audio_refinement.py','audio_boundary_evidence.py','refine_plans_v2.py','sentence_boundaries.py','final_quality_gate.py'],
-    'semantic': ['delivery_pipeline.py','codex_worker.py','final_quality_gate.py','sentence_boundaries.py'],
-    'vision': ['adaptive_vision.py','vision_record_score_v5.py','apple_frame_probe.swift'],
+    'semantic': ['delivery_pipeline.py','delivery_editorial.py','codex_worker.py','final_quality_gate.py','sentence_boundaries.py'],
+    'vision': ['adaptive_vision.py','vision_record_score_v5.py','apple_frame_probe.swift','vision_contact_sheet.swift'],
 }
 CHECKS = {'opening','ending','causal_logic','seams','selling_value','duplicates'}
 
@@ -34,6 +34,9 @@ def semantic_task(plan):
         product_title=plan['product']['title'],plan_digest=digest(plan),rules_fingerprint=plan.get('rules_fingerprint'),
         review_producer_digest=digest({name:_sha256(Path(__file__).with_name(name)) for name in PRODUCERS['semantic']}),
         variants=semantic_review_variants(plan),
+        semantic_basis={'selling_points':plan.get('semantic_map',[]),
+                        'digest':plan.get('semantic_map_digest'),
+                        'instruction':'核对成片表达是否有对应原文证据，原意是否完整；发现无依据卖点或上下文依赖时列为问题。'},
         instructions=SELECTION_RULE+'独立检查每条完整开头、结尾及所有接缝，原源上下文依赖、因果条件转折列举指代承诺闭合、明显卡壳/假起句/词音节重复/无效填充、禁止内容、卖点与跨版重复。'
         '只做语义审核；声音、人物和帧定位由本机检查，不要求真人试听或音素精度。承接词和半帧估计不自动失败。'
         '每条严格大于45秒、小于60秒，不以填充或高度重复凑三条。checks六项必须分别判断；issues列具体阻断问题；selected_ranges为空。')
@@ -73,7 +76,7 @@ class Pipeline:
         self._prepared = None
         atomic_json(self.folder/'PIPELINE_MANIFEST.json',dict(contract='fixed-delivery-v3-two-stage-person-audit-disfluency',
             producer_snapshot=self.code,stage_producers=PRODUCERS,recipe_sha256=self.recipe_sha,
-            frozen_cutpoint_contract='owned-gap-local-audio-v1',rules_sha256=self.rules,
+            frozen_cutpoint_contract='owned-gap-local-audio-v3-clean-pause-else-owned-edge',rules_sha256=self.rules,
             vision_rules_sha256=self.vision_rules_sha,
             normal_execution='parameters_only_no_generated_code',legacy_artifacts='read_only_not_automatically_attested',
             older_automatic_plans='stale_for_new_execution_requires_source_bound_editorial_and_rate_registration'))
@@ -99,7 +102,7 @@ class Pipeline:
         early = task(self.paths,self.recipe)
         atomic_json(self.folder/'ASSEMBLY_TASK.json',early)
         with self.ledger.span('primary_assembly_review_validation','verification'):
-            verify(self.paths,self.recipe,early)
+            assembly_review = verify(self.paths,self.recipe,early)
             rates = load(self.paths,self.state,self.run,self.recipe)
         from compute_store import media_signature
         records = {name:checked_file(ref,self.paths.workspace_root)['body'] for name,ref in self.recipe['asr_records'].items()}
@@ -115,7 +118,10 @@ class Pipeline:
                         (signature['size'],signature['mtime_ns'],signature['sha256']), 'selected_source_changed_since_init')
         raw = self.store.stage('assembly',dict(recipe=self.recipe,media=signatures),PRODUCERS['assembly'],
             lambda: assemble(self.paths,self.state,self.run,self.recipe,self.index,self.product,self.ranges))
-        plan = copy.deepcopy(raw); plan['rules_fingerprint'] = self.rules; audit_rows = []
+        plan = copy.deepcopy(raw); plan['rules_fingerprint'] = self.rules
+        plan['semantic_map'] = assembly_review['semantic_map']
+        plan['semantic_map_digest'] = digest(plan['semantic_map'])
+        audit_rows = []
         from owned_audio_refinement import refine
         for variant in plan['variants']:
             refined_clips = []
@@ -236,7 +242,7 @@ def main():
                     atomic_json(destination,capture(paths,pipeline.state,pipeline.run))
                     ref=dict(path=str(destination.resolve()),sha256=_sha256(destination))
                     pipeline.state.setdefault('runtime',{})['frame_rate_registration']=ref
-                    atomic_json(paths.state_path,pipeline.state)
+                    paths.write_state(pipeline.state)
                     result = dict(status='PROJECT_RATES_REGISTERED',reference=ref)
             elif args.operation == 'assembly-task':
                 from delivery_editorial import task

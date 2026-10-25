@@ -88,10 +88,14 @@ def project_preflight(paths):
 
 
 def current_project(paths, resolve):
-    config = checked_project(paths, json.loads(paths.state_path.read_text()))
+    config = checked_project(paths, paths.load_state())
     manager = resolve.GetProjectManager()
     project = manager.GetCurrentProject()
-    if not project or stable_id(project) != config['resolve_project_id']:
+    from resolve_session_identity import confirm_project
+    if not project:
+        raise CacheIdentityError('resolve_project_identity_mismatch')
+    confirmed, _ = confirm_project(paths, project)
+    if confirmed != config['resolve_project_id']:
         raise CacheIdentityError('resolve_project_identity_mismatch')
     return manager, project, config
 

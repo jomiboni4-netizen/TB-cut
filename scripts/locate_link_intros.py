@@ -119,7 +119,9 @@ def generate(paths):
     """
     with generator_lock(paths):
         snapshot = BuildSnapshot(paths)
-        inputs = [paths.cache_dir / name for name in ("subtitle_index.json", "titles.json")]
+        # Registered project inputs live in the project-level upstream cache;
+        # the batch cache is reserved for derived suggestions and work artifacts.
+        inputs = [paths.upstream_cache_dir / name for name in ("subtitle_index.json", "titles.json")]
         signatures = {path: signature(path) for path in inputs}
         index, titles = [load_checked_json(paths, path, expected=snapshot.identity) for path in inputs]
         model = build_suggestions(index, titles["products"])

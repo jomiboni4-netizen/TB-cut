@@ -16,7 +16,7 @@ from project_registry import CONFIG_NAME, ProjectIdentityError, atomic_json, wor
 from runtime_paths import resolve_runtime_paths
 from runtime_meta import CacheIdentityError, expected_identity, load_checked_json, metadata_path, validate_cache
 from product_checkpoints import (capture_stage, context, load_stage, publish_stage as stage_publisher, read_ledger, resume,
-                                 update_checkpoint)
+                                 update_checkpoint, current_range_path)
 from update_batch_state import reconcile
 import index_subtitles
 import index_titles
@@ -69,7 +69,7 @@ class ProjectResumeTests(unittest.TestCase):
         return initialize(paths, material_folder=self.material, resolve_project_id=identity,
                           title=self.title, subtitles=[str(self.srt)], videos=[str(self.video)],
                           resolve_project='same display name', source_timeline='source', target_timeline='target',
-                          batch_id='batch-a', products=[1])
+                          batch_id='batch-a', products=[1], force=True)
 
     def plan(self, paths=None, version='v1', body=None):
         paths = paths or self.paths
@@ -105,6 +105,23 @@ class ProjectResumeTests(unittest.TestCase):
         self.title.unlink()
         with self.assertRaisesRegex(ProjectIdentityError, 'registered_title_missing'):
             initialize(self.paths)
+
+    def test_republishing_existing_range_restores_current_pointer(self):
+        body = __import__('quality_fixtures').range_body()
+        args = dict(product_id=1, encoding_id='001', stage='range', version='range-v1',
+                    model_version='synthetic-boundary', body=body)
+        reference = publish_stage(self.paths, **args)
+        pointer = current_range_path(self.paths, 1, '001')
+        pointer.unlink()
+
+        republished = publish_stage(self.paths, **args)
+
+        self.assertEqual(republished, reference)
+        self.assertEqual(json.loads(pointer.read_text()), {
+            'reference': reference,
+            'body_digest': __import__('project_registry').digest(body),
+        })
+        self.assertEqual(load_stage(self.paths, reference)['body'], body)
 
     def test_two_projects_same_input_display_name_product_one_cannot_share(self):
         other = resolve_runtime_paths(self.repo, self.base / 'other')

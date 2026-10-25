@@ -21,6 +21,7 @@ from mimo_review_v2 import prompt as mimo_prompt
 from mimo_responses import MODEL as RESPONSES_MODEL, ResponseAPIError, create_response
 from semantic_evidence import clean_cue, semantic_windows
 from workbook_runtime import preferred_node
+from runtime_paths import resolve_runtime_paths
 
 
 MODEL = RESPONSES_MODEL
@@ -30,7 +31,7 @@ LINK_MENTION = re.compile(r"(?:\d+|[零一二三四五六七八九十两]+)\s*�
 
 
 def current_inputs(root: Path, workspace: Path, product_ids: list[int]):
-    state = json.loads((workspace / "PROJECT_STATE.json").read_text(encoding="utf-8"))
+    state = resolve_runtime_paths(root, workspace).load_state()
     title_path = Path(state["title_path"]).expanduser().resolve()
     parsed = parse_workbook(title_path, root, preferred_node())
     overrides = state.get("batch_overrides") or {}

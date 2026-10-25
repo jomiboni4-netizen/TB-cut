@@ -190,12 +190,41 @@ def main():
     pool=project.GetMediaPool();sources={Path(v).name:v for v in state['video_paths']};items=media_items(pool.GetRootFolder())
     if len(sources)!=len(state['video_paths']):raise ValueError('ambiguous_source_basename')
     if args.operation=='inspect':
+        source_matches=[t for t in timelines if t.GetName()==state['resolve']['source_timeline']]
+        target_matches=[t for t in timelines if t.GetName()==state['resolve']['target_timeline']]
+        if len(source_matches)!=1 or len(target_matches)!=1:
+            raise ValueError('configured_source_or_target_timeline_missing_or_ambiguous')
+        source,target=source_matches[0],target_matches[0]
+        if stable_id(source)==stable_id(target):raise ValueError('configured_source_equals_target')
+        source_media_present={name:str(Path(path).resolve()) in items for name,path in sources.items()}
+        writer_path=Path(__file__).with_name('reusable_test_delivery.py')
+        override_path=paths.workspace_root/'delivery'/'USER_OVERRIDE.json'
+        override=json.loads(override_path.read_text()) if override_path.is_file() else {}
+        authorization=override.get('resolve_write_authorization',{})
+        expected_products=state.get('batch',{}).get('product_ids',[])
+        authorized=(authorization.get('confirmed_by_user') is True
+                    and authorization.get('action')=='clear_configured_target_and_append'
+                    and authorization.get('clear_existing') is True
+                    and authorization.get('product_ids')==expected_products
+                    and authorization.get('project_id')==stable_id(project)
+                    and authorization.get('source_timeline_id')==stable_id(source)
+                    and authorization.get('target_timeline_id')==stable_id(target))
+        writer_ready=(writer_path.is_file() and bool(expected_products) and len(expected_products)<=3
+                     and authorized and all(source_media_present.values())
+                     and callable(getattr(pool,'AppendToTimeline',None))
+                     and callable(getattr(target,'GetItemListInTrack',None)))
         current={'project_id':stable_id(project),'project_name':project.GetName(),'project_settings':project.GetSetting(),
                  'protected':{stable_id(t):snapshot(t) for t in timelines},
-                 'source_media_present':{name:str(Path(path).resolve()) in items for name,path in sources.items()}}
+                 'source_media_present':source_media_present,
+                 'source_timeline_name':source.GetName(),'target_timeline_name':target.GetName(),
+                 'source_timeline_id':stable_id(source),'target_timeline_id':stable_id(target),
+                 'write_readback_capability':'incremental_target_append_black_gap_readback_v1',
+                 'writer_entrypoint':'reusable_test_delivery.py','writer_ready':writer_ready,
+                 'authorization_ready':authorized}
         atomic_json(paths.workspace_root/'RESOLVE_PREFLIGHT.json',current)
         print(json.dumps({'project':project.GetName(),'project_settings':{k:project.GetSetting(k) for k in ('timelineFrameRate','timelineResolutionWidth','timelineResolutionHeight')},
-                          'timelines':[{'name':t.GetName(),'fps':t.GetSetting('timelineFrameRate'),'width':t.GetSetting('timelineResolutionWidth'),'height':t.GetSetting('timelineResolutionHeight')} for t in timelines]},ensure_ascii=False),flush=True)
+                          'timelines':[{'name':t.GetName(),'fps':t.GetSetting('timelineFrameRate'),'width':t.GetSetting('timelineResolutionWidth'),'height':t.GetSetting('timelineResolutionHeight')} for t in timelines],
+                          'writer_ready':writer_ready,'authorization_ready':authorized},ensure_ascii=False),flush=True)
         os._exit(0)
     pre=json.loads((paths.workspace_root/'RESOLVE_PREFLIGHT.json').read_text())
     plan=json.loads((paths.cache_dir/'physical_plan.json').read_text())

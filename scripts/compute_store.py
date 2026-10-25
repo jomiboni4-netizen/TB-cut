@@ -88,6 +88,31 @@ def cached(paths, expected, compute):
             os.close(descriptor)
 
 
+def cached_value(paths, expected):
+    """Read a proven cache row without running its producer; used before batched inference."""
+    folder = directory(paths, expected['kind'])
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / (digest(expected)+'.json')
+    descriptor = os.open(target.with_suffix('.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+    with span('cache'):
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                count('cache', reason='writer_busy')
+                raise CacheIdentityError('physical_compute_writer_busy') from exc
+            check_media(expected['media'])
+            if not target.exists():
+                count('cache', reason='identity_not_found')
+                return None, False
+            value = read(paths, target, expected)
+            check_media(expected['media'])
+            count('cache', hits=1)
+            return value['body'], True
+        finally:
+            os.close(descriptor)
+
+
 def containing_asr(paths, expected):
     """Reuse a proven larger window with identical media, weights and inference parameters."""
     base = {k: v for k, v in expected.items() if k != 'bounds'}

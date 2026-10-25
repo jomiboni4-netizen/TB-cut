@@ -8,6 +8,16 @@
 
 显式指定 `--workspace`，继承该工作区已核验的 `RUN.json`、登记配置及本机输入。新任务初始化仍使用 `coldstart_semantics.py init --input-state ...` 的显式登记协议，不能默认挑旧工作区。
 
+冷启动剪辑先完成只读 Resolve preflight，再开始索引。`coldstart_semantics.py index` 必须找到本轮 `delivery/human_ranges.json`，其中商品 ID 与批次完全一致，并且每条范围有用户确认来源；它直接从这些源素材起止点生成字幕候选，不运行全局标题定位器，也不以90秒、标题关键词数或全局定位分数淘汰范围内候选。只完整落在标记范围内的字幕可进入选段；标记文件摘要与Resolve preflight摘要写入候选索引，任一变化都会阻断旧候选。视频完整哈希延迟到 preflight 通过后。
+
+Resolve preflight 同时验证登记的源/目标时间线、素材池来源、当前批次清空授权和逐款写入器入口；缺任一项时，不开始视频哈希或字幕候选分析。逐款 writer 只接受 `clear_configured_target_and_append` 授权，备份并清空登记的目标时间线后按批次商品顺序追加；默认商品间留25帧空白（25fps下1秒黑场），每款追加后检查音画片段位置和范围，再由独立 `readback` 记录通过后才能追加下一款。黑场必须能从相邻商品的回读位置差验证。
+
+### 冷启动逐款写入器优先级
+
+对 `coldstart_resolve.py` 预检绑定的清空后逐款写入流程，唯一写入入口是 `scripts/reusable_test_delivery.py`：它匹配“先备份、清空登记目标、逐商品追加、每款独立回读、商品间留黑场”的事务契约。旧 `scripts/resolve_write_v2.py` 属于不同的追加式登记工作流，不执行本流程要求的目标清空和逐款写入回读，不得作为该入口的自动备用，也不得在部分写入后切换重放。它仍被方案读取、预检、历史验证和其他测试依赖，暂不删除；仅当未来完整迁移并验证所有消费者后再移除。
+
+写入前若新入口测试/预检不通过，停止写入并修复新入口；只有尚未产生任何 Resolve 改动，且替代入口已证明支持相同的项目/时间线身份、清空授权、备份、逐款追加、黑场及独立回读契约时，才可在写入前切换。当前旧写入器不满足这组等价条件。
+
 工作区 `delivery/RECIPE.json` 为数据文件，字段如下。文件引用 `{path, sha256}` 支持工作区相对路径；外部派生索引只在显式给出路径和SHA、且 `input_digest` 与当前RUN一致时复用，不改旧run_id。
 
 ```json
@@ -59,7 +69,7 @@ python3 scripts/delivery_pipeline.py prepare --workspace WORKSPACE
 
 ASR按素材身份、模型权重、实际参数及窗口复用已有sealed compute缓存；包含当前请求的较大窗口也可复用。只有miss才加载/转写，不下载模型。`asr`输出不可变记录引用；把引用填回配方，不写执行代码。
 
-`prepare`生成准确物理方案、局部声音审核和 `SEMANTIC_TASK.json`。只修句子拥有范围内的物理边缘；算法保持 `owned-gap-local-audio-v1`，不把静音当作语义证明。失败保持REPAIRABLE，不自动减条数或挪词。连续物理片段使用现有normalize逻辑；来源词证据无法合并时保持阻断，不能造证明。
+`prepare`生成准确物理方案、局部声音审核和 `SEMANTIC_TASK.json`。音频阶段先保存切点附近20ms波形包络，再确定切点：先选干净静音；无干净静音且有足够证据时，才取相邻ASR词界的中点作为连读折中；不再因某一帧能量更低就把切点滑进发音。连续口播结果仍标记为词界估计，不代表音素级证明；中点不在有界搜索范围或附近音频证据不足时保存音频专属返修记录与波形证据，语义选段、ASR和卖点清单保持不变。算法契约为 `owned-gap-local-audio-v3-clean-pause-else-owned-edge`。失败保持REPAIRABLE，不自动减条数或挪词。连续物理片段使用现有normalize逻辑；来源词证据无法合并时保持阻断，不能造证明。
 
 ```sh
 python3 scripts/delivery_pipeline.py check --workspace WORKSPACE --detector DETECTOR_BINARY

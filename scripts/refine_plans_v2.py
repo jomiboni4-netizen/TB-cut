@@ -26,8 +26,8 @@ AUDIO_SILENCE_HOLD_SEC = 0.12
 AUDIO_END_LOOKAHEAD_SEC = 1.6
 
 
-def audio_level_frames(media: Path, start: float, end: float) -> list[tuple[float, float]]:
-    """Return (frame_start_seconds, dBFS) for 20 ms mono PCM windows."""
+def _audio_pcm_frames(media: Path, start: float, end: float) -> list[dict]:
+    """Decode 20 ms mono PCM windows with RMS and waveform extrema."""
     if end <= start:
         return []
     result = subprocess.run([
@@ -45,8 +45,22 @@ def audio_level_frames(media: Path, start: float, end: float) -> list[tuple[floa
         chunk = samples[offset:offset + samples_per_frame]
         rms = math.sqrt(sum(value * value for value in chunk) / len(chunk))
         dbfs = 20 * math.log10(max(rms / 32768, 1e-8))
-        frames.append((start + offset / 16000, dbfs))
+        peak = max(abs(value) for value in chunk)
+        frames.append({"start": start + offset / 16000, "end": start + (offset + samples_per_frame) / 16000,
+                       "rms_dbfs": dbfs,
+                       "peak_dbfs": 20 * math.log10(max(peak / 32768, 1e-8)),
+                       "waveform_min": min(chunk), "waveform_max": max(chunk)})
     return frames
+
+
+def audio_level_frames(media: Path, start: float, end: float) -> list[tuple[float, float]]:
+    """Return (frame_start_seconds, RMS dBFS) for 20 ms mono PCM windows."""
+    return [(row["start"], row["rms_dbfs"]) for row in _audio_pcm_frames(media, start, end)]
+
+
+def audio_waveform_frames(media: Path, start: float, end: float) -> list[dict]:
+    """Return a 20 ms waveform envelope used to choose local cut positions."""
+    return _audio_pcm_frames(media, start, end)
 
 
 def refine_audio_end(media: Path, start: float, end: float, source_duration: float) -> tuple[float, dict]:
@@ -158,8 +172,10 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
             continue
         from sentence_boundaries import verify_edges
         left_proof = dict(previous.get('sentence_edges') or {})
-        proofs_mergeable = (verify_edges(previous) and verify_edges(clip)
-                            and left_proof['word_context_digest'] == clip['sentence_edges']['word_context_digest'])
+        proofs_mergeable = verify_edges(previous) and verify_edges(clip)
+        if not proofs_mergeable:
+            merged.append(clip)
+            continue
         previous["source_end_frame"] = max(int(previous["source_end_frame"]), int(clip["source_end_frame"]))
         fps = float(previous.get("fps") or clip.get("fps") or 30)
         if "record_duration_frames" in previous:
@@ -176,16 +192,30 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
         ))
         audit["transcript"] = str(audit.get("transcript") or "") + str(other.get("transcript") or "")
         audit["alignment_transcript"] = str(audit.get("alignment_transcript") or "") + str(other.get("alignment_transcript") or "")
-        if proofs_mergeable:
-            proof = dict(left_proof)
-            for key in ('last_word_end', 'next_word_start', 'last_text', 'last_word_index', 'source_end_frame'):
-                proof[key] = clip['sentence_edges'][key]
-            previous['sentence_edges'] = proof
-            previous['audio_end_frame'] = previous['source_end_frame']
-            previous['audio_boundary_verified'] = previous.get('audio_boundary_verified') is True and clip.get('audio_boundary_verified') is True
-            if clip['sentence_edges'].get('alignment_status') == 'FRAME_ROUNDED_ESTIMATE':
-                proof['alignment_status'] = 'FRAME_ROUNDED_ESTIMATE'
-            previous['transcript'] = ''.join(w['text'] for w in previous['words'][proof['first_word_index']:proof['last_word_index']+1])
+        right_proof = clip['sentence_edges']
+        left_first = previous['words'][left_proof['first_word_index']]
+        right_last = clip['words'][right_proof['last_word_index']]
+        edge_words = {(float(word['start']), float(word['end']), str(word['text'])): dict(word)
+                      for word in previous['words'] + clip['words']}
+        previous['words'] = sorted(edge_words.values(), key=lambda word: (word['start'], word['end']))
+        proof = dict(left_proof)
+        left_key = (float(left_first['start']), float(left_first['end']), str(left_first['text']))
+        proof['first_word_index'] = next(i for i, word in enumerate(previous['words'])
+            if (float(word['start']), float(word['end']), str(word['text'])) == left_key)
+        right_key = (float(right_last['start']), float(right_last['end']), str(right_last['text']))
+        proof['last_word_index'] = next(i for i, word in enumerate(previous['words'])
+            if (float(word['start']), float(word['end']), str(word['text'])) == right_key)
+        for key in ('last_word_end', 'next_word_start', 'last_text', 'source_end_frame'):
+            proof[key] = right_proof[key]
+        proof['word_context_digest'] = digest(previous['words'])
+        if right_proof.get('alignment_status') == 'FRAME_ROUNDED_ESTIMATE':
+            proof['alignment_status'] = 'FRAME_ROUNDED_ESTIMATE'
+        previous['sentence_edges'] = proof
+        previous['audio_end_frame'] = previous['source_end_frame']
+        previous['audio_boundary_verified'] = previous.get('audio_boundary_verified') is True and clip.get('audio_boundary_verified') is True
+        previous['source_subtitle_text'] = (str(previous.get('source_subtitle_text') or '')
+                                            + str(clip.get('source_subtitle_text') or ''))
+        previous['transcript'] = previous['source_subtitle_text']
         merge_count += 1
     return merged, merge_count
 
@@ -224,19 +254,27 @@ def refine_words(window: dict, rough_start: float, rough_end: float, selected_te
     overlap_indices = [index for index, word in enumerate(words) if float(word["end"]) > rough_start and float(word["start"]) < rough_end]
     if not overlap_indices:
         raise RuntimeError(f"粗剪范围无识别文字：{rough_start}-{rough_end}")
-    # Never choose another word because its preceding pause is larger.
+    # A rough upper bound must not pull in a word that starts before the bound
+    # and ends after it. Keep only complete ASR words contained in the selection.
+    contained_indices = [index for index in overlap_indices
+                         if float(words[index]["start"]) >= rough_start - 1e-7
+                         and float(words[index]["end"]) <= rough_end + 1e-7]
+    if not contained_indices:
+        raise RuntimeError(f"粗剪范围不包含完整词：{rough_start}-{rough_end}")
     if selected_text:
         from sentence_boundaries import anchored_words
         first, last, _ = anchored_words(words, selected_text, rough_start, rough_end)
+        if first not in contained_indices or last not in contained_indices:
+            raise RuntimeError("选中文字边界超出粗剪范围")
     else:
-        first, last = overlap_indices[0], overlap_indices[-1]
+        first, last = contained_indices[0], contained_indices[-1]
     selected = words[first:last + 1]
     start, end = float(selected[0]["start"]), float(selected[-1]["end"])
     text = "".join(str(row["text"]) for row in selected)
     previous_end = float(words[first - 1]["end"]) if first else start
     next_start = float(words[last + 1]["start"]) if last + 1 < len(words) else end
     meta = {
-        "method": "sentence-owned-edges-v1",
+        "method": "sentence-owned-complete-word-edges-v2",
         "first_word_index": first, "last_word_index": last,
         "source_context_review_required": True,
         "start_gap_sec": round(max(0.0, start - previous_end), 3),
@@ -270,7 +308,7 @@ def main() -> None:
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
-    state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    state = paths.load_state()
     media_by_name = {
         media.name: media
         for item in state.get("video_paths") or []
