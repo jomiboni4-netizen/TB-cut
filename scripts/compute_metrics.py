@@ -11,8 +11,9 @@ class Metrics:
         self.rows = {}
         for name in ('candidate', 'selection', 'final_review', 'project_review', 'codex_request_wait',
                      'mimo_request_wait', 'asr_model_load', 'asr_transcription', 'local_asr_vad',
+                     'asr_model_prewarm',
                      'plan', 'audio_rms_boundaries', 'audio_decode', 'video_decode', 'apple_vision',
-                     'qwen_fallback', 'vision', 'frame_clock', 'frame_classification',
+                     'codex_fallback', 'vision', 'frame_clock', 'frame_classification',
                      'final_audit', 'checkpoint', 'cache', 'media_signature'):
             self.add(name)
 

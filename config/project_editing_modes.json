@@ -6,7 +6,7 @@
       "resolve_name_keyword": "都督",
       "range_source": "user_marked_product_start_end_as_approximate_bounds",
       "target_duration_seconds": 60,
-      "duration_exclusive_seconds": [55, 60],
+      "duration_exclusive_seconds": [45, 60],
       "target_variant_count": 1,
       "closeup_duration_ratio_max_inclusive": 0.4,
       "other_shared_hard_rules": "PROJECT_RULES.md"

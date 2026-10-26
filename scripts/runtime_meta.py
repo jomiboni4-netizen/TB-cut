@@ -100,12 +100,16 @@ def _paths(root: Path | RuntimePaths) -> RuntimePaths:
 
 
 def _state(root: Path | RuntimePaths) -> dict:
-    path = _paths(root).state_path
+    paths = _paths(root)
+    path = paths.state_path
     if not path.is_file():
         raise CacheIdentityError(f"runtime_state_missing: {path}")
-    state = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        state = paths.load_state()
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise CacheIdentityError(f'runtime_state_invalid: {type(exc).__name__}') from exc
     from project_registry import CONFIG_NAME, is_registered
-    if (_paths(root).workspace_root / CONFIG_NAME).exists() and not is_registered(state):
+    if (paths.project_ref_path.exists() or (paths.workspace_root / CONFIG_NAME).exists()) and not is_registered(state):
         raise CacheIdentityError('registered_identity_removed_legacy_fallback_forbidden')
     if not state.get("batch", {}).get("batch_id"):
         raise CacheIdentityError("batch_id_missing: PROJECT_STATE.json")
@@ -370,7 +374,7 @@ def _checked_bytes(root, artifact, *, product_id=None, expected=None):
     if artifact.name == "subtitle_index.json":
         value = json.loads(content)
         if (meta.get('producer') != 'index_subtitles.py' or not isinstance(value, dict)
-                or value.get('generator') != 'index_subtitles.py:v2' or value.get('schema_version') != 1):
+                or value.get('generator') != 'index_subtitles.py:v3' or value.get('schema_version') != 1):
             raise CacheIdentityError('subtitle_generator_provenance_invalid')
     return meta, content
 
@@ -380,7 +384,7 @@ def validate_titles(value, meta):
     if meta.get("producer") != "index_titles.py":
         raise CacheIdentityError("titles_producer_invalid")
     preserve_rows = meta.get("preserve_blank_row_indices") is True
-    expected_generator = "index_titles.py:v3" if preserve_rows else "index_titles.py:v2"
+    expected_generator = "index_titles.py:v5" if preserve_rows else "index_titles.py:v4"
     if not isinstance(value, dict) or value.get("schema_version") != 2 or value.get("generator") != expected_generator:
         raise CacheIdentityError("titles_schema_or_provenance_invalid")
     if any(not isinstance(value.get(key), str) or not value[key].strip() for key in ("source", "sheet")):

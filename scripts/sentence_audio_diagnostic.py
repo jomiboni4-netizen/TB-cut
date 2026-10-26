@@ -32,7 +32,7 @@ def run(trial, plan_path, asr_path, model_name='large-v3-turbo'):
     from windowed_asr_v2 import load_model
     trial.paths.registered_scope()
     producer = producer_digest()
-    state_digest = digest(json.loads(trial.paths.state_path.read_text()))
+    state_digest = digest(trial.paths.load_state())
     plan = json.loads(plan_path.read_text())
     parent = json.loads(asr_path.read_text())
     if (parent['body_digest'] != digest(parent['body'])
@@ -87,7 +87,7 @@ def run(trial, plan_path, asr_path, model_name='large-v3-turbo'):
         raise ValueError('audio_diagnostic_model_changed_during_audit')
     if json.loads(plan_path.read_text()) != plan or _sha256(asr_path) != plan['repair_parent_asr']:
         raise ValueError('audio_diagnostic_parent_changed_during_audit')
-    if producer_digest() != producer or digest(json.loads(trial.paths.state_path.read_text())) != state_digest:
+    if producer_digest() != producer or digest(trial.paths.load_state()) != state_digest:
         raise ValueError('audio_diagnostic_producer_or_state_changed_during_audit')
     trial.paths.registered_scope()
     return dict(contract=CONTRACT, plan_digest=digest(plan), parent_asr_sha256=_sha256(asr_path),

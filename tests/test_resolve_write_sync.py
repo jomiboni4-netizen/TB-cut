@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from resolve_write_v2 import snapshot_preserved, validate_written_rows
+from resolve_write_v2 import (snapshot_preserved, validate_written_rows,
+                              manual_cutpoint_marker_specs)
 
 
 class ResolveWriteSyncTests(unittest.TestCase):
@@ -38,6 +39,15 @@ class ResolveWriteSyncTests(unittest.TestCase):
         wrong_audio = [{**video[0], 'source_start': 251}]
         self.assertTrue(any('音频' in error for error in
                             validate_written_rows(expected, video, wrong_audio)))
+
+    def test_unresolved_codex_edges_receive_red_timeline_review_markers(self):
+        markers = manual_cutpoint_marker_specs(27, 'sku-27', 2, 'variant_2',
+            {'unit_id':'variant_2_1','cutpoint_review':{
+                'pending_edges':['opening','ending']}}, 1000, 1500)
+        self.assertEqual([row['frame'] for row in markers], [1001, 2499])
+        self.assertEqual([row['record_boundary'] for row in markers], [1000, 2500])
+        self.assertTrue(all(row['custom_data'].startswith('tb_cut_manual_edge:sku-27:')
+                            for row in markers))
 
 
 if __name__ == '__main__':

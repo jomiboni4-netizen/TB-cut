@@ -37,8 +37,16 @@ def digest_files(paths: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def numeric_key(path: Path) -> tuple[int, str]:
-    return (int(path.stem), path.name) if path.stem.isdigit() else (10**9, path.name)
+def numeric_key(path: Path) -> tuple[int, int, str]:
+    """Sort segmented sources by numeric range, never lexical path order.
+
+    This ordering defines concatenated global time and must match the Resolve
+    source timeline (for example, 31-60 precedes 61-90).
+    """
+    match = re.fullmatch(r"(\d+)-(\d+)", path.stem)
+    if match:
+        return (int(match.group(1)), int(match.group(2)), path.name)
+    return (int(path.stem), 0, path.name) if path.stem.isdigit() else (10**9, 0, path.name)
 
 
 def expand(paths: list[str], suffix: str) -> list[Path]:
@@ -121,9 +129,7 @@ def _generate_locked(paths):
         try:
             validate_cache(paths, output, expected=snapshot.identity)
         except CacheIdentityError as exc:
-            if snapshot.identity.get('schema_version') == 2:
-                raise
-            print(f"字幕索引身份无效，将从原始输入重建：{exc}")
+            print(f"字幕索引身份或生成版本已过期，将从已登记原始输入重建：{exc}")
         else:
             snapshot.check()
             return output
@@ -150,20 +156,17 @@ def _generate_locked(paths):
     with tempfile.TemporaryDirectory(prefix=".subtitles-", dir=paths.upstream_cache_dir) as temporary:
         staged = Path(temporary) / output.name
         staged.write_text(json.dumps({
-            "schema_version": 1, "generator": "index_subtitles.py:v2", "fingerprint": fingerprint,
+            "schema_version": 1, "generator": "index_subtitles.py:v3", "fingerprint": fingerprint,
             "sources": sources, "cues": cues,
         }, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
         staged_meta = write_metadata(paths, staged, "index_subtitles.py", identity=snapshot.identity)
         validate_cache(paths, staged, expected=snapshot.identity)
         # The state rename is separate too; never advance it before both files.
-        updated_state = json.loads(snapshot.state_bytes)
+        updated_state = dict(snapshot.state)
         updated_state.setdefault("runtime", {})["subtitle_index_fingerprint"] = fingerprint
         updated_state["runtime"]["last_successful_stage"] = "subtitle_indexed"
-        with tempfile.TemporaryDirectory(prefix=".subtitle-state-", dir=paths.state_path.parent) as state_temp:
-            staged_state = Path(state_temp) / "state.json"
-            staged_state.write_text(json.dumps(updated_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            publish_pair(staged, staged_meta, output, before_commit=snapshot.check,
-                         state_update=(staged_state, paths.state_path))
+        publish_pair(staged, staged_meta, output, before_commit=snapshot.check)
+        paths.write_state(updated_state, before_commit=snapshot.check)
     return output
 
 

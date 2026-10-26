@@ -6,11 +6,50 @@ from project_registry import digest
 from runtime_meta import CacheIdentityError, _sha256
 from product_checkpoints import load_stage, capture_stage, publish_stage
 from codex_worker import verify_receipt
-from sentence_boundaries import verify_edges, CONTRACT as SENTENCE_CONTRACT
+from sentence_boundaries import (verify_edges, verify_cutpoint_proof,
+                                  CUTPOINT_CONTRACT)
 from audit_mimo_v2 import FORBIDDEN, semantic_duplicate
-from build_expanded_codex_request import FORBIDDEN as CANDIDATE_FORBIDDEN
+from semantic_evidence import FORBIDDEN as CANDIDATE_FORBIDDEN
 
-CONTRACT = 'final-gate-v7-sentence-edges-frame-estimate'
+CONTRACT = 'final-gate-v14-current-asr-identity'
+
+
+def source_overlap_details(plan):
+    """Return pairwise physical source overlap evidence with variant and clip identities."""
+    clips = []
+    for variant in plan.get('variants', []):
+        variant_id = str(variant.get('variant_id') or 'unknown_variant')
+        for index, clip in enumerate(variant.get('clips', []), start=1):
+            try:
+                fps = float(clip['fps'])
+                start_frame = int(clip['source_start_frame'])
+                end_frame = int(clip['source_end_frame'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(fps) or fps <= 0 or end_frame <= start_frame:
+                continue
+            clips.append({'variant_id': variant_id, 'clip_index': index,
+                          'unit_id': str(clip.get('unit_id') or f'clip_{index}'),
+                          'source_file': str(clip.get('source_file') or ''),
+                          'start_frame': start_frame, 'end_frame': end_frame, 'fps': fps,
+                          'start_seconds': start_frame / fps, 'end_seconds': end_frame / fps})
+    details = []
+    for left, right in combinations(clips, 2):
+        if not left['source_file'] or left['source_file'] != right['source_file']:
+            continue
+        overlap_start = max(left['start_seconds'], right['start_seconds'])
+        overlap_end = min(left['end_seconds'], right['end_seconds'])
+        if overlap_end <= overlap_start + 1e-9:
+            continue
+        details.append({
+            'source_file': left['source_file'],
+            'left': left,
+            'right': right,
+            'overlap_start_seconds': overlap_start,
+            'overlap_end_seconds': overlap_end,
+            'overlap_seconds': overlap_end - overlap_start,
+        })
+    return details
 
 
 def plan_errors(plan):
@@ -29,7 +68,6 @@ def plan_errors(plan):
         allow_fewer = editing_policy.get('allow_fewer_variants_when_exhausted') is True
         if (allow_fewer and len(variants) > target_count) or (not allow_fewer and len(variants) != target_count):
             errors.append('VARIANT_COUNT_DOES_NOT_MATCH_PROJECT_MODE')
-    all_clips = []
     for variant in variants:
         clips = variant.get('clips', [])
         if not clips:
@@ -43,40 +81,35 @@ def plan_errors(plan):
                 errors.append('INVALID_SOURCE_FRAMES')
                 continue
             duration += (end - start) / fps
-            if not verify_edges(clip):
-                errors.append('SENTENCE_EDGE_PROOF_MISSING_OR_STALE')
+            lo, hi = start / fps, end / fps
+            cutpoint_valid = verify_cutpoint_proof(clip)
+            legacy_word_proof_valid = verify_edges(clip)
+            if not cutpoint_valid and not legacy_word_proof_valid:
+                errors.append('CUTPOINT_PROOF_MISSING_OR_STALE')
             if (clip.get('audio_start_frame'), clip.get('audio_end_frame')) != (start, end):
                 errors.append('AV_RANGE_MISMATCH')
-            words = clip.get('words')
-            if not words:
-                errors.append('RETAINED_WORD_ALIGNMENT_MISSING')
-                continue
-            lo, hi = start / fps, end / fps
-            proof = clip.get('sentence_edges') or {}
-            if verify_edges(clip):
-                kept = words[proof['first_word_index']:proof['last_word_index']+1]
+            if legacy_word_proof_valid:
+                words = clip.get('words')
+                if not words:
+                    errors.append('RETAINED_WORD_ALIGNMENT_MISSING')
+                    continue
+                proof = clip.get('sentence_edges') or {}
+                kept = [words[proof['first_word_index']], words[proof['last_word_index']]]
                 tolerance = .5/fps if proof.get('alignment_status') == 'FRAME_ROUNDED_ESTIMATE' else 0.
-            else:
-                kept = [w for w in words if w['end'] > lo and w['start'] < hi]
-                tolerance = 0.
-            if not kept or any(w['start'] < lo-tolerance-1e-9 or w['end'] > hi+tolerance+1e-9 for w in kept):
-                errors.append('WORD_CUT_AT_OPENING_ENDING_OR_SEAM')
-            text = ''.join(w['text'] for w in kept)
-            if text != clip.get('transcript'):
-                errors.append('RETAINED_TEXT_MISMATCH')
+                if any(w['start'] < lo-tolerance-1e-9 or w['end'] > hi+tolerance+1e-9 for w in kept):
+                    errors.append('WORD_CUT_AT_OPENING_ENDING_OR_SEAM')
+            text = str(clip.get('source_subtitle_text') or clip.get('transcript') or '')
+            if not text:
+                errors.append('RETAINED_SUBTITLE_TEXT_MISSING')
             if FORBIDDEN.search(text) or CANDIDATE_FORBIDDEN.search(text):
                 errors.append('BANNED_CONTENT')
-            if clip.get('audio_boundary_verified') is not True:
-                errors.append('AUDIO_BOUNDARY_UNVERIFIED')
-            all_clips.append((clip, lo, hi))
         if not duration_limits[0] < duration < duration_limits[1]:
             errors.append('DURATION_OUTSIDE_STRICT_LIMITS')
         for left, right in zip(clips, clips[1:]):
             if left['source_file'] == right['source_file'] and abs(left['source_end_frame'] - right['source_start_frame']) <= 2:
                 errors.append('MEANINGLESS_PHYSICAL_SEAM')
-    for (a, lo, hi), (b, other_lo, other_hi) in combinations(all_clips, 2):
-        if a['source_file'] == b['source_file'] and min(hi, other_hi) > max(lo, other_lo) + 1e-9:
-            errors.append('SOURCE_OVERLAP')
+    if source_overlap_details(plan):
+        errors.append('SOURCE_OVERLAP')
     for a, b in combinations(variants, 2):
         ta = ''.join(c.get('transcript', '') for c in a['clips'])
         tb = ''.join(c.get('transcript', '') for c in b['clips'])
@@ -112,40 +145,145 @@ def final_task(paths, plan_ref):
                'config_reference': 'PROJECT_CONFIG.json', 'product_id': record['identity']['product_id'],
                'encoding_id': record['identity']['encoding_id'], 'rules_fingerprint': record['identity']['rules_fingerprint'],
                'plan_reference': plan_ref, 'plan_digest': record['body_digest'],
-               'variants': semantic_review_variants(plan), 'local_errors': [e for e in plan_errors(plan) if e != 'AUDIO_BOUNDARY_UNVERIFIED'],
+               'variants': semantic_review_variants(plan),
+               'semantic_basis': {'selling_points': plan.get('semantic_map', []),
+                                  'digest': plan.get('semantic_map_digest'),
+                                  'instruction': 'Check whether every variant expresses supported points from this shared map, and whether the quoted source meaning remains intact. Flag unsupported or context-dependent claims.'},
+               'local_errors': plan_errors(plan),
+               'local_error_details': source_overlap_details(plan),
                'hard_rules': {'duration_exclusive': (plan.get('editing_policy') or {}).get('duration_exclusive_seconds', plan.get('duration_exclusive_seconds', [45, 60])),
                               'person_audit': {'no_person_ratio_max_inclusive': 0.10,
                                                'closeup_duration_ratio_max_inclusive': (plan.get('editing_policy') or {}).get('closeup_duration_ratio_max_inclusive', 0.30),
                                                'sampling_contract': 'person-presence-two-stage-record-v7'},
                               'overlap_allowed': False, 'semantic_duplicates_allowed': False,
+                              'overlap_repair_policy': '若 local_error_details 含重叠，列出双方 variant、片段、源文件和精确秒区间；拒绝当前方案并要求重新理解/选择受影响版本，排除所列交集。不得只写“重复”或沿用原范围。',
                               'content_scope': '只保留当前商品卖点/材质/版型/工艺/穿着感受；禁止价格、促销、优惠、红包、抽奖、链接、欢迎、闲聊、后台、拍摄、无关商品和空话'},
-               'review_questions': ['仅检查完整开头、结尾、每个接缝的语义及原源上下文，排除上句残尾或依赖；本机声学与人物门禁单独负责物理风险，不要求文本审核员提供音素精度或真人试听证明',
-                   '因果、条件、转折、列举、指代、承诺是否闭合；连接词不是自动失败条件',
+               'review_questions': ['按普通观众听完是否容易理解判断：没有明显听感或逻辑大漏洞即可通过，不要求形式化完整；结合最小原源上下文检查开头、结尾和接缝，本机声学与人物门禁单独负责物理风险',
+                   '检查因果逻辑本身：理由是否支撑结果、剪辑是否删去必要前提或造成错误因果暗示；按实际语义判断，不依赖“因为/所以”等字面连接词。口语省略但关系清楚即可通过',
+                   '条件、转折、列举、指代、承诺是否造成实质困惑；连接词不是自动失败条件',
                    '卖点是否自然有价值；不能用粗选或 closure_check 当终审']}
     payload['task_digest'] = digest(payload)
     return payload
 
 
+def semantic_selection_task(paths, rough_ref):
+    """Review assembled subtitle meaning before any audio or visual computation."""
+    rough = load_stage(paths, rough_ref)
+    if rough['identity']['stage'] != 'rough':
+        raise CacheIdentityError('semantic_review_requires_rough_selection')
+    candidate_ref = next((dep['path'] for dep in rough['identity']['dependencies']
+                          if load_stage(paths, dep['path'])['identity']['stage'] == 'candidate'), None)
+    if not candidate_ref:
+        raise CacheIdentityError('semantic_review_candidate_missing')
+    candidate = load_stage(paths, candidate_ref)
+    by_id = {row['candidate_id']: row for row in candidate['body']['candidates']}
+    grouped = {}
+    for selected in rough['body']['selected_ranges']:
+        source = by_id.get(selected['candidate_id'])
+        if not source:
+            raise CacheIdentityError('semantic_review_selected_candidate_missing')
+        lo, hi = float(selected['start']), float(selected['end'])
+        cues = sorted(source.get('subtitle', []), key=lambda row: (float(row['start']), float(row['end'])))
+        chosen = [(index, cue) for index, cue in enumerate(cues)
+                  if not cue.get('context_only') and float(cue['end']) > lo
+                  and float(cue['start']) < hi]
+        if not chosen:
+            raise CacheIdentityError('semantic_review_selected_subtitles_missing')
+        first, last = chosen[0][0], chosen[-1][0]
+        text = ''.join(str(cue.get('text') or '') for _, cue in chosen)
+        context_before = ''.join(str(cue.get('text') or '') for cue in cues[max(0, first-2):first])
+        context_after = ''.join(str(cue.get('text') or '') for cue in cues[last+1:last+3])
+        grouped.setdefault(selected['variant_id'], []).append({
+            'unit_id': f"{selected['variant_id']}_{len(grouped.get(selected['variant_id'], []))+1}",
+            'candidate_id': selected['candidate_id'], 'source_file': source['source_file'],
+            'start': lo, 'end': hi, 'transcript': text, 'source_subtitle_text': text,
+            'previous_source_context': context_before, 'following_source_context': context_after})
+    variants = [{'variant_id': key, 'clips': rows} for key, rows in sorted(grouped.items())]
+    payload = {'schema_version': 1, 'role': 'final_review',
+               'review_scope': 'semantic_selection_before_audio',
+               'project_key': rough['identity']['project_key'],
+               'batch_scope': paths.registered_scope()[1], 'config_reference': 'PROJECT_CONFIG.json',
+               'product_id': rough['identity']['product_id'], 'encoding_id': rough['identity']['encoding_id'],
+               'rules_fingerprint': rough['identity']['rules_fingerprint'],
+               'rough_reference': rough_ref, 'rough_digest': rough['body_digest'],
+               'variants': variants,
+               'semantic_basis': {'selling_points': rough['body'].get('semantic_map', []),
+                                  'digest': rough['body'].get('semantic_map_digest'),
+                                  'instruction': 'Review the complete assembled subtitle meaning and source context.'},
+               'review_questions': [
+                   '按普通观众听感判断：整体容易理解且没有大的逻辑漏洞即可通过，不要求形式化完整。',
+                   '核对因果、条件、转折、列举、指代和承接关系，判断是否存在实质误解。',
+                   '检查卖点是否来自当前商品字幕、是否重复、无关或包含禁用内容。',
+                   '逐对核对 clips 的 source_file 与 start/end 秒数；若同源时间区间相交，指出双方 variant/unit 和精确交集，并打回重新理解、重选，不得 PASS。',
+                   '这是语义组合终审；不审核 ASR 切点或画面人物，语义通过后由后续本地阶段检查。'],
+               'hard_rules': {'semantic_threshold': 'ordinary_listener_no_major_logical_gap',
+                              'same_source_time_overlap_allowed': False,
+                              'must_not_claim_audio_or_visual_audit': True}}
+    payload['task_digest'] = digest(payload)
+    return payload
+
+
+def publish_semantic_review(paths, rough_ref, task, receipt_ref):
+    rough = load_stage(paths, rough_ref)
+    receipt = verify_receipt(paths, receipt_ref, task)
+    result = receipt['result']
+    expected_checks = {'opening', 'ending', 'causal_logic', 'seams', 'selling_value', 'duplicates'}
+    if (result.get('verdict') != 'PASS' or set(result.get('checks', {})) != expected_checks
+            or not all(result['checks'].values()) or result.get('issues')):
+        raise CacheIdentityError('semantic_selection_review_not_passed')
+    body = {'verdict': 'PASS', 'rough_reference': rough_ref, 'rough_digest': rough['body_digest'],
+            'task': task, 'receipt': receipt_ref}
+    args = dict(product_id=rough['identity']['product_id'], encoding_id=rough['identity']['encoding_id'],
+                stage='semantic_review', version=digest([rough['body_digest'], task['task_digest']]),
+                model_version='codex-semantic-selection-review-v1', dependencies=[rough_ref])
+    return publish_stage(paths, **args, body=body, snapshot=capture_stage(paths, **args))
+
+
 def validate_vision(plan, vision, paths):
     from adaptive_vision import verify
+    from variant_delivery import verify_projection
+    verify_projection(paths, plan, vision)
     verify(paths, plan, vision)
 
 
 def verify_final_record(paths, plan_ref, body):
     if body.get('quality_contract') != CONTRACT:
         raise CacheIdentityError('legacy_final_verdict_not_quality_evidence')
-    if any(not isinstance(body.get(k), str) or not body[k] for k in ('codex_receipt', 'vision_ref')):
-        raise CacheIdentityError('independent_final_review_or_vision_evidence_missing')
+    if not isinstance(body.get('vision_ref'), str) or not body['vision_ref']:
+        raise CacheIdentityError('vision_evidence_missing')
     plan = load_stage(paths, plan_ref)
-    task = final_task(paths, plan_ref)
-    if body.get('review_task') != task:
-        raise CacheIdentityError('final_review_input_changed')
-    receipt = verify_receipt(paths, body['codex_receipt'], task)
+    semantic_ref = body.get('semantic_review_ref')
+    if semantic_ref:
+        semantic = load_stage(paths, semantic_ref, product_id=plan['identity']['product_id'],
+                              encoding_id=plan['identity']['encoding_id'])
+        if (semantic['identity']['stage'] != 'semantic_review'
+                or semantic['body'].get('verdict') != 'PASS'
+                or semantic['body'].get('rough_digest') != load_stage(
+                    paths, semantic['body']['rough_reference'])['body_digest']):
+            raise CacheIdentityError('semantic_selection_review_evidence_stale')
+        rough_ref = semantic['body']['rough_reference']
+        if rough_ref not in [dep['path'] for dep in plan['identity']['dependencies']]:
+            raise CacheIdentityError('semantic_review_does_not_match_final_plan_selection')
+        task = semantic['body']['task']
+        receipt = verify_receipt(paths, semantic['body']['receipt'], task)
+        if receipt['result'].get('verdict') != 'PASS':
+            raise CacheIdentityError('semantic_selection_review_not_passed')
+    else:
+        if not isinstance(body.get('codex_receipt'), str) or not body['codex_receipt']:
+            raise CacheIdentityError('independent_final_review_evidence_missing')
+        task = final_task(paths, plan_ref)
+        if body.get('review_task') != task:
+            raise CacheIdentityError('final_review_input_changed')
+        receipt = verify_receipt(paths, body['codex_receipt'], task)
     response = receipt['result']
     if plan['body'].get('selection_receipt'):
         selection = verify_receipt(paths, plan['body']['selection_receipt'], plan['body']['selection_task'])
         if selection['thread_id'] == receipt['thread_id']:
             raise CacheIdentityError('final_review_context_not_independent')
+        semantic_map = selection['result'].get('semantic_map')
+        if (semantic_map != plan['body'].get('semantic_map')
+                or digest(semantic_map) != plan['body'].get('semantic_map_digest')):
+            raise CacheIdentityError('final_semantic_basis_not_bound_to_selection_receipt')
     if (receipt['role'] != 'final_review' or response.get('verdict') != 'PASS'
             or set(response.get('checks', {})) != {'opening', 'ending', 'causal_logic', 'seams', 'selling_value', 'duplicates'}
             or any(v is not True for v in response['checks'].values()) or response.get('issues')):
@@ -153,14 +291,27 @@ def verify_final_record(paths, plan_ref, body):
     errors = plan_errors(plan['body'])
     if errors:
         raise CacheIdentityError('local_final_veto: ' + ','.join(errors))
+    asr_records = []
     for dependency in plan['identity']['dependencies']:
         parent = load_stage(paths, dependency['path'])
         if parent['identity']['stage'] == 'asr':
-            from registered_pipeline import asr_model_identity, current_asr_parameters
-            model = parent['body'].get('model')
-            if (not model or parent['body'].get('parameters') != current_asr_parameters()
-                    or asr_model_identity(model['name']) != model):
-                raise CacheIdentityError('final_asr_model_identity_changed')
+            asr_records.append(parent)
+    for asr in asr_records:
+        if (asr['body'].get('cutpoint_contract') != CUTPOINT_CONTRACT
+                or asr['body'].get('asr_is_quality_gate') is not False):
+            raise CacheIdentityError('final_cutpoint_execution_contract_stale')
+        asr_model = asr['body'].get('model')
+        if asr_model is not None:
+            if (not isinstance(asr_model, dict) or not isinstance(asr_model.get('name'), str)
+                    or asr['identity'].get('model_version') != digest(asr_model)):
+                raise CacheIdentityError('final_asr_model_identity_unbound')
+            from registered_pipeline import asr_model_identity
+            try:
+                current_asr_model = asr_model_identity(asr_model['name'])
+            except Exception as exc:
+                raise CacheIdentityError('current_asr_model_identity_unavailable') from exc
+            if current_asr_model != asr_model:
+                raise CacheIdentityError('final_asr_model_identity_stale')
     from publish_confirmed_ranges import verify_confirmation
     range_records = [load_stage(paths, d['path']) for d in plan['identity']['dependencies']
                      if load_stage(paths, d['path'])['identity']['stage'] == 'range']
@@ -180,15 +331,25 @@ def verify_final_record(paths, plan_ref, body):
     return plan
 
 
-def import_final_review(paths, plan_ref, vision_ref, receipt_ref):
+def import_final_review(paths, plan_ref, vision_ref, receipt_ref=None, *, semantic_review_ref=None):
     plan = load_stage(paths, plan_ref)
-    task = final_task(paths, plan_ref)
-    body = {'verdict': 'PASS', 'audit_scope': 'final_plan', 'quality_contract': CONTRACT,
-            'plan_digest': plan['body_digest'], 'review_task': task,
-            'codex_receipt': receipt_ref, 'vision_ref': vision_ref}
+    if semantic_review_ref:
+        semantic = load_stage(paths, semantic_review_ref, product_id=plan['identity']['product_id'],
+                              encoding_id=plan['identity']['encoding_id'])
+        if semantic['identity']['stage'] != 'semantic_review':
+            raise CacheIdentityError('semantic_review_stage_required')
+        body = {'verdict': 'PASS', 'audit_scope': 'semantic_selection_plus_local_hard_gates',
+                'quality_contract': CONTRACT, 'plan_digest': plan['body_digest'],
+                'semantic_review_ref': semantic_review_ref, 'vision_ref': vision_ref}
+    else:
+        task = final_task(paths, plan_ref)
+        body = {'verdict': 'PASS', 'audit_scope': 'final_plan', 'quality_contract': CONTRACT,
+                'plan_digest': plan['body_digest'], 'review_task': task,
+                'codex_receipt': receipt_ref, 'vision_ref': vision_ref}
     verify_final_record(paths, plan_ref, body)
     args = dict(product_id=plan['identity']['product_id'], encoding_id=plan['identity']['encoding_id'],
-                stage='final_audit', version=digest(body), model_version='codex-independent-review-v1',
+                stage='final_audit', version=digest(body), model_version=(
+                    'codex-semantic-selection-review-v1' if semantic_review_ref else 'codex-independent-review-v1'),
                 dependencies=[plan_ref, vision_ref])
     return publish_stage(paths, **args, body=body, snapshot=capture_stage(paths, **args))
 
@@ -200,7 +361,10 @@ def approved_product(paths, product_id, row=None):
         raise CacheIdentityError('product_not_final_quality_passed')
     from product_checkpoints import verify_evidence
     plan = verify_evidence(paths, product_id, row['encoding_id'], row['plan_ref'], row['evidence_ref'], row['status'])
-    return {'product_index': product_id, 'encoding_id': row['encoding_id'], 'plans': plan['body']['variants']}
+    return {'product_index': product_id, 'encoding_id': row['encoding_id'],
+            'plans': plan['body']['variants'],
+            'delivery_scope': plan['body'].get('delivery_scope'),
+            'product_complete': plan['body'].get('delivery_scope', {}).get('product_complete', True)}
 
 
 def main():

@@ -67,13 +67,17 @@ class DeliveryTests(unittest.TestCase):
         self.load=patch('delivery_pipeline.load_run',return_value=(self.paths,self.state,self.run));self.load.start();self.addCleanup(self.load.stop)
         clock_patch=patch('adaptive_vision.proven_clock',return_value=dict(fps=25.,frame_count=25000));self.clock=clock_patch.start();self.addCleanup(clock_patch.stop)
         def quiet(media,lo,hi):return [(n/50,-45.) for n in range(round(lo*50)-2,round(hi*50)+3)]
-        audio_patch=patch('owned_audio_refinement.audio_level_frames',side_effect=quiet);self.audio=audio_patch.start();self.addCleanup(audio_patch.stop)
+        audio_patch=patch('owned_audio_refinement.audio_waveform_frames',side_effect=quiet);self.audio=audio_patch.start();self.addCleanup(audio_patch.stop)
     def save_recipe(self):
         # Synthetic primary-editor decisions; production never generates these.
         from delivery_editorial import task, CONTRACT, UNIT_CHECKS, SEAM_CHECKS
         t=task(self.paths,self.recipe)
         review=dict(contract=CONTRACT,task_digest=t['task_digest'],reviewer='primary_codex',verdict='PASS',issues=[],
             cross_variant_duplicates=dict(passed=True,reason='Distinct synthetic material, cut and color claims.'),units=[],seams=[])
+        review['semantic_map']=[dict(unit_id=u['unit_id'],category='synthetic',
+            selling_point='Synthetic reviewed point',
+            quote=''.join(str(w.get('text','')) for w in u['retained_words']))
+            for v in t['variants'] for u in v['units']]
         for v in t['variants']:
             for u in v['units']:
                 review['units'].append(dict(variant_id=v['variant_id'],unit_id=u['unit_id'],

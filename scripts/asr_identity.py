@@ -8,9 +8,10 @@ from compute_metrics import span
 
 _weights = {}
 
-PARAMETERS = {'language': 'zh', 'beam_size': 5, 'vad_filter': True, 'word_timestamps': True,
+PARAMETERS = {'language': 'zh', 'beam_size': 5, 'vad_filter': False, 'word_timestamps': True,
               'condition_on_previous_text': False, 'device': 'cpu', 'compute_type': 'int8',
-              'protocol': 'window-words-v4-grid-origin', 'audio_origin_grid_seconds': .02}
+              'protocol': 'short-edge-window-no-vad-text-anchored-words-v5',
+              'audio_origin_grid_seconds': .02}
 
 
 def snap_interval(start, end, duration):

@@ -9,12 +9,6 @@
     "source_timeline": null,
     "target_timeline": null
   },
-  "batch": {
-    "batch_id": null,
-    "product_ids": [],
-    "completed_product_ids": [],
-    "failed_product_ids": []
-  },
   "runtime": {
     "pipeline_version": "2.1",
     "rule_version": "v2.1",
@@ -30,9 +24,5 @@
       "base_media_metadata",
       "local_model_weights"
     ]
-  },
-  "batch_overrides": {
-    "skip_blank_titles": true,
-    "preserve_blank_row_indices": true
   }
 }

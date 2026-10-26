@@ -135,6 +135,11 @@ def validate_backup(path, expected=None):
 
 def perform(paths, state, run, plan, request, quality_gate, *, operation):
     """Write once; recover only by verification. Caller supplies current exact quality gate."""
+    from project_task import guard
+    if operation != "readback":
+        guard(paths, "write")
+        if operation == "recover":
+            guard(paths, "recover")
     require(operation in ('write','recover','readback'), 'invalid_resolve_operation')
     folder = paths.workspace_root/'delivery'; journal = folder/'RESOLVE_TRANSACTION.json'
     # Quality and source identity are mandatory even when resuming.
