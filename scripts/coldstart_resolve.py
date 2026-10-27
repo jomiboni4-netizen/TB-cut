@@ -35,6 +35,15 @@ def assert_new_name(name, existing):
     if name in existing:raise ValueError('timeline_name_exists_no_overwrite')
 
 
+def variant_timeline_name(run_id, variant, *, preview=False):
+    product_id = variant.get('product_index')
+    version = variant.get('version') or variant.get('variant_id')
+    if not isinstance(product_id, int) or product_id <= 0 or not isinstance(version, str) or not version:
+        raise ValueError('variant_product_identity_missing_for_timeline_name')
+    kind = '临时试听_人物门禁待验_声学待验' if preview else '审核_人工听感待验'
+    return f"TBcut_{run_id}_{product_id}_{version}_{kind}"
+
+
 def infer_append_endpoint(start, api_end, actual_duration):
     if actual_duration==api_end-start:return 'exclusive'
     if actual_duration==api_end-start+1:return 'inclusive'
@@ -59,6 +68,38 @@ def validate_physical_overlap(variants):
             used.append(clip)
 
 
+def source_start_matches(row, expected, fps):
+    if row['source_start'] == expected:
+        return True
+    # Resolve can truncate a floating source time just below an integer frame.
+    # Accept only independently agreeing time and exact left-offset readbacks;
+    # never tolerate an actual one-frame shift or change the raw API value.
+    return (row['source_start'] == expected - 1
+            and isinstance(fps, (int, float)) and fps > 0
+            and isinstance(row.get('source_start_time'), (int, float))
+            and isinstance(row.get('source_left_offset'), (int, float))
+            and abs(row['source_start_time'] * fps - expected) < 1e-6
+            and abs(row['source_left_offset'] - expected) < 1e-6)
+
+
+def source_end_mode(row, expected, fps):
+    raw = row['source_end_raw']
+    if 'source_end_time' in row:
+        if (not isinstance(fps,(int,float)) or fps <= 0
+                or not isinstance(row.get('source_end_time'),(int,float))
+                or not isinstance(row.get('source_left_offset'),(int,float))
+                or abs(row['source_end_time']*fps-expected) >= 1e-6
+                or abs(row['source_left_offset']+row['duration']-expected) >= 1e-6):
+            raise ValueError('readback_source_end_precision_mismatch')
+        if raw in (expected,expected-1):
+            return 'exclusive'
+    elif raw == expected-1:
+        return 'inclusive'
+    if raw == expected:
+        return 'exclusive'
+    raise ValueError('readback_source_end_mismatch')
+
+
 def check_readback(actual, clips, source_paths, start_frame):
     expected=[];record=start_frame
     for clip in clips:
@@ -70,13 +111,11 @@ def check_readback(actual, clips, source_paths, start_frame):
         rows=sorted([r for r in actual['rows'] if r['kind']==kind],key=lambda r:r['record_start'])
         if len(rows)!=len(expected):raise ValueError('readback_clip_count_mismatch_'+kind)
         modes=[]
-        for row,(media,start,end,left,right) in zip(rows,expected):
+        for row,(media,start,end,left,right),clip in zip(rows,expected,clips):
             if str(Path(row['media_path']).resolve())!=media:raise ValueError('readback_not_original_media')
             if (row['record_start'],row['record_end'],row['duration'])!=(left,right,right-left):raise ValueError('readback_record_gap_or_wrong_duration')
-            if row['source_start']!=start:raise ValueError('readback_source_start_mismatch')
-            if row['source_end_raw']==end:modes.append('exclusive')
-            elif row['source_end_raw']==end-1:modes.append('inclusive')
-            else:raise ValueError('readback_source_end_mismatch')
+            if not source_start_matches(row,start,clip.get('fps')):raise ValueError('readback_source_start_mismatch')
+            modes.append(source_end_mode(row,end,clip.get('fps')))
             verified.append({'kind':kind,'source_start':start,'source_end_exclusive':end,'record_start':left,'record_end_exclusive':right})
         if len(set(modes))!=1:raise ValueError('inconsistent_native_source_end_protocol')
         end_modes[kind]=modes[0]
@@ -151,12 +190,41 @@ def main():
     pool=project.GetMediaPool();sources={Path(v).name:v for v in state['video_paths']};items=media_items(pool.GetRootFolder())
     if len(sources)!=len(state['video_paths']):raise ValueError('ambiguous_source_basename')
     if args.operation=='inspect':
+        source_matches=[t for t in timelines if t.GetName()==state['resolve']['source_timeline']]
+        target_matches=[t for t in timelines if t.GetName()==state['resolve']['target_timeline']]
+        if len(source_matches)!=1 or len(target_matches)!=1:
+            raise ValueError('configured_source_or_target_timeline_missing_or_ambiguous')
+        source,target=source_matches[0],target_matches[0]
+        if stable_id(source)==stable_id(target):raise ValueError('configured_source_equals_target')
+        source_media_present={name:str(Path(path).resolve()) in items for name,path in sources.items()}
+        writer_path=Path(__file__).with_name('reusable_test_delivery.py')
+        override_path=paths.workspace_root/'delivery'/'USER_OVERRIDE.json'
+        override=json.loads(override_path.read_text()) if override_path.is_file() else {}
+        authorization=override.get('resolve_write_authorization',{})
+        expected_products=state.get('batch',{}).get('product_ids',[])
+        authorized=(authorization.get('confirmed_by_user') is True
+                    and authorization.get('action')=='clear_configured_target_and_append'
+                    and authorization.get('clear_existing') is True
+                    and authorization.get('product_ids')==expected_products
+                    and authorization.get('project_id')==stable_id(project)
+                    and authorization.get('source_timeline_id')==stable_id(source)
+                    and authorization.get('target_timeline_id')==stable_id(target))
+        writer_ready=(writer_path.is_file() and bool(expected_products) and len(expected_products)<=3
+                     and authorized and all(source_media_present.values())
+                     and callable(getattr(pool,'AppendToTimeline',None))
+                     and callable(getattr(target,'GetItemListInTrack',None)))
         current={'project_id':stable_id(project),'project_name':project.GetName(),'project_settings':project.GetSetting(),
                  'protected':{stable_id(t):snapshot(t) for t in timelines},
-                 'source_media_present':{name:str(Path(path).resolve()) in items for name,path in sources.items()}}
+                 'source_media_present':source_media_present,
+                 'source_timeline_name':source.GetName(),'target_timeline_name':target.GetName(),
+                 'source_timeline_id':stable_id(source),'target_timeline_id':stable_id(target),
+                 'write_readback_capability':'incremental_target_append_black_gap_readback_v1',
+                 'writer_entrypoint':'reusable_test_delivery.py','writer_ready':writer_ready,
+                 'authorization_ready':authorized}
         atomic_json(paths.workspace_root/'RESOLVE_PREFLIGHT.json',current)
         print(json.dumps({'project':project.GetName(),'project_settings':{k:project.GetSetting(k) for k in ('timelineFrameRate','timelineResolutionWidth','timelineResolutionHeight')},
-                          'timelines':[{'name':t.GetName(),'fps':t.GetSetting('timelineFrameRate'),'width':t.GetSetting('timelineResolutionWidth'),'height':t.GetSetting('timelineResolutionHeight')} for t in timelines]},ensure_ascii=False),flush=True)
+                          'timelines':[{'name':t.GetName(),'fps':t.GetSetting('timelineFrameRate'),'width':t.GetSetting('timelineResolutionWidth'),'height':t.GetSetting('timelineResolutionHeight')} for t in timelines],
+                          'writer_ready':writer_ready,'authorization_ready':authorized},ensure_ascii=False),flush=True)
         os._exit(0)
     pre=json.loads((paths.workspace_root/'RESOLVE_PREFLIGHT.json').read_text())
     plan=json.loads((paths.cache_dir/'physical_plan.json').read_text())
@@ -198,9 +266,9 @@ def main():
             if not archive.namelist() or archive.testzip() is not None:raise ValueError('project_backup_corrupt')
         for variant in plan['variants']:
             if variant['variant_id'] not in eligible:continue
-            name=(f"{state['batch']['product_ids'][0]}_{variant['variant_id']}_临时试听_人物门禁待验_声学待验"
-                  if variant['variant_id'] in preview else
-                  f"{state['batch']['product_ids'][0]}_{variant['variant_id']}_审核_人工听感待验")
+            if variant.get('product_index') not in state['batch']['product_ids']:
+                raise ValueError('variant_product_outside_run_batch')
+            name=variant_timeline_name(run['run_id'],variant,preview=variant['variant_id'] in preview)
             record_file=folder/(variant['variant_id']+'.json')
             if record_file.exists():
                 prior=json.loads(record_file.read_text())

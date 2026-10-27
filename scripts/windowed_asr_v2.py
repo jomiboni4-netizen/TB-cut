@@ -9,6 +9,7 @@ import json
 import subprocess
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 from runtime_paths import resolve_runtime_paths
 
@@ -17,7 +18,8 @@ from runtime_meta import expected_identity, load_checked_json, write_metadata
 from review_compute_cache import LazyModel
 
 
-def load_model(name):
+@lru_cache(maxsize=2)
+def load_model(name, weights_digest=None):
     from faster_whisper import WhisperModel
     return WhisperModel(name, device="cpu", compute_type="int8", local_files_only=True)
 
@@ -49,7 +51,7 @@ def main() -> None:
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
     identity = expected_identity(paths)
-    state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    state = paths.load_state()
     video_inputs = [Path(path) for path in state.get("video_paths") or []]
     media_by_name = {
         media.name: media
@@ -117,8 +119,7 @@ def main() -> None:
                     wav.name,
                     language="zh",
                     beam_size=5,
-                    vad_filter=True,
-                    vad_parameters={"min_silence_duration_ms": 700},
+                    vad_filter=False,
                     word_timestamps=True,
                     condition_on_previous_text=False,
                 )

@@ -3,7 +3,10 @@ import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
 
 import { checkDependencies } from "./check_workbook_dependencies.mjs";
 
-await checkDependencies();
+const dependencyStatus = await checkDependencies();
+if (dependencyStatus.status !== "verified") {
+  throw new Error(`workbook_runtime_${dependencyStatus.status}: ${dependencyStatus.reason ?? "unknown"}`);
+}
 const inputPath = process.argv[2];
 const previewPath = process.argv[3];
 const input = await FileBlob.load(inputPath);
@@ -21,7 +24,11 @@ if (previewPath === "--json") {
     throw new Error("titles_invalid_used_range");
   }
   const range = sheet.getRange(`A1:${address.split(":").at(-1)}`);
-  console.log(JSON.stringify({ schema_version: 1, sheet: sheet.name, values: range.values }));
+  const values = range.values;
+  let lastDataRow = values.length - 1;
+  const blank = value => value == null || typeof value === "string" && value.trim() === "";
+  while (lastDataRow > 0 && (values[lastDataRow] ?? []).every(blank)) lastDataRow -= 1;
+  console.log(JSON.stringify({ schema_version: 1, sheet: sheet.name, values: values.slice(0, lastDataRow + 1) }));
 } else {
   const summary = await workbook.inspect({
     kind: "workbook,sheet,table,region",

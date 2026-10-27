@@ -1,8 +1,184 @@
+# 2026-10-26 — 人物异常自动补证与质量返修分流
+- 图片技术错误在同一任务内按固定预算自动拆批、串行补证；原图、Apple结果、成功判定和恢复占用持久化。恢复耗尽仅挂起受影响范围并继续授权队列，确认质量不合格才进行局部语义重组，不盲目重跑或重放写入。
+
+# 2026-10-26 — 同商品通过版本先交付
+- 默认交付同商品内已独立通过全部门禁的版本；失败版本保留待处理记录，不再连带阻断通过版本。原方案与证据保留，交付子集继承精确证据，整商品完成单独记录。
+
+# 2026-10-26 — 同一候选多区间的 ASR 边界绑定与重复范围返修
+- ASR 边界结果改为绑定具体选段出现项，避免同一候选、同一版本的多个不相邻区间互相覆盖，导致后一个区间的边界被套到前一个片段。
+- 初选与物理终审报告精确的双方版本/片段、源文件和交集秒区间；返修时将交集作为硬排除范围，重新做语义理解和组合审核。
+- 修正返修上限为 1 时首个失败立即被当作次数耗尽的问题；盲测 diagnose 按已绑定计划读取批次游标，不再误读项目级旧游标。
+- 增加 ASR 多区间隔离、语义重选/精确排除、有界返修与盲测游标诊断合成回归。
+
+# 2026-10-26 — 卖点搜索范围改为相邻商品推断包络
+- 商品范围匹配不再要求证明整商品的精确开始与结束才进入语义选择；依据当前商品标题/卖点窗口构建候选搜索包络，并把前后商品的已知起止字幕 cue 作为边界推断参考。
+- 一次相邻上下文补证仍有上限。补证后若只有整体边界不确定，但当前商品标题/卖点证据足以确认候选归属，则发布带 `neighbor_inferred_search_envelope` 标记的搜索窗口，继续寻找三条不同卖点成片；商品身份冲突或缺少当前商品证据仍阻断。
+- 下游语义选择明确不得因整体起止不精确而减少三条目标；搜索窗口不冒充完整范围扫描，跨商品冲突校验按实际授权候选窗口而不是推断外包络执行。
+- 增加一次性补证后邻接范围回退、精确字幕锚点、候选窗口和跨商品重叠的合成回归。
+
+# 2026-10-26 — 商品范围任务按字节预算分块审阅
+- 保留旧版小范围任务摘要与收据身份，超预算的商品任务按字幕 cue 字节大小拆块，并保留前后重叠上下文；单条证据过大、块数超限或合成输入超限时失败关闭，不截断分块证据。
+- 新增分块 Codex 审阅与整体边界汇总，逐块收据复用，并记录协议、载荷字节数、命中缓存、耗时、窗口及 cue 数。
+- 增加 UTF-8 预算、重叠完整覆盖、单条超限拒绝及大小任务混合端到端模拟。
+
+# 2026-10-26 — 测试线替换范围与单商品交付隔离
+- 项目任务事务门禁按目标时间线稳定 ID 限定；只有已验证的用户授权测试线清理事务才能将该线旧失败回执记为“内容已被替换”，原 `FAILED_VERIFICATION` 回执不改写。其他时间线上的失败事务仍阻止对同一目标的写入。
+- 淘宝 plan/run 新增 `--delivery-product-id`：批内仍可并行审核多个商品，计划与验收回执绑定唯一实际交付商品，避免整批全部通过时误写入其他商品。
+- 增加事务隔离与交付范围合成回归。
+
+# 2026-10-24 — 视觉门控、ASR 人工修边预审与复用测试线事务
+- 人物审核改为 Apple 初始抽帧 → 仅 `NO_PERSON` 四格 Codex 门控 → 仅仍无人分层细化 → Apple 细化全检 → 仅细化 `NO_PERSON` Codex 复核；移除生产代码中的 Qwen 函数、身份和卸载入口，并升级协议与缓存身份。
+- 独立 Codex 四格复核从逐张串行改为最多四张有界并发，保持每张最多四帧、输入映射与结果顺序稳定；协议与缓存身份再次升级，避免旧调度证据混用。
+- ASR 前改为三点轻量人物预筛，物理方案后保留唯一完整比例审核；人物返修锁定未受影响 variant，拒绝回执修改已锁定选段。
+- `large-v3-turbo` 短窗与扩窗均无法对齐时保留语义结果，生成原字幕边界的红色待人工修边预审，由淘宝调度器自动备份、写入和回读，不再默认启动 medium 大窗口或重复完整 Vision。
+- 淘宝调度器接通已登记测试时间线的稳定 ID 绑定与复用清理事务，计划展示真实阶段名；项目审核移除旧的未迁移占位门禁，使用 `READY_FOR_DELIVERY`、`WRITTEN`、`READBACK_VERIFIED` 和 `EXPORT_VERIFIED` 状态。
+- 增加最多两个商品的内存受控准备流水线；ASR 与 Resolve 写入保持串行，并记录阶段耗时、缓存、抽帧、Codex 拼图/帧数和返修次数。
+
+# 2026-10-23 — 无活动批次时调度器诊断返回可恢复状态
+- 修复淘宝调度器在未创建批次时 `diagnose` 访问批次检查点并崩溃的问题；现在明确报告无活动批次及下一步。
+- 增加无批次状态的调度器诊断合成回归。
+
+# 2026-10-23 — 视觉审核升级路径与逐层记录
+- Apple Vision 判定 `UNCERTAIN` 时升级到本机 Qwen；确认有人时停止升级。Qwen 判无人或不确定时再交 Codex 复核。
+- 每帧保存 Apple Vision、Qwen、Codex 的调用状态与判定，并分别累计 Qwen/Codex 耗时；缓存协议升级，确保旧结果不会缺少新记录。
+- 新增合成回归覆盖升级分支和独立耗时指标。
+
+## 2026-10-23 — 视觉审核分阶段四宫格与按需卸载
+
+- Apple Vision 先完成全部审核抽样；疑点按每组最多四帧生成编号拼图，集中交给本机 Qwen，再将 Qwen 未确认或出错的样本交给 Codex。
+- 高级审核确认有人可覆盖低级无人结论；最终无人比例仍由每个方案统一门禁判定。
+- Qwen 不预加载，仅在批量审核阶段启动，并在 Codex 复核开始前立即卸载；单帧兼容入口同样在 Codex 复核前卸载。
+- 视觉生产者和项目检查点指纹纳入拼图生成器源码，避免复用旧审核证据。
+
+# 2026-10-23 — 淘宝批次范围匹配与盲测游标隔离
+- 语义范围生成和发布改为精确覆盖当前批次商品，避免单商品/三商品任务触发全目录范围匹配。
+- 增加 `--blind-fresh`，跳过项目级旧商品游标并把新阶段游标隔离在本批目录；盲测计划摘要绑定该模式。
+- 指定的复用测试时间线若非空则拒绝追加，避免把上一轮结果叠加；必须经独立测试线清理事务后再复用。
+
+# 2026-10-23 — 淘宝调度器按本批指定时间线交付
+- 增加 `--target-timeline` 本批目标选择；plan/run 必须使用同一名称，写入端按当前项目唯一精确名称绑定稳定 ID，来源时间线始终禁止作为目标。
+- 不再把正式目标时间线名称作为淘宝交付的固定假设；未指定时继续使用项目登记目标。
+
+# 2026-10-23 — ASR 模型批次预热与常驻复用
+- 商品语义终审通过后，在人物预检期间后台预加载 ASR 模型；独立 ASR worker 改为批次内常驻 JSON-lines 服务，复用已加载模型并按权重摘要隔离缓存。
+- 预热仅加载模型，不提前转写或改变审核顺序；ASR 缓存命中时不等待模型预热。增加合成测试覆盖进程复用、模型复用和权重变更隔离。
+
+# 2026-10-22 — 人物比例返工与语义选段职责分离
+- 人物比例超限触发的选段返工只要求 Codex 提交语义可用的新范围；画面比例仍由本机人物审核独立复核。升级选段任务身份并增加合成回归测试。
+- 统一局部 ASR 生成与最终门禁使用的逐级回退参数，修复已产出证据在最终门禁被误判为模型身份变化。
+- 人物比例返工加入本机采样的源时间与人物有无证据；无采样时停止盲选。限制跨次续跑的累计返工次数，避免比例数值变化反复重开同一问题。
+
+# 2026-10-22 — 命令统一在沙盒外执行与商品标记名称
+- 本项目后续的所有 shell 命令（包括只读检查、测试、调度器及 Resolve 操作）默认在沙盒外执行；不以沙盒内失败判断应用不可用。
+- 商品起点标记的本次整理仅把名称恰为商品 ID 的标记改成 `ID｜标题`；保留备注、颜色、时长和时间线片段，并备份、读回验证。
+
+# 2026-10-22 — 商品起点标记按标题清单统一
+- 增加调度器路由的标记整理操作：按注册标题表更新蓝色商品起点的 ID 名称与“商品序号｜标题”备注，保留片段和非商品标记，并执行备份与回读。
+
+# 2026-10-22 — product marker labels match timeline reference
+- Add a scheduler-routed marker-only operation that sets registered product markers to blue ID names and `商品序号｜标题` notes, with backup and readback while preserving all timeline clips and unrelated markers.
+
+# 2026-10-22 — manual cutpoint preview uses normal product markers
+- Allow semantic-PASS products recorded as REPAIRABLE for local ASR edge work to enter the existing manual preview gate.
+- Write standard blue product-start markers during preview so user cutpoint edits can be read back without a later marker-normalization pass; retain preview transaction status and readback checks.
+
+# 2026-10-22 — mixed semantic and human-confirmed batch ranges
+- Let the scheduler's existing range-publication stage accept an explicitly human-confirmed product range alongside semantic-inference ranges for the other products in the same batch.
+- Keep the two proof types separate and validate all published product ranges together for overlap before recording their checkpoints.
+- Re-validate and re-publish the batch manifest on scheduler resume so a corrected boundary cannot leave an older current range pointer in use.
+- If a wider local ASR neighborhood still cannot align a selected subtitle edge, re-enter complete-pool selection and semantic review instead of repeating the unchanged physical plan.
+- Preserve the failed source selection in the repair request so the worker can compare its replacement and verify that the unresolved edge was avoided.
+- Ignore write-only user authorization fields when reading optional variant-count overrides for a product selection task.
+- Honor the per-failure repair cap even when a local edge-repair request remains in the cursor, preventing unchanged retries after the limit.
+
+## 2026-10-21 — semantic review uses practical listener threshold
+- PASS when retained speech is understandable without a major audible/logical hole; do not demand formal discourse closure or an explicit “所以” after “因为” when the intended result is clear.
+- Align persistent rules, final and project review instructions, and assembly review task; bump semantic contracts so older derived approvals are stale.
+- Causal review now evaluates whether reasons support results and whether cuts introduce missing premises or false causal implications, including relations expressed without explicit connector words.
+
+## 2026-10-21 — user-authorized semantic range publication
+- Allow batch ranges to be inferred from title meaning, ordered subtitle context, and read-only product details after user authorization; retain exact subtitle/title anchors and semantic provenance, and reject unsupported or overlapping ranges.
+- Keep human-confirmed and semantic-inferred evidence distinct through candidate selection and downstream checkpoints.
+- Re-publishing an already stored valid range or plan now restores its current pointer when missing or stale, allowing scheduler recovery after input-context changes without manual cache edits.
+- Expose the existing VFR average-rate mapping as an explicit run-only scheduler option so a user can waive exact source-frame mapping for one batch without changing project defaults.
+- Audio boundary refinement honors the already-proven half-frame ASR rounding allowance when adjacent word intervals contain no whole frame, while keeping the cut within that bound.
+- Add a scheduler-routed semantic-review preview append for explicitly approved variants, with a project backup, product/variant markers, two-second empty black gaps, and readback verification; it remains labeled as preview and does not assert overall batch approval.
+- Project registry reads use explicit UTF-8 decoding so Resolve scheduler subprocesses work under non-UTF-8 system locales.
+- Product checkpoint artifacts and pointers also use explicit UTF-8 decoding after Resolve API initialization changes the process locale.
+- Pending review-preview recovery verifies the original immutable plan body digest and existing Resolve clip rows before marker-only repair; it never replays the append.
 ## 2026-10-10 — within-variant repeated-source guard
 - Reject overlapping source-frame ranges inside a single final variant during cut-plan refinement and before Resolve writes. This catches repeated footage even when cross-variant checks pass.
 - For the current batch, removed the duplicate product 3 variant 1 closing segment from the approved plan and Resolve timeline; the remaining variant duration is 49.96 seconds.
 
 # Change Log
+
+## 2026-10-22 — 语义通过、ASR 待修的时间线预审
+- 按用户要求，语义组合通过但局部 ASR 修边失败时，可通过淘宝调度器将本批语义片段标记为待手动修边预审，保留两秒黑场、写前备份及写后回读；预审不等于正式成片通过。
+- 预审基线记录源切点和时间线位置，待用户手改后对照实际修改，提炼未来可复用的切点规则；取消旧预审入口仅许可上一批固定商品编号的限制。
+
+## 2026-10-22 — 调度器人物检测器与 Codex worker 启动诊断
+- 淘宝调度器默认在当前 Resolve 项目绑定目录的依赖区自动构建/加载并验证 Apple Vision 人物检测器，跨批次复用，减少因遗漏 `--detector` 造成的重复阻塞；检测任意人物，不做身份匹配。
+- 独立 Codex worker 将常见沙盒拒绝、认证、服务限额、超时和启动错误分类为稳定的可恢复原因；权限受限时明确要求从沙盒外按调度器恢复，不暴露原始诊断输出，也不绕过审核。
+
+## 2026-10-22 — 修复首帧偏移并收紧重复返修
+- 纯排布修复从目标时间线起始帧重建商品块；空时间线的首次写入不再额外留出 2 秒前导空白，只有已有内容时才追加间隔。
+- 同一商品、同一候选/方案身份和同一失败原因的返修次数跨调度器调用累计，到达配置上限后暂停，避免每次重启又获得一轮相同返修额度。
+- 商品阶段耗时保留最近 100 次调用；调度事件写入实际持续时间，便于区分本地计算、Codex 调用及重复调度。历史记录没有的耗时不作追补或估算。
+- 淘宝顺序调整为“字幕组合 → Codex 语义终审 → 切点局部 ASR → 人物复核”；ASR 仅处理字幕范围首尾附近窗口，人物比例超限时只修复受影响版本并复用仍有效的缓存。
+
+## 2026-10-21 — 双项目调度器入口
+- 增加淘宝、都督专用调度器与共享模式路由，记录每次委派的阶段结果；未连接的交付阶段明确阻断。
+- Codex 批次执行先查看对应调度器计划，再从对应入口继续。
+- 增加 `diagnose` 恢复建议，报告商品可复用检查点、失败原因和保守回退点；写入事务先恢复核对，不自动重放。
+- 标题索引生成器升版以强制重建旧缓存，兼容当前工作簿“ID”表头；字幕分段按数字区间排序，确保全局时间与 Resolve 素材时间线一致。
+
+## 2026-10-20 — Resolve 写入器按事务用途排序
+- 冷启动“清空登记目标后逐商品追加并回读”固定使用 `reusable_test_delivery.py`；`resolve_write_v2.py` 作为不同的追加式登记路径保留，不自动接替该事务，也不在部分写入后切换重放。
+- 新入口单测通过不代表 Resolve 实际写入已验证；旧入口及其消费者仅在各自契约下使用，迁移完所有调用点前不删除旧模块。
+
+## 2026-10-20 — 剪辑语义审核由 Codex 独立负责
+- 商品语义理解、候选选段和成片语义审核统一由 Codex 完成；剪辑任务不调用 MiMo 或其他外部语义审核服务。
+
+## 2026-10-20 — explicit marked-test timeline reuse
+- Add a test-only Resolve transaction for an explicitly authorized existing target: back up the project, clear only the recognized prior test clips/markers, append one selected product, then require a fresh-process readback before the next product.
+- Keep test clips labeled `Codex测试｜待审核`; record subtitle-based approximate VFR ranges and seam markers without claiming audio or framewise certification.
+
+## 2026-10-20 — REPAIRABLE 必须回退重跑，不得终止
+- `REPAIRABLE` 进入有界回退状态机：记录失败阶段、证据、回退阶段、应失效的下游产物、应保留的有效上游产物和尝试次数，再从最近有效上游阶段重跑。
+- 环境故障改用有界工具/运行时回退，只重跑失败阶段；真实缺输入/授权保留恢复点。达到重试上限时标为可恢复暂停或耗尽并继续独立商品，禁止无变化重复执行。
+- `BLOCKED`、`REPAIRABLE` 和 `EXHAUSTED` 分开表示外部阻塞、可修复失败与已耗尽，调度器不得因单商品返修而静默终止后续独立商品。
+
+## 2026-10-20 — 商品级即时交付与批次排序
+- 商品逐个运行；每个商品通过硬门禁后立即写入达芬奇并回读核实，持久化完成检查点，再处理下一个商品。批次级审核不得延迟已通过商品的交付。
+- 全部请求商品完成或明确阻塞后，只对本轮写入的商品块按工作簿物理行 ID 排序；保留内部剪辑次序、音视频关联、标记及其他人工/历史内容，并回读核验。
+- 将语义复核限定为对实际保留语句、最小原源上下文和真实段间关系的判断；连接词、字幕分行或局部残句不再作为自动拒绝理由，同时保留真实语义闭合硬门禁。
+- 按 P0–P5 分级新增下游集成就绪检查、逐商品进度账与重复失败止损、跨对话身份连续性、证据有效性、音画源时钟/人工补画判读及效率报告要求；不将所有整改项统一标成 P0。
+
+## 2026-10-20 — explicit VFR average-rate audit path
+- When a batch explicitly authorizes approximate VFR mapping, source clock evidence now uses stream average-rate, duration, frame-count, and start-time metadata; it does not decode or scan every frame timestamp.
+- The evidence records the measured average rate separately from the preferred target timeline rate, labels source frame-to-time conversion approximate, and uses a new versioned cache identity. Default CFR certification still inspects decoded timestamps.
+- This does not certify individual frame timestamps; use only under an explicit batch override.
+- The scheduler uses the freshly read project rate to validate compatibility, while source frame-to-time conversion uses the measured mean rate. The target timeline still uses its registered project rate; no full frame timestamp scan is performed.
+- Apple Vision pose-model setup failures now retain human-rectangle and face detection. If both lack person evidence while pose is unavailable, the sample is `UNCERTAIN` and blocks the audit; configured thresholds and sampling counts are unchanged.
+
+## 2026-10-19 — ASR 改为最终切点附近核验
+- 由 Codex 先依据完整字幕索引与原源上下文确定最终成片组合；本机 ASR 不再对候选正文或整段成片做转写。
+- ASR 仅核验最终选段的开头和结尾附近是否吞字、半字或错位；默认每个切点窗口不超过前后各 2.5 秒，只有边界证据含糊时才局部扩窗并记录原因。
+- 该规则改变 ASR 依赖语义，旧宽窗口 ASR 方案不能作为新逻辑的当前证据。固定交付入口仍需迁移到 cue-based 选段与 edge-only ASR；迁移完成前不得宣称运行时已执行新逻辑。
+
+## 2026-10-19 — 工作簿依赖取消日常版本号门禁
+- 日常信任依据改为 Codex 托管运行时解析出的 `@oai/artifact-tool` 包身份和实际 API 能力，不再按 Node 或依赖 semver 阻断升级。
+- 保留工作簿真实结构/读写保护验证；精确版本与分发摘要仅用于明确的历史复现。
+
+## 2026-10-19 — 切点声音提示与局部核实
+- 首尾电平检查只判断紧邻切点的声音连续性，修复后句起声和浮点窗口误分类造成的风险提示；不据此宣称吞字或字音完整。
+- 增加只读、身份校验及源级缓存支持的局部诊断入口，保留原方案与原ASR，分别记录新计算、命中、失败及耗时。诊断结果不提供最终声音通过或Resolve写入许可。
+
+## 2026-10-15 — workbook runtime compatibility records
+- Keep the 2.8.93 exact distribution locks for strict historical replay; allow daily use only for Node/artifact-tool environments reviewed against the workbook contract and an exact bundled distribution digest.
+- Verify an approved distribution once per repository runtime environment, reuse its local identity record across Resolve workspaces, and recheck its lightweight file stamp and contract revision on each run.
+- Make Project Doctor warn when workbook operations are unverified or incompatible while keeping unrelated checks available; workbook readers and writers still fail closed.
+- Validate count backfills on an exported temporary file, reopen it, verify non-target values/formulas/styles and counts, then atomically replace the requested file. Recover zero-padded numeric IDs from OOXML evidence.
 
 ## 2026-10-13 — 商品语义定位与 MiMo 两阶段分析
 - Excel 商品编号与编码只标识 SKU；链接号是辅助线索。新增只供本地语义筛选的宽窗口，不自动发布正式商品范围。
@@ -126,11 +302,214 @@
 # 2026-10-13 — 第 4 轮人物出镜定义纠正
 
 - `HOST_VISIBLE` 统一解释为明显人物主体出镜，不进行主播身份认证、跨镜头身份匹配或 Qwen 阻断。
+
 - Apple Vision 人体框、面部框和姿态几何采用可配置的主体阈值；分类算法和审核门禁升版，旧分类证据失效。
 - 保留严格大于 70% 规则及 16 点/分钟、最多五轮、不重复、时间加权和错误 fail-closed。
+
+# 2026-10-19 — 人物存在与特写占比分离
+- 人物检测不再要求正面、全身或较大画面占比；可靠的人体、人脸或姿态信号均计为有人，方向与身份不参与判定。
+- 单独标记大脸/近满高人体框为特写，最终特写时长占比上限 30%；任何被抽样确认的无人画面都阻止通过。
+- 人物证据与评分协议升版，旧人物审核不能复用；审核仍是分层抽样，不能伪称逐帧证明。
 
 # 2026-10-14 — 单商品三版本联合规划默认目标
 
 - 阶段A统一收集合法完整句群；阶段B基于全池联合分配来源时间与卖点，默认寻找3条内容不同、源时间零正重叠的成片，不能找到首条即停。
 - 允许最终0–2条真正合格成片；不足3条须逐项记录素材、内容、时长、来源、语义或技术门禁的实际原因，不以低质量内容凑数。
 - 当前工作簿运行时统一锁定 Node 24.19.0 与 artifact-tool 2.8.93；修复依赖测试只因测试夹具缺配置而误报通过的问题。
+
+# 2026-10-14 — 历史运行逻辑隔离
+
+- 新任务要求明确 `--workspace` 和冷启动输入清单；环境变量仅用于冲突检查，不能隐式选择旧批次。旧语义预览不再读取固定历史候选范围，Resolve 只读诊断按选定工作区核对项目。历史缓存和冻结证据原位保留。
+
+- 2026-10-18：通用句首改为原句锚定与有界词间修边，静音不再改选句首；终审协议升级，旧切点证据不可复用。
+
+- 2026-10-18：按用户澄清区分语义与定位：取消以半帧取整误差和中段承接词自动否定句子的拦截；原ASR不改写，声学风险保留；ASR前真实音频窗口起点对齐20ms网格。
+
+- 2026-10-19：增加句子拥有范围内的本机静音修边，保留原词时间，未决声音风险不放行；Resolve源起点整数API出现浮点截断时，仅在精确时间和左偏移共同确认后通过回读。
+
+## 2026-10-19 — 固定执行与分项计时
+
+- 将句子选词后的组装、片段级声音缓存、独立语义/人物并行检查及新建合并时间线事务收敛到delivery_pipeline固定入口；正常商品改JSON参数，不再生成本轮专用执行器。
+- 源级ASR继续按模型/参数/素材/窗口封存复用，只有miss才转写；组装、逐段声音、最终语义、人物和写入按职责失效。旧证据保留，不自动升级。
+- 增加创建/追加前事务记录、核验式恢复和新OS进程独立回读，部分写入禁止自动重放；保留所有既有线。新增显式计算/选段/开发/等待/验证与返工时间账，未知间隔不补造。
+
+- 2026-10-19：按用户要求固定复用已登记的测试时间线；全部审核和备份完成后仅清空该线片段/标记再写入，保留其他时间线，避免按商品新建。
+- 2026-10-19：扩展Resolve结束帧精度回读：精确结束时间与源左偏移加时长必须同时吻合，才解释整数API少一帧的取整误差；实际偏移继续阻断，原始读数保留。
+
+- 2026-10-19：组合阶段增加绑定原词/上下文/逐接缝的主Codex细审记录，先阻断残句与删首词问题；项目帧率显式读取登记、同项目继承复用，写前只读核对，禁止反复设置既有时间线帧率。保留独立终审、逐帧时钟与源端精确回读；不重写已验收成品。
+# 2026-10-19 — P0 固定两阶段人物门禁与商品返修流程
+
+- 人物门禁改为每版10个等时初筛点；无人/衣物点触发其所在10%时段的10点细查，聚合无人估计占比不得超过10%。细查时段最多6秒，并随短片缩短。抽样与物理切片数无关；一般全有人成片从多轮抽样降为10帧/版，检测数据缓存身份保持不变。
+- 门禁/特写/置信度约束统一由本地 `config/vision_rules.json` 提供；审核契约升级，旧汇总不能重新盖章，底层未变帧的身份匹配分类缓存可复用。采样结果明确为工程估计，不作逐帧保证。
+- 固化约五分钟的单商品优化目标，明确商品级选择/返修/人工确认通过工作区JSON记录，禁止为单个商品改脚本。共享规则修正需一次性更新契约、回归、规则和变更日志；返修只重算依赖变更的阶段。
+- 主Codex段落初审与独立终审加入明显卡壳、假起句、重复词音节、无效填充检查，以单独 JSON 项和理由记录；旧初审契约失效。
+- 合成回归覆盖多缺口累计、10%边界、短片复查窗、拼接段均匀采样、错误与不确定状态。真实媒体耗时改善尚未测量，不宣称五分钟目标已达成。
+
+# 2026-10-19 — 清理旧人物门槛冲突
+- 发现依赖总览、独立终审任务和未登记旧写入路径仍引用旧 `>70%` 可见比例。统一终审任务为当前≤10%估算无人时长与≤30%特写时长；未登记旧路径明确阻断，不能继续消费旧门槛证据。
+- 删除无调用方的旧70%视觉评分实现；历史审计方案注明已废止。历史记录和本机运行资料保留。
+
+# 2026-10-20 — 商品返修回退闭环
+- 调度器遇到本地计划门禁或语义终审给出 `REPAIRABLE` 时，带失败项回退到选段阶段；候选/范围证据保留，只重算选段及其下游，并以返修序号形成新的任务身份。
+- 每个商品每次运行最多返修两轮（可用 `--repair-limit` 调整）；返修次数、失败项和恢复阶段写入商品游标。达到上限后保留 `REPAIRABLE` 检查点，后续运行可从最近问题继续。
+- 单商品异常不再让调度器跳过后续商品组。此改动不代表已验证 Resolve 写入/回读，也不改变 package 模式下需先生成审核任务的行为。
+
+# 2026-10-20 — 显式工作区与旧状态隔离
+- 根目录 `PROJECT_STATE.json` 明确仅作历史记录，不再作为当前项目/批次输入；新窗口必须显式选择工作区并读取该工作区状态。
+- `project_doctor.py` 未收到 `--workspace` 时仅报告仓库结构，明确提示未检查活动批次；Resolve 写入流程将当前工作区传给 doctor。
+- 更新启动协议和项目概览，要求 Resolve 写入前使用同一工作区做只读身份检查。
+
+# 2026-10-20 — 项目状态与批次生命周期约定
+- 明确目标数据模型：每个 Resolve 项目一份长期状态，绑定稳定项目身份和素材/时间线；批次切片只存引用、商品范围、进度及派生产物。
+- 约定完成批次保留 7 天后才可清理；清理默认预览，并保护项目记录、素材和 Resolve 工程。
+- 新增生命周期文档；旧批次与历史数据不会被自动迁移或删除。
+
+# 2026-10-20 — 项目级状态登记接入
+- `init_project.py` 现按稳定 Resolve 项目 ID 创建或复用唯一项目级配置与状态；新工作区通过 `PROJECT_REF.json` 引用登记，并将本批范围和进度放入 `BATCH_STATE.json`。
+- `RuntimePaths.load_state()/write_state()` 组合读取/分离写入项目绑定与批次状态；项目缓存和 worker 记录使用项目级目录，批次缓存按批次身份隔离。Project doctor 与 Resolve doctor 核对项目登记，支持记录的时间线稳定 ID检查。
+- 旧工作区不自动迁移、不覆盖、不删除。新工作区可凭实时稳定 Resolve 项目 ID 复用项目记录；根目录旧状态和历史批次不会作为输入。
+
+# 2026-10-20 — Resolve 项目名分流口播模式
+- 新增严格项目名分流：`都督` 使用用户标记的粗略商品范围、单条 55–<60 秒视频及≤40%特写；`淘宝` 保留既有 45–<60 秒、目标三版及≤30%特写规则。
+- Resolve 只读检查报告活动项目的分流结果；选段计划绑定分流策略，时长和特写审核按策略执行。双匹配或无匹配时阻断，不自动回退。
+
+# 2026-10-20 — 连续字幕语义证据与返修继承
+- 候选阶段保留原字幕连续文本，用来源引用标注禁用子句；语义判断不再因预清洗丢失相邻上下文，最终选入片段仍由本地禁用内容门禁拦截。
+- 首轮选段回执新增商品卖点证据清单，逐字引用候选字幕；返修任务继承该清单，最终计划绑定其摘要，独立终审按同一语义依据复核。
+- 固定交付入口的组合细审也产出并核验同结构卖点证据，供终审复用；都督模式可读取跨粗略标记字幕作上下文，但候选时间仍受范围约束。
+- 都督时长从任意的 55 秒硬下限调整为目标约 60 秒、有效范围 >45 且 <60 秒；语义完整优先于贴近目标时长。
+- 候选语义协议与旧产物不兼容；旧缓存保留，必须按新生产者版本重建受影响候选和审核。
+
+# 2026-10-20 — 波形优先的局部切点返修
+- 音频切点阶段保存20ms RMS、峰值和样本范围；在词语归属边界内先选静音/低能量帧，连续口播则选词界间最低能量帧。
+- 连续口播回退只调整物理切点并明确标记为 ASR 词界估计，不重选语义、不改ASR词；无合法词间帧时保留上游结果并生成音频专属返修记录。
+- 调度器识别音频返修请求后直接复用原选段与ASR重跑物理计划，不再调用语义选择 worker；生产者契约升级使旧物理计划失效。
+
+# 2026-10-20 — 修复终审禁用词过滤器导入
+- 候选禁用词过滤器改从 `semantic_evidence` 的定义处导入；终审契约升至 v8，使旧审核记录不会被误认为经过当前入口验证。
+
+# 2026-10-20 — 冷启动标记范围候选与逐款交付门禁
+- 冷启动候选直接由本轮用户确认的源范围生成；候选只收录范围内完整字幕，并绑定范围与Resolve preflight摘要，不再依赖全局标题定位或额外时长/关键词预筛。
+- Resolve写入与回读能力及当前目标清空授权前移到字幕索引之前；视频完整指纹延迟到 preflight 通过后。
+- 逐款交付器接受当前批次商品集合，在已登记目标时间线按顺序追加，每款记录回读状态，商品之间默认留25帧空白并校验。
+# 2026-10-21 — 返修意见映射到源时间点
+- 选段返修任务要求逐条落实终审核给出的源时间边界与方向，并复查相邻片段拼接，减少重复出现同一多余字/断句问题。
+- 本批偏好：切点略紧以减少多余字词，同时保留完整卖点、有效音节和必要因果闭合。
+
+# 2026-10-21 — 移除重复项目级语义终审
+- 商品级 Codex 语义终审和本地硬门禁通过后，不再重复调用项目级 Codex 审核；移除项目层字符串相似度语义否决。项目级保留商品清单及跨商品物理素材重叠检查；Resolve 身份核对、写前门禁和写后回读继续执行。
+
+# 2026-10-22 — 成片逐条视频间隔与待审清理
+- Resolve 注册追加器在每条最终视频之间留 2 秒黑场，商品交界复用同一间隔；同一视频的素材段保持连续。
+- 增加调度器布局修复事务：只从已核验的时间线回读快照识别并清除待审预览，保留正式源范围和顺序，备份后重排并逐段回读，不重新读取标题或调用语义审核。
+
+# 2026-10-22 — 切点优先干净字间，不在连续发音里追低能量
+- 有清晰静音边界时优先选择静音；无清晰静音且附近音频证据充分时，才在相邻ASR词界中点折中，不再因波形某一帧较低而移动到发音内部。
+- 切点算法契约升级；旧局部音频计划必须重新生成，不能复用旧的低能量回退结论。
+
+# 2026-10-22 — Resolve 项目 ID 是唯一身份认证
+- 每个 Resolve 稳定项目 ID 唯一绑定一个长期工作区；启动时先识别当前打开的 Resolve 项目，再加载该项目的素材路径、依赖和已确认范围。
+- 文件夹 inode 和显示名称不再参与身份判断；路径可用性、项目模式和时间线目标分别检查。
+## 2026-10-22 — VFR source mapping default
+- Use average-rate approximate source-frame mapping by default for VFR material. Do not require a complete exact frame clock before editing; record the approximation and verify the Resolve append.
+- A visible person need not be the speaker. Mild lip-sync differences alone do not block a cut.
+## 2026-10-22 — manual cutpoint feedback and product markers
+- Read back user edits to the semantic preview, store per-project cutpoint observations, and avoid a blanket frame offset from a small sample.
+- Replace only the batch's red ASR preview markers with normal blue product-start markers after a backup and readback; leave manually edited clips unchanged.
+
+## 2026-10-22 — 字幕边缘文字就近对齐与局部 ASR 恢复
+- 剪映字幕时间改作附近搜索中心，首尾字幕文字在局部 ASR 中寻找完整词界；允许少量识别错字，但不把波形低谷当作发音边界。
+- 首次前后 2.5 秒窗口找不到或有歧义时，仅对受影响切点扩到前后 6 秒；语义 PASS 后的文字对齐失败保存局部回滚请求和诊断，不重新进行商品语义选择。
+- 升级 ASR 范围及物理方案版本，旧切点计划不作为新算法的审核结果。既有 Resolve 时间线与人工调整片段不变。
+
+## 2026-10-22 — 下一批真实剪辑中的范围与审核恢复
+- 商品 7–9 的范围沿用全表初扫锚点并用当前连续字幕、换款口播和标题特征复核；调度器负责发布与后续剪辑。
+- 字幕与 ASR 的品牌拼写、错别字及相近发音允许由更长的相邻口播确认；匹配失败时再退回靠近切点的短锚，不以字幕时间作为准确发音边界。
+- 修复局部 ASR 返修检查点误传 ASR 为物理方案，以及已通过一次语义终审加本地硬门禁的证据被误拒为非最终审核的错误。
+- 剪映字幕未经校准时，在邻近 ASR 词界以本机拼音核对同音/近音品牌与口播；句首连接词转写不同可由后续连续词组确认，仍以实际说话词首和局部声音证据修边。
+- 局部重试从已审核粗选恢复卖点映射；已写入事务若回执文本解码失败，经调度器只读回读恢复，不重复追加。调度器子进程统一启用 UTF-8。
+
+## 2026-10-22 — 每窗口两批的连续剪辑交接
+- 每个 Codex 窗口连续剪两批、每批最多三个未完成商品；第二批写入并回读后，若仍有商品待剪，创建不继承对话历史的新窗口继续两批循环。
+- 新窗口必须重新读取项目规则并按实时 Resolve 稳定 ID 认证绑定工作区；硬阻塞商品保留回滚点，不视为已完成或跳过。
+
+## 2026-10-22 — 字幕首字替换的局部词界修复
+- 字幕首字误写而后续口播高度吻合时，可将句首定位在完整 ASR 词的词首；不得因字幕从词内开始而截断发音。升级句子切点契约，旧物理方案自动失效并重算，后续仍须通过局部声音审核。
+- 调度器恢复时检查已缓存物理方案及其返修记录的句子切点契约；算法升级产生的旧证明不能触发选段返工，应由调度器重算物理方案和下游审核。
+- 独立 Codex 审核员偶发回传错误任务摘要时仅重试一次；只有摘要和裁决类型完全匹配才封存回执，第二次仍不符则继续阻塞。
+
+## 2026-10-22 — ASR 仅提供切点证据
+- 局部 ASR 无法匹配字幕边缘时，以字幕范围生成只供人物画面审核的临时方案，并明确标记切点待人工复核；不得让该临时方案通过最终切点门禁。
+- 调度器先完成独立人物审核；ASR 切点失败保留语义选段和审核回执，不触发语义重选。物理方案契约升级，旧方案按依赖自动重建。
+# 2026-10-23 — ASR 执行职责与本地人物二次核验
+- 后续剪辑将本地 ASR 用于切点坐标执行，不再把文字匹配或 ASR 对齐结果作为独立审核结论；语义审核由 Codex 完成，实际音频切点质量单独复核。
+- 切点执行按字幕边缘时间在本地 ASR 词时间戳附近取最近边界；不因字幕文字匹配失败而要求人工复核或阻断。切点安全性仍由本地音频检查判断。
+- 最近边界和物理切点证明限制在当前商品已确认范围内；范围外的 ASR 词不参与切点执行。
+- Apple Vision 判为无人或服装特写的采样帧，再由本机 `qwen3-vl:8b` 复核是否实际有人物；只在本地推理并记录模型身份及结果，不外发剪辑内容。视觉缓存协议同步升级，防止沿用未经过 Qwen 复核的旧证据。
+
+## 2026-10-23 — 按商品标记导出并全片检查黑帧
+- 导出器从商品标记绑定 ID 读取编码，兼容“ID｜标题”名称；严格核对项目和源/目标时间线稳定 ID，并拒绝覆盖同名视频。
+- 导出验收扫描完整视频中的黑帧区间，同时检查片尾黑帧和时长。
+
+## 2026-10-23 — 专用 Chrome CDP 故障恢复
+- 记录 9222 端口拒绝连接时的诊断流程，并区分普通 Chrome 与专用 Chrome for Testing。
+- 若专用实例已运行但缺少 CDP 参数，先正常退出该实例，再经 LaunchAgent 恢复；以 `/json/version` 和 Playwright 重连作为就绪条件。
+
+## 2026-10-23 — 项目级剪辑调度与人物复核
+- 全商品范围清单改为项目级登记并跨三商品批次复用；Resolve 进程会话内缓存一次项目身份确认。
+- 语义终审后先筛查选段画面；失败源区间硬排除并返回重选，ASR 后置为切点坐标生成，无独立音频切点复查门。
+- 无人结论升级为 Apple Vision、Qwen3-VL:8b、本机 Codex 三级复核，最终物理方案仍做人物比例审核。
+- 调度器为全量商品目录自动生成并验证范围锚点清单，无需人工编辑 JSON；ASR 改回字幕文字锚定词界，短窗口关闭 VAD。
+- 用户新增的可复用测试时间线按 Resolve 稳定 ID 绑定到项目；冷启动测试写入器只清理此测试线，并以实时帧率核验方案和计算时长，不误选正式成片线或假设25fps。
+- 调度器计划现在明确列出交付适配器、支持的时间线模式及测试线复用能力；淘宝模式收到测试线复用请求时在媒体分析前拒绝，不再静默落到正式线追加器。
+
+## 2026-10-23 — 相关任务结束后卸载本地模型
+- 本地剪辑/视觉任务结束、失败或中断后，确认没有其他活动任务共用模型，再调用模型服务的卸载接口释放模型资源；不因单任务结束关闭仍被其他任务使用的共享服务。
+
+## 2026-10-23 — 淘宝分析前校验 Resolve 与并发人物审核
+- 淘宝调度器在标题/字幕索引、商品范围匹配和媒体分析前校验项目身份及本次明确指定的目标时间线；Resolve 未运行、目标缺失/重名、误指来源线或缺少音视频轨时立即阻断。
+- 人物审核保留同一批逐帧抽样和 Apple Vision → Qwen → Codex 判定顺序，以最多四个并发 worker 处理互不依赖的帧，并保持输出及缓存关联顺序。
+
+
+# 2026-10-23 — 视觉人物审核直接升级至 Codex
+- 移除人物审核中的 Qwen 阶段。Apple Vision 完成全部样本后，将无人、服装特写、不确定和可用帧检测错误按最多四格拼图直接交给 Codex 纯视觉复核；Codex 有人结论可覆盖 Vision 无人，Codex 错误继续阻断。
+- 升级视觉缓存协议，旧 Qwen 审核结果不再作为当前视觉审核证据；不预加载或启动 Qwen。
+
+# 2026-10-23 — 收窄 Codex 视觉复核范围
+- Apple Vision 完成全量检测后，只将明确判为 `NO_PERSON` 的帧批量送给 Codex 四格复核；服装近景、不确定及检测错误不再送审，保留原状态或阻断。
+- 升级视觉结果缓存与审核协议版本，旧路由产生的缓存结果不复用。
+
+# 2026-10-23 — 登记 Vision 精度与效率优化实验
+- 将输入帧方向/尺寸/裁剪核验、限定场景的 ROI 复检、相邻帧证据与重复送审削减、分帧型阈值校准及低置信度轻量复检列入优化路线。
+- 先建立有人/无人等人工标注样本并报告误报、漏报、召回率和 Codex 升级量；这些实验未验证前不改变当前检测阈值、采样策略或仅 `NO_PERSON` 送 Codex 的规则。
+
+- 2026-10-26：增加单 Resolve 项目长任务档案、派生状态页、持久暂停、范围/预算门禁与调度计划身份；复用原检查点和事务，不提升失败交付状态。支持重新读取实时稳定项目 ID 初始化档案。
+
+# 2026-10-26 — 淘宝流水线采用 Codex 边界与 ASR 近邻切点执行
+- ASR 不再匹配字幕文字。它只在 Codex 选段起止时间附近搜索完整词的起止边界；无结果时保留 Codex 边界、继续其他质量门禁，并在时间线上添加红色待人工修边标记。
+- 移除 ASR 未对齐就转字幕预览并阻断正式交付的路径；计划和质量回执绑定新的切点执行契约，防止旧对齐结果复用。
+- ASR 窗口缓存先于 worker/模型预热检查；全部命中时跳过模型启动，并记录请求窗口、缓存命中和人工复核边界数。
+
+
+## 2026-10-27 — 有界门禁精简（仅本地合成验证）
+- 商品阶段改为 stage-dependencies-v1 代码依赖摘要；旧统一摘要不自动换身份，相关依赖仍向下游传播失效。
+- 增加单次只读验证复用及返回前文件/上下文/指针复核，保留独立写前门禁和写后回读。
+- 区分当前 ASR 执行资格与历史交付事实；模型不可用不单独否决质量，已交付版本不因权重更新重选或重写。
+- 人物重复帧优化在一次返修后仍有合成错误，本轮已撤回人物实现与对应既有测试改动；分层结果键覆盖问题留待后续，不降低覆盖率或阈值。
+- 不迁移真实游标、检查点、任务、恢复预算或失败事务。
+
+
+## 2026-10-27 — 语义输入冻结与调度首轮优化
+- 首次选段后立即终审，新增 selection-subtitle-snapshot-v1，终审及恢复固定使用首次任务中的原字幕与被选中候选完整上下文；导入和最终门禁拒绝换文本、换范围或缺失快照。
+- 修复同层多帧分类覆盖，贯通采样结果键并合并同批相同物理帧请求；保留采样要求与全部比例阈值。
+- 商品子集汇总只统计自身写入/导出记录；缓存返回显式保留未完成版本，不将部分交付称作整商品完成。
+- 增加项目共享图片请求执行槽与排队期限，原恢复预算不变；并发前预备封存密钥，避免缓存首次发布的初始化竞争。
+- 增加只表示监督存活的独立阶段心跳和主分析计算期限；写入中断仍先核对事务，不自动重放。
+- 统一阶段父依赖与后代失效定义；单次验证共享身份摘要，返回前以全新内容快照核验，新增摘要阶段计时。
+- 本轮不迁移真实状态，不启用跨分析阶段即时写入或已交付商品剩余版本自动续交；其多次交付证据链仍待单独实现和验证。
+
+
+## 2026-10-27 — 实测长字幕选段请求无损精简
+- 真实流程发现选段任务超过128KB请求上限：逐句字幕与拼接全文重复，同时携带大量默认false字段。
+- selection_task 在超出目标体积时只省略默认context_only=false及可由原字幕逐字重建的重复asr_text；原字、全部字幕条目、时间、范围、上下文、禁用内容注释保留，任务摘要重新绑定。使用verbatim-subtitle-no-duplicate-text-v1标识，不提高请求上限，不截断或总结字幕。
+- 5项定向合成检查通过；本次授权真实单商品流程在同一任务剩余预算内继续，测试线清理、自动返修、写入和回读完成。真实素材、项目映射与运行记录仍仅保存在忽略的项目工作区，未发布。

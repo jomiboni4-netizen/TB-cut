@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import index_titles as titles
 import runtime_publication as publication
+from workbook_runtime import preferred_node
 from locate_link_intros import chinese_number, link_pattern
 from runtime_meta import CacheIdentityError, invalidation_path, metadata_path, validate_cache
 from runtime_paths import resolve_runtime_paths
@@ -255,7 +256,7 @@ class IndexTitlesTests(unittest.TestCase):
 
     def test_node_machine_parser_and_real_generator_on_synthetic_workbook(self):
         # Exercise the actual existing artifact-tool dependency, not a mock.
-        node = os.environ.get('TB_CUT_TEST_NODE', 'node')
+        node = os.environ.get('TB_CUT_TEST_NODE', preferred_node())
         rows = [self.rows[0], ['00012', 'Text ID'], [], [34, 'Numeric ID']]
         synthetic_xlsx(self.source, rows, numeric_format='00000')
         parsed = titles.parse_workbook(self.source, ROOT, node)

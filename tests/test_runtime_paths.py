@@ -39,11 +39,16 @@ class RuntimePathsTests(unittest.TestCase):
         }
         (self.workspace / "PROJECT_STATE.json").write_text(json.dumps(state), encoding="utf-8")
 
-    def test_default_workspace_is_repo_and_cli_overrides_env(self) -> None:
+    def test_workspace_must_be_selected_and_env_conflict_fails(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(resolve_runtime_paths(self.repo).workspace_root, self.repo)
+            with self.assertRaisesRegex(ArtifactPathError, "explicit_workspace_required"):
+                resolve_runtime_paths(self.repo)
         with patch.dict("os.environ", {"TB_CUT_WORKSPACE": str(self.base / "other")}):
-            self.assertEqual(resolve_runtime_paths(self.repo, self.workspace).workspace_root, self.workspace)
+            with self.assertRaisesRegex(ArtifactPathError, "workspace_identity_conflict"):
+                resolve_runtime_paths(self.repo, self.workspace)
+            with self.assertRaisesRegex(ArtifactPathError, "explicit_workspace_required"):
+                resolve_runtime_paths(self.repo)
+            self.assertEqual(resolve_runtime_paths(self.repo, self.base / "other").workspace_root, self.base / "other")
 
     def test_separate_rules_state_and_cache(self) -> None:
         paths = resolve_runtime_paths(self.repo, self.workspace)
@@ -57,6 +62,15 @@ class RuntimePathsTests(unittest.TestCase):
         self.assertEqual(validate_cache(paths, artifact)["batch_id"], "synthetic-batch")
         (self.repo / "PROJECT_RULES.md").write_text("rule B", encoding="utf-8")
         self.assertNotEqual(first["rules_fingerprint"], expected_identity(paths)["rules_fingerprint"])
+
+    def test_new_workspace_never_sees_old_semantic_result(self) -> None:
+        old = self.repo / '.cache/product_01_rough/mimo_result.json'
+        old.parent.mkdir(parents=True)
+        old.write_text('{"status":"OLD_PASS"}', encoding='utf-8')
+        paths = resolve_runtime_paths(self.repo, self.workspace)
+        self.assertEqual(paths.state_path, self.workspace / 'PROJECT_STATE.json')
+        self.assertFalse((paths.cache_dir / 'product_01_rough/mimo_result.json').exists())
+        self.assertTrue(old.exists())
 
     def test_relative_and_legacy_plan_references(self) -> None:
         paths = resolve_runtime_paths(self.repo, self.workspace)

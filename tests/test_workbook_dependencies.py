@@ -25,44 +25,29 @@ class WorkbookDependencyTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}')
 
-    def test_missing_module_and_wrong_version_or_digest_fail(self):
-        node = os.environ.get('TB_CUT_TEST_NODE', 'node')
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / 'scripts').mkdir()
-            (root / 'config').mkdir()
-            script = root / 'scripts/check_workbook_dependencies.mjs'
-            shutil.copyfile(ROOT / 'scripts/check_workbook_dependencies.mjs', script)
-            lock = json.loads((ROOT / 'config/workbook-runtime-v4.lock.json').read_text())
-            for fault in ('module', 'node', 'artifactTool', 'treeSha256'):
-                with self.subTest(fault=fault):
-                    modified = dict(lock)
-                    if fault != 'module':
-                        link = root / 'node_modules'
-                        if not link.exists() and not link.is_symlink():
-                            link.symlink_to((ROOT / 'node_modules').resolve(), target_is_directory=True)
-                        modified[fault] = 'wrong'
-                    (root / 'config/workbook-runtime-v4.lock.json').write_text(json.dumps(modified))
-                    result = subprocess.run([node, str(script)], capture_output=True, text=True)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('workbook_dependency_check_failed', result.stderr)
-                    if fault != 'module':
-                        self.assertNotIn('ENOENT', result.stderr)
-            (root / 'config/workbook-runtime-v4.lock.json').write_text(json.dumps(lock))
-            valid = subprocess.run([node, str(script)], capture_output=True, text=True)
-            self.assertEqual(valid.returncode, 0, valid.stderr)
+    def test_current_runtime_is_compatible_but_historical_lock_stays_strict(self):
+        node = os.environ.get('TB_CUT_TEST_NODE', project_doctor.preferred_node())
+        script = ROOT / 'scripts/check_workbook_dependencies.mjs'
+        current = subprocess.run([node, str(script)], capture_output=True, text=True)
+        self.assertEqual(current.returncode, 0, current.stderr)
+        self.assertEqual(json.loads(current.stdout)['package'], '@oai/artifact-tool')
+        historical = subprocess.run([node, str(script), '--mode', 'strict-history'], capture_output=True, text=True)
+        self.assertEqual(historical.returncode, 3)
+        self.assertEqual(json.loads(historical.stdout)['reason'], 'historical_artifact_tool_version_mismatch')
+        old_lock = json.loads((ROOT / 'workbook-dependencies.lock.json').read_text())
+        self.assertEqual(old_lock['artifactTool'], '2.8.93')
 
-    def test_doctor_missing_node_is_an_error(self):
+    def test_doctor_missing_node_warns_only_for_workbook_operations(self):
         with patch.object(sys, 'argv', ['doctor', '--root', str(self.root)]), patch.object(project_doctor.subprocess, 'run', side_effect=FileNotFoundError), patch('sys.stdout', new_callable=io.StringIO) as output:
             with self.assertRaises(SystemExit) as stopped:
                 project_doctor.main()
-            self.assertEqual(stopped.exception.code, 1)
-            self.assertIn('workbook dependency check unavailable', output.getvalue())
+            self.assertEqual(stopped.exception.code, 0)
+            self.assertIn('workbook operations unverified', output.getvalue())
 
-    def test_doctor_dependency_failure_is_an_error(self):
-        result = subprocess.CompletedProcess([], 1, '', 'synthetic dependency failure')
+    def test_doctor_reports_excel_incompatibility_without_failing_other_checks(self):
+        result = subprocess.CompletedProcess([], 3, '{"status":"incompatible","reason":"required_api_missing"}', '')
         with patch.object(sys, 'argv', ['doctor', '--root', str(self.root)]), patch.object(project_doctor.subprocess, 'run', return_value=result), patch('sys.stdout', new_callable=io.StringIO) as output:
             with self.assertRaises(SystemExit) as stopped:
                 project_doctor.main()
-            self.assertEqual(stopped.exception.code, 1)
-            self.assertIn('synthetic dependency failure', output.getvalue())
+            self.assertEqual(stopped.exception.code, 0)
+            self.assertIn('workbook operations incompatible: required_api_missing', output.getvalue())

@@ -27,17 +27,25 @@ def verify(row: dict, output_dir: Path) -> dict:
         check=True, text=True, capture_output=True,
     )
     duration = float(probe.stdout.strip())
-    scan = subprocess.run(
+    black_scan = subprocess.run(
         [
-            "/opt/homebrew/bin/ffmpeg", "-v", "info", "-sseof", "-0.5", "-i", str(path),
-            "-vf", "setpts=PTS-STARTPTS,blackdetect=d=0.03:pix_th=0.10,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+            "/opt/homebrew/bin/ffmpeg", "-v", "info", "-i", str(path),
+            "-vf", "blackdetect=d=0.01:pix_th=0.10",
             "-an", "-f", "null", "-",
         ],
         check=False, text=True, capture_output=True,
     )
-    intervals = [(float(a), float(b), float(c)) for a, b, c in BLACK.findall(scan.stderr)]
-    yavg = [float(value) for value in YAVG.findall(scan.stderr)]
-    trailing_black = any(end >= 0.45 and length >= 0.03 for _, end, length in intervals)
+    intervals = [(float(a), float(b), float(c)) for a, b, c in BLACK.findall(black_scan.stderr)]
+    tail_scan = subprocess.run(
+        [
+            "/opt/homebrew/bin/ffmpeg", "-v", "info", "-sseof", "-0.5", "-i", str(path),
+            "-vf", "setpts=PTS-STARTPTS,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+            "-an", "-f", "null", "-",
+        ],
+        check=False, text=True, capture_output=True,
+    )
+    yavg = [float(value) for value in YAVG.findall(tail_scan.stderr)]
+    trailing_black = any(end >= duration - 0.1 and length >= 0.01 for _, end, length in intervals)
     last_frame_black = bool(yavg and yavg[-1] < 8.0)
     return {
         "name": row["name"],
@@ -46,10 +54,15 @@ def verify(row: dict, output_dir: Path) -> dict:
         "duration": round(duration, 3),
         "expected_duration": row["duration_seconds"],
         "duration_delta": round(duration - float(row["duration_seconds"]), 3),
+        "black_interval_count": len(intervals),
+        "black_intervals": intervals,
         "trailing_black": trailing_black,
         "last_frame_black": last_frame_black,
         "last_frame_yavg": round(yavg[-1], 3) if yavg else None,
-        "passed": not trailing_black and not last_frame_black and abs(duration - float(row["duration_seconds"])) <= 0.15,
+        "scan_passed": black_scan.returncode == 0 and tail_scan.returncode == 0,
+        "passed": (black_scan.returncode == 0 and tail_scan.returncode == 0
+                   and not intervals and not last_frame_black
+                   and abs(duration - float(row["duration_seconds"])) <= 0.15),
     }
 
 
@@ -73,6 +86,7 @@ def main() -> None:
         "expected_count": len(manifest["variants"]),
         "actual_count": len(list(output_dir.glob("*.mp4"))),
         "trailing_black_count": sum(1 for row in rows if row.get("trailing_black") or row.get("last_frame_black")),
+        "black_interval_count": sum(len(row.get("black_intervals") or []) for row in rows),
         "failed": [row for row in rows if not row["passed"]],
         "files": rows,
     }

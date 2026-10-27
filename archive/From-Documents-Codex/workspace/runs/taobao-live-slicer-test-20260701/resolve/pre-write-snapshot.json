@@ -1,0 +1,36 @@
+{
+  "created_at": 1782892448.7185988,
+  "project": "20260701-淘宝切片",
+  "timeline": "测试",
+  "version": "21.0.0.47",
+  "start_frame": 0,
+  "end_frame": 54373,
+  "items": [
+    {
+      "trackType": "video",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 0,
+      "end": 54373,
+      "duration": 54373,
+      "sourceStart": 0,
+      "sourceEnd": 54372,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "fps": 30.0,
+      "resolution": "1080x1920"
+    },
+    {
+      "trackType": "audio",
+      "trackIndex": 1,
+      "name": "30.mp4",
+      "start": 0,
+      "end": 54373,
+      "duration": 54373,
+      "sourceStart": 0,
+      "sourceEnd": 54372,
+      "mediaPath": "/Users/keigan/Desktop/工程/20260701-淘宝切片/视频/30.mp4",
+      "fps": 30.0,
+      "resolution": "1080x1920"
+    }
+  ]
+}

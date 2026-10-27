@@ -58,7 +58,7 @@ class RuntimeMigrationTests(unittest.TestCase):
         self.unknown = self.cache / "product_01_rough/mimo_request.json"
         self.unknown.parent.mkdir()
         self.unknown.write_text('{"candidates": []}', encoding="utf-8")
-        self.paths = resolve_runtime_paths(self.root)
+        self.paths = resolve_runtime_paths(self.root, self.root)
 
     def test_dry_run_and_apply_are_idempotent(self) -> None:
         original = {p: p.read_bytes() for p in (self.plan, self.generated, self.approved, self.coverage_path, self.resolve_report, self.unknown)}

@@ -1,20 +1,19 @@
 {
-  "host_ratio_min_exclusive": 0.70,
   "sample_interval_seconds": 0.5,
-  "labels": ["host_visible", "clothes_closeup", "no_person", "uncertain"],
-  "count_as_host": ["host_visible"],
-  "do_not_count_as_host": ["clothes_closeup", "no_person", "uncertain"],
+  "labels": ["person_visible", "person_closeup", "no_person", "uncertain", "detector_error"],
   "person_subject": {
-    "body_confidence": 0.5,
-    "body_height": 0.34,
-    "body_area": 0.08,
-    "body_aspect_min": 0.22,
-    "body_aspect_max": 1.5,
-    "face_confidence": 0.5,
-    "face_height": 0.07,
-    "face_area": 0.004,
-    "pose_points": 6,
-    "pose_height": 0.3,
-    "pose_area": 0.075
+    "presence_confidence": 0.3,
+    "presence_pose_points": 2,
+    "closeup_face_area_min": 0.12,
+    "closeup_person_height_min": 0.75
+  },
+  "person_audit": {
+    "initial_samples_per_variant": 10,
+    "no_person_ratio_max_inclusive": 0.1,
+    "refinement_samples_per_flagged_stratum": 10,
+    "refinement_window_ratio": 0.1,
+    "refinement_window_max_seconds": 6.0,
+    "max_variant_duration_seconds": 60.0,
+    "closeup_duration_ratio_max_inclusive": 0.3
   }
 }

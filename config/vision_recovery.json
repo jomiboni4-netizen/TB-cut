@@ -1,0 +1,8 @@
+{
+  "contract": "vision-recovery-v1",
+  "initial_request_seconds": 60,
+  "recovery_request_seconds": 45,
+  "max_recovery_requests_per_product": 6,
+  "max_recovery_seconds_per_product": 180,
+  "max_recovery_attempts_per_frame": 2
+}

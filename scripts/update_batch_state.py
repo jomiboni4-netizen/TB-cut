@@ -10,23 +10,27 @@ from runtime_meta import CacheIdentityError
 
 def reconcile(paths):
     with workspace_lock(paths):
-        state_bytes = paths.state_path.read_bytes()
-        state = json.loads(state_bytes)
+        state_bytes = paths.state_snapshot_bytes()
+        state = paths.load_state()
         checked_project(paths, state)
         rows = resume(paths)
         batch = state['batch']
         batch['completed_product_ids'] = sorted(pid for pid, row in rows.items()
-                                               if row['status'] in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED'))
+                                               if row['status'] in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED')
+                                               and row.get('product_complete', True))
+        batch['pending_variant_ids'] = {
+            str(pid): [v['variant_id'] for v in row.get('delivery_scope', {}).get('pending_variants', [])]
+            for pid, row in rows.items() if not row.get('product_complete', True)}
         batch['failed_product_ids'] = sorted(pid for pid, row in rows.items() if row['status'] == 'BLOCKED')
         batch['checkpoint_status_counts'] = {status: sum(r['status'] == status for r in rows.values())
                                              for status in sorted({r['status'] for r in rows.values()})}
         state.setdefault('runtime', {})['checkpoint_revision'] = read_ledger(paths)['revision']
         def check():
-            if paths.state_path.read_bytes() != state_bytes or resume(paths) != rows:
+            if paths.state_snapshot_bytes() != state_bytes or resume(paths) != rows:
                 raise CacheIdentityError('progress_inputs_changed_before_state_publication')
             if read_ledger(paths)['revision'] != state['runtime']['checkpoint_revision']:
                 raise CacheIdentityError('checkpoint_revision_conflict')
-        atomic_json(paths.state_path, state, before_commit=check)
+        paths.write_state(state, before_commit=check)
         return rows
 
 

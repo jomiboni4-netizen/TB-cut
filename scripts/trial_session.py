@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import uuid
 from project_registry import atomic_json, checked_project, digest, workspace_lock
+from init_project import initialize
 from runtime_meta import CacheIdentityError, load_checked_json, metadata_path
 from runtime_paths import resolve_runtime_paths
 from product_checkpoints import current_range_path, load_stage, capture_stage, publish_stage
@@ -36,7 +37,7 @@ def select_products(titles, ranges, count=4):
 
 
 def validate_trial(paths):
-    state = json.loads(paths.state_path.read_text())
+    state = paths.load_state()
     claim = state.get('trial')
     if not claim:
         return None
@@ -53,7 +54,7 @@ def validate_trial(paths):
 
 
 def create_trial(parent, workspace, count=4):
-    state = json.loads(parent.state_path.read_text())
+    state = parent.load_state()
     config = checked_project(parent, state)
     titles_path = parent.upstream_cache_dir/'titles.json'
     subtitles_path = parent.upstream_cache_dir/'subtitle_index.json'
@@ -75,10 +76,10 @@ def create_trial(parent, workspace, count=4):
     new_state['runtime']['resolve_write_enabled'] = False
     for k in ('last_successful_stage', 'last_error', 'completed', 'written', 'export_verified'):
         new_state['runtime'].pop(k, None)
-    # Configuration is inherited unchanged. No new material-project identity and no legacy cache blessing.
-    with workspace_lock(child):
-        atomic_json(child.workspace_root/'PROJECT_CONFIG.json', config)
-        atomic_json(child.state_path, new_state)
+    # Reuse the canonical project registration; this workspace gets only a
+    # project reference and its own batch state.
+    initialize(child, resolve_project_id=config['resolve_project_id'],
+               batch_id=new_state['batch']['batch_id'], products=products)
     body = {'contract': CONTRACT, 'project_key': config['project_key'], 'run_id': run_id,
             'products': products, 'parent_config_digest': digest(config), 'mode': 'bounded_trial',
             'protected_resolve': copy.deepcopy(config['inputs']['resolve'])}
@@ -86,7 +87,7 @@ def create_trial(parent, workspace, count=4):
     new_state['trial'] = {'run_id': run_id, 'manifest_digest': digest(body)}
     with workspace_lock(child):
         atomic_json(child.workspace_root/'TRIAL_SESSION.json', body)
-        atomic_json(child.state_path, new_state)
+        child.write_state(new_state)
     for source in (titles_path, subtitles_path):
         # Exact verified bytes + metadata remain intact; cannot import schema-1 or unproven producers.
         destination = child.upstream_cache_dir/source.name

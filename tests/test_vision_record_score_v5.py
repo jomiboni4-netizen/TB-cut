@@ -1,4 +1,4 @@
-"""Pure scoring regression; no media decode or detector invocation."""
+"""Synthetic two-stage person audit tests; no media decode or detector invocation."""
 from pathlib import Path
 import sys
 import unittest
@@ -7,78 +7,113 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import adaptive_vision as vision
 
 
-def synthetic(parts, *, missing=None, no_person_after=None, special=None, cadence=1):
-    total = 1250
-    lengths = [total//parts + (i < total%parts) for i in range(parts)]
-    clips, samples = [], []
-    record = 0
-    for i, length in enumerate(lengths):
-        source = 10000+i*2000
-        clips.append({'source_start_frame': source, 'source_end_frame': source+length, 'fps': 25})
-        for offset in sorted({0, length-1, *range(0, length, cadence)}):
-            position = record+offset
-            if missing and missing[0] <= position < missing[1]:
-                continue
-            label = ('NO_PERSON' if no_person_after is not None and position >= no_person_after
-                     else special if special and position == 625 else 'HOST_VISIBLE')
-            samples.append({'clip_index': i, 'frame': source+offset,
-                            'classification': {'label': label, 'subject_evidence': label == 'HOST_VISIBLE'}})
-        record += length
-    return clips, samples
+def fixture(duration=60.0, *, clips=1):
+    fps = 10
+    lengths = [int(duration*fps/clips)]*clips
+    physical = []
+    source = 1000
+    for length in lengths:
+        physical.append({'source_file': f'{len(physical)}.mp4', 'source_start_frame': source,
+                         'source_end_frame': source+length, 'fps': fps})
+        source += length+1000
+    samples = []
+    for i, t in enumerate(vision.initial_record_times(physical)):
+        ci, frame = vision.map_record_time(physical, t)
+        samples.append(sample(physical, ci, frame, 'initial', i, 'PERSON_VISIBLE'))
+    return physical, samples
 
 
-class RecordScoreV5Tests(unittest.TestCase):
-    def test_same_visible_record_does_not_fall_with_more_cuts(self):
-        scores = []
-        old = []
-        for parts in (1, 4, 25):
-            clips, samples = synthetic(parts)
-            current = vision.estimate(clips, samples)
-            scores.append(current['host_visible_ratio_lower_bound'])
-            old.append(vision.estimate_v4(clips, samples)['host_visible_ratio_lower_bound'])
-            self.assertEqual(current['status'], 'PASS')
-            self.assertEqual(current['evidence_level'], 'ENGINEERING_SAMPLED')
-            self.assertFalse(current['strict_framewise_certified'])
-        self.assertEqual(scores[0], scores[1])
-        self.assertEqual(scores[1], scores[2])
-        self.assertGreater(old[0], old[1])
-        self.assertGreater(old[1], old[2])
+def sample(clips, clip_index, frame, kind, stratum, label):
+    return {'clip_index': clip_index, 'source_file': clips[clip_index]['source_file'],
+            'frame': frame, 'sample_kind': kind, 'stratum_index': stratum,
+            'classification': {'label': label, 'subject_evidence': label in
+                               {'HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP', 'OTHER_PERSON'}}}
 
-    def test_large_nonperson_range_fails(self):
-        clips, samples = synthetic(4, no_person_after=750)
+
+def flag_strata(clips, samples, strata, *, empty_counts=None):
+    empty_counts = empty_counts or {}
+    by_key = {(s['sample_kind'], s['stratum_index']): s for s in samples}
+    for index in strata:
+        initial = by_key[('initial', index)]
+        initial['classification'] = {'label': 'NO_PERSON', 'subject_evidence': False}
+        times = vision.expected_refinement_times(clips, index)
+        for j, t in enumerate(times):
+            ci, frame = vision.map_record_time(clips, t)
+            label = 'NO_PERSON' if j < empty_counts.get(index, len(times)) else 'PERSON_VISIBLE'
+            samples.append(sample(clips, ci, frame, 'refinement', index, label))
+    return samples
+
+
+class TwoStagePersonScoreTests(unittest.TestCase):
+    def test_ten_person_samples_means_zero_sampled_no_person(self):
+        clips, samples = fixture()
         result = vision.estimate(clips, samples)
-        self.assertAlmostEqual(result['host_visible_ratio_estimate'], .6)
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['person_presence_ratio_estimate'], 1.0)
+        self.assertEqual(result['no_person_ratio_estimate'], 0.0)
+        self.assertFalse(result['strict_framewise_certified'])
+
+    def test_one_empty_initial_stratum_refined_to_nine_percent_passes(self):
+        clips, samples = fixture()
+        result = vision.estimate(clips, flag_strata(clips, samples, [4], empty_counts={4: 9}))
+        self.assertAlmostEqual(result['no_person_ratio_estimate'], .09)
+        self.assertEqual(result['no_person_refinement_count'], 10)
+        self.assertEqual(result['status'], 'PASS')
+
+    def test_exactly_ten_percent_empty_is_allowed(self):
+        clips, samples = fixture()
+        result = vision.estimate(clips, flag_strata(clips, samples, [2]))
+        self.assertAlmostEqual(result['no_person_ratio_estimate'], .10)
+        self.assertEqual(result['status'], 'PASS')
+
+    def test_multiple_empty_strata_are_accumulated_across_full_variant(self):
+        clips, samples = fixture()
+        result = vision.estimate(clips, flag_strata(clips, samples, [2, 7], empty_counts={2: 6, 7: 6}))
+        self.assertAlmostEqual(result['no_person_ratio_estimate'], .12)
         self.assertEqual(result['status'], 'REPAIRABLE')
 
-    def test_long_gap_and_accumulated_short_gaps_fail(self):
-        clips, samples = synthetic(4, missing=(400, 600))
-        self.assertEqual(vision.estimate(clips, samples)['status'], 'UNCERTAIN')
-        clips, samples = synthetic(1, cadence=40)
-        result = vision.estimate(clips, samples)
-        self.assertEqual(result['status'], 'UNCERTAIN')
-        self.assertLess(result['host_visible_ratio_lower_bound'], .70)
+    def test_refinement_window_scales_for_shorter_variant(self):
+        clips, _ = fixture(duration=45.0)
+        times = vision.expected_refinement_times(clips, 5)
+        self.assertAlmostEqual(float(times[-1]-times[0]), 4.05)
+        self.assertEqual(len(times), 10)
 
-    def test_uncertain_and_detector_error_block(self):
+    def test_equal_record_sampling_is_independent_of_physical_cut_count(self):
+        one, _ = fixture(duration=50.0, clips=1)
+        many, _ = fixture(duration=50.0, clips=5)
+        a = [float(t) for t in vision.initial_record_times(one)]
+        b = [float(t) for t in vision.initial_record_times(many)]
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 10)
+        self.assertEqual(vision.map_record_time(many, vision.initial_record_times(many)[-1])[0], 4)
+
+    def test_closeup_share_has_independent_configured_cap(self):
+        clips, samples = fixture(duration=50.0)
+        for index in range(3):
+            samples[index]['classification'] = {'label': 'PERSON_CLOSEUP', 'subject_evidence': True}
+        self.assertEqual(vision.estimate(clips, samples)['status'], 'PASS')
+        samples[3]['classification'] = {'label': 'PERSON_CLOSEUP', 'subject_evidence': True}
+        result = vision.estimate(clips, samples)
+        self.assertAlmostEqual(result['closeup_duration_ratio_estimate'], .4)
+        self.assertEqual(result['status'], 'REPAIRABLE')
+
+    def test_missing_refinement_for_empty_sample_is_uncertain(self):
+        clips, samples = fixture()
+        samples[0]['classification'] = {'label': 'NO_PERSON', 'subject_evidence': False}
+        self.assertEqual(vision.estimate(clips, samples)['status'], 'UNCERTAIN')
+
+    def test_uncertain_and_detector_error_do_not_pass(self):
         for label, expected in [('UNCERTAIN', 'UNCERTAIN'), ('DETECTOR_ERROR', 'BLOCKED')]:
             with self.subTest(label=label):
-                clips, samples = synthetic(4, special=label)
+                clips, samples = fixture()
+                samples[0]['classification'] = {'label': label, 'subject_evidence': False}
                 self.assertEqual(vision.estimate(clips, samples)['status'], expected)
 
-    def test_support_does_not_cross_source_seam(self):
-        clips = [{'source_start_frame': 1000, 'source_end_frame': 1050, 'fps': 25},
-                 {'source_start_frame': 2000, 'source_end_frame': 2050, 'fps': 25}]
-        samples = [{'clip_index': 0, 'frame': f,
-                    'classification': {'label': 'HOST_VISIBLE', 'subject_evidence': True}}
-                   for f in (1000, 1049)]
-        result = vision.estimate(clips, samples)
-        self.assertEqual(result['status'], 'UNCERTAIN')
-        self.assertEqual(result['host_visible_ratio_estimate'], .5)
-        self.assertEqual(result['host_visible_ratio_lower_bound'], 0)
-
-    def test_scoring_version_keeps_unchanged_frame_cache_identity(self):
-        self.assertEqual(vision.CONTRACT, 'person-subject-record-strata-v5')
-        self.assertEqual(vision.FRAME_CACHE_PROTOCOL, 'person-subject-strata-v4')
-        self.assertEqual(vision.classifier_adapter_digest(), vision._V4_ADAPTER_SHA256)
+    def test_contract_and_parallel_review_cache_versions(self):
+        self.assertEqual(vision.CONTRACT,
+                         'person-presence-two-stage-record-v8-codex-gated-refinement')
+        self.assertEqual(vision.FRAME_CACHE_PROTOCOL,
+                         'person-presence-closeup-strata-v13-parallel-codex-sheets')
 
 
 if __name__ == '__main__':

@@ -3,11 +3,13 @@
 This foundation records evidence. It does not perform or replace final hard audits.
 """
 import json
+from stage_dependencies import stage_code_digest
+from evidence_operation import verified_operation, current_operation
 from pathlib import Path
 from project_registry import ProjectIdentityError, atomic_json, checked_project, digest, workspace_lock
 from runtime_meta import CacheIdentityError, expected_identity, _sha256
 
-STATUSES = frozenset({'PENDING', 'IN_PROGRESS', 'REPAIRABLE', 'BLOCKED', 'FINAL_PASS',
+STATUSES = frozenset({'PENDING', 'IN_PROGRESS', 'REPAIRABLE', 'BLOCKED', 'WAITING_EVIDENCE', 'FINAL_PASS',
                       'WRITTEN', 'EXPORT_VERIFIED'})
 PASS_STAGES = {'FINAL_PASS': 'final_audit', 'WRITTEN': 'written', 'EXPORT_VERIFIED': 'export_verified'}
 
@@ -15,21 +17,31 @@ PASS_STAGES = {'FINAL_PASS': 'final_audit', 'WRITTEN': 'written', 'EXPORT_VERIFI
 def context(paths, product_id, encoding_id, stage):
     if type(product_id) is not int or product_id <= 0 or not isinstance(encoding_id, str) or not encoding_id.strip():
         raise CacheIdentityError('product_identity_required')
-    state = json.loads(paths.state_path.read_text())
-    checked_project(paths, state)
+    operation = current_operation()
+    if operation is not None:
+        return operation.context(paths, product_id, encoding_id, stage)
+    from compute_metrics import span
+    with span('stage_identity'):
+        return _context(paths, product_id, encoding_id, stage)
+
+
+def _context(paths, product_id, encoding_id, stage):
+    if type(product_id) is not int or product_id <= 0 or not isinstance(encoding_id, str) or not encoding_id.strip():
+        raise CacheIdentityError('product_identity_required')
+    operation = current_operation()
+    if operation is not None:
+        state, identity = operation.inputs(paths)
+    else:
+        state = paths.load_state()
+        checked_project(paths, state)
+        identity = expected_identity(paths, state=state, include_ranges=False)
     if product_id not in state['batch']['product_ids']:
         raise CacheIdentityError('product_outside_current_batch')
-    identity = expected_identity(paths, include_ranges=False)
     value = {k: identity[k] for k in ('identity_contract', 'project_key', 'config_digest',
                                      'upstream_fingerprint', 'rules_fingerprint', 'pipeline_version')}
     value.update({'product_id': product_id, 'encoding_id': encoding_id,
-                  'store_version': digest([_sha256(Path(__file__).parent / name) for name in
-                                          ('product_checkpoints.py', 'final_quality_gate.py', 'codex_worker.py', 'registered_pipeline.py',
-                                           'refine_plans_v2.py', 'audit_mimo_v2.py', 'build_expanded_codex_request.py',
-                                           'person_coverage_audit_v2.py', 'windowed_asr_v2.py', 'review_compute_cache.py',
-                                           'adaptive_vision.py', 'vision_record_score_v5.py', 'apple_frame_probe.swift',
-                                           'compute_store.py', 'asr_identity.py',
-                                           'asr_runtime.py','asr_worker.py','trial_session.py','resolve_trial.py')]),
+                  'store_contract': 'stage-dependencies-v1',
+                  'store_version': stage_code_digest(stage),
                   'processing_policy': digest(state.get('batch_overrides', {})),
                   'stage_policy': digest({k: state.get('runtime', {}).get(k, {}).get(stage)
                                           for k in ('stage_versions', 'model_versions')})})
@@ -61,10 +73,14 @@ def check_current_range(paths, reference, value):
         return
     pointer = current_range_path(paths, identity['product_id'], identity['encoding_id'])
     if (Path(str(pointer) + '.invalid').exists() or not pointer.is_file()
-            or json.loads(pointer.read_text()) != {'reference': reference, 'body_digest': value['body_digest']}):
+            or json.loads(pointer.read_text(encoding='utf-8')) != {'reference': reference, 'body_digest': value['body_digest']}):
         raise CacheIdentityError('stage_range_dependency_not_current')
+    if current_operation() is not None:
+        current_operation().watch(pointer)
+        current_operation().watch(Path(str(pointer) + '.invalid'))
 
 
+@verified_operation
 def load_stage(paths, reference, *, product_id=None, encoding_id=None, _visited=None):
     artifact = paths.resolve_reference(reference).path
     records = paths.project_records_dir.resolve()
@@ -74,7 +90,12 @@ def load_stage(paths, reference, *, product_id=None, encoding_id=None, _visited=
     if artifact in visited:
         raise CacheIdentityError('stage_dependency_cycle')
     visited.add(artifact)
-    value = json.loads(artifact.read_text())
+    operation = current_operation()
+    cached = operation.lookup(paths, artifact, product_id, encoding_id)
+    if cached is not None:
+        return cached
+    raw_digest = _sha256(artifact)
+    value = json.loads(artifact.read_text(encoding='utf-8'))
     if value.get('schema_version') != 2 or not isinstance(value.get('identity'), dict):
         raise CacheIdentityError('stage_schema_invalid_legacy_blocked')
     identity = value['identity']
@@ -92,6 +113,7 @@ def load_stage(paths, reference, *, product_id=None, encoding_id=None, _visited=
         check_current_range(paths, dep['path'], parent)
         if _sha256(paths.resolve_reference(dep['path']).path) != dep['sha256']:
             raise CacheIdentityError('stage_dependency_changed')
+    operation.remember(paths, artifact, raw_digest, current, value)
     return value
 
 
@@ -108,7 +130,8 @@ def capture_stage(paths, *, product_id, encoding_id, stage, version, model_versi
 
 
 def publish_stage(paths, *, product_id, encoding_id, stage, version, model_version, body, dependencies=(), snapshot=None):
-    if stage not in {'range', 'candidate', 'rough', 'plan', 'asr', 'vision', 'approved', *PASS_STAGES.values()}:
+    if stage not in {'range', 'candidate', 'rough', 'semantic_review', 'selection_vision',
+                     'plan', 'asr', 'vision', 'approved', *PASS_STAGES.values()}:
         raise CacheIdentityError('unknown_stage')
     if not version or not model_version:
         raise CacheIdentityError('stage_and_model_version_required')
@@ -116,7 +139,7 @@ def publish_stage(paths, *, product_id, encoding_id, stage, version, model_versi
         raise CacheIdentityError('stage_precompute_snapshot_required')
     with workspace_lock(paths):
         identity = context(paths, product_id, encoding_id, stage)
-        runtime = json.loads(paths.state_path.read_text()).get('runtime', {})
+        runtime = paths.load_state().get('runtime', {})
         for key, provided in (('stage_versions', version), ('model_versions', model_version)):
             configured = runtime.get(key, {}).get(stage)
             if configured is not None and str(configured) != str(provided):
@@ -144,6 +167,21 @@ def publish_stage(paths, *, product_id, encoding_id, stage, version, model_versi
             existing = load_stage(paths, paths.reference(output), product_id=product_id, encoding_id=encoding_id)
             if existing != value:
                 raise CacheIdentityError('immutable_stage_conflict_use_new_version')
+            if stage in ('range', 'plan'):
+                # An immutable artifact can outlive a missing or stale current
+                # pointer. Re-publishing must restore the pointer after validating
+                # the existing artifact against the current stage context.
+                reference = paths.reference(output)
+                expected_pointer = {'reference': reference, 'body_digest': value['body_digest']}
+                if not pointer.is_file() or json.loads(pointer.read_text(encoding='utf-8')) != expected_pointer:
+                    def check_existing():
+                        current = load_stage(paths, reference, product_id=product_id,
+                                             encoding_id=encoding_id)
+                        if current != value:
+                            raise CacheIdentityError('immutable_stage_changed_before_pointer_recovery')
+                        if marker.exists():
+                            raise CacheIdentityError('current_plan_publication_incomplete')
+                    atomic_json(pointer, expected_pointer, before_commit=check_existing)
             return paths.reference(output)
         def check():
             if any(identity.get(k) != v for k, v in context(paths, product_id, encoding_id, stage).items()):
@@ -165,16 +203,19 @@ def publish_stage(paths, *, product_id, encoding_id, stage, version, model_versi
         return paths.reference(output)
 
 
-def verify_evidence(paths, product_id, encoding_id, plan_ref, evidence_ref, status):
+@verified_operation
+def verify_evidence(paths, product_id, encoding_id, plan_ref, evidence_ref, status, *, _historical=False):
     plan = load_stage(paths, plan_ref, product_id=product_id, encoding_id=encoding_id)
     if plan['identity']['stage'] != 'plan':
         raise CacheIdentityError('checkpoint_requires_final_plan')
     pointer = current_plan_path(paths, product_id, encoding_id)
     if Path(str(pointer) + '.invalid').exists():
         raise CacheIdentityError('current_plan_publication_incomplete')
-    if (not pointer.is_file() or json.loads(pointer.read_text()) !=
+    if (not pointer.is_file() or json.loads(pointer.read_text(encoding='utf-8')) !=
             {'reference': plan_ref, 'body_digest': plan['body_digest']}):
         raise CacheIdentityError('checkpoint_plan_is_not_current')
+    current_operation().watch(pointer)
+    current_operation().watch(Path(str(pointer) + '.invalid'))
     if status not in PASS_STAGES:
         return plan
     evidence = load_stage(paths, evidence_ref, product_id=product_id, encoding_id=encoding_id)
@@ -189,16 +230,21 @@ def verify_evidence(paths, product_id, encoding_id, plan_ref, evidence_ref, stat
         required = body.get('previous_evidence')
         if not required:
             raise CacheIdentityError('checkpoint_evidence_chain_missing')
-        verify_evidence(paths, product_id, encoding_id, plan_ref, required, previous)
+        verify_evidence(paths, product_id, encoding_id, plan_ref, required, previous, _historical=_historical)
     if required not in [d['path'] for d in evidence['identity']['dependencies']]:
         raise CacheIdentityError('checkpoint_evidence_dependency_missing')
     if body.get('verdict') != ('PASS' if status == 'FINAL_PASS' else 'VERIFIED'):
         raise CacheIdentityError('checkpoint_evidence_not_passed')
-    if status == 'FINAL_PASS' and body.get('audit_scope') != 'final_plan':
+    if status == 'FINAL_PASS' and body.get('audit_scope') not in (
+            'final_plan', 'semantic_selection_plus_local_hard_gates'):
         raise CacheIdentityError('selection_pass_is_not_final_pass')
+    if (status == 'FINAL_PASS'
+            and body.get('audit_scope') == 'semantic_selection_plus_local_hard_gates'
+            and not body.get('semantic_review_ref')):
+        raise CacheIdentityError('semantic_selection_final_evidence_missing')
     if status == 'FINAL_PASS':
         from final_quality_gate import verify_final_record
-        verify_final_record(paths, plan_ref, body)
+        verify_final_record(paths, plan_ref, body, check_current_asr=not _historical)
     return plan
 
 
@@ -208,18 +254,31 @@ def checkpoint_path(paths):
 
 def read_ledger(paths):
     path = checkpoint_path(paths)
+    if current_operation() is not None:
+        current_operation().watch(path)
     if not path.exists():
         return {'schema_version': 2, 'project_key': paths.registered_scope()[0], 'revision': 0, 'products': {}}
-    ledger = json.loads(path.read_text())
+    ledger = json.loads(path.read_text(encoding='utf-8'))
     if (ledger.get('schema_version') != 2 or ledger.get('project_key') != paths.registered_scope()[0]
             or type(ledger.get('revision')) is not int or not isinstance(ledger.get('products'), dict)):
         raise CacheIdentityError('checkpoint_legacy_or_identity_mismatch')
     return ledger
 
 
+def variant_checkpoint_fields(plan, status):
+    scope = plan['body'].get('delivery_scope') if plan else None
+    if not scope:
+        return {}
+    return {'delivery_scope': scope, 'product_complete': scope['product_complete'],
+            'variant_statuses': {
+                **{v['variant_id']: v['status'] for v in scope['pending_variants']},
+                **{vid: status for vid in scope['approved_variant_ids']}}}
+
+
+@verified_operation
 def resume(paths, product_ids=None):
     """Read-only revalidation: stale evidence is BLOCKED, interrupted work resumes."""
-    state = json.loads(paths.state_path.read_text())
+    state = paths.load_state()
     checked_project(paths, state)
     ledger = read_ledger(paths)
     results = {}
@@ -238,14 +297,22 @@ def resume(paths, product_ids=None):
             if row['context'] != context(paths, pid, row['encoding_id'], PASS_STAGES.get(row['status'], 'plan')):
                 raise CacheIdentityError('checkpoint_context_stale')
             if row['plan_ref']:
-                plan = verify_evidence(paths, pid, row['encoding_id'], row['plan_ref'], row['evidence_ref'], row['status'])
+                plan = verify_evidence(paths, pid, row['encoding_id'], row['plan_ref'], row['evidence_ref'], row['status'],
+                                       _historical=row['status'] in ('WRITTEN', 'EXPORT_VERIFIED'))
                 if plan['body_digest'] != row['plan_digest']:
                     raise CacheIdentityError('checkpoint_plan_changed')
+                fields = variant_checkpoint_fields(plan, row['status'])
+                if any(row.get(k) != fields.get(k) for k in
+                       ('delivery_scope', 'product_complete', 'variant_statuses')):
+                    raise CacheIdentityError('checkpoint_variant_scope_changed')
             elif row['status'] in PASS_STAGES:
                 raise CacheIdentityError('checkpoint_plan_missing')
             if row['status'] == 'IN_PROGRESS':
                 row['resume_required'] = True
         except (ValueError, KeyError, OSError, TypeError) as exc:
+            if row['status'] in ('WRITTEN', 'EXPORT_VERIFIED'):
+                row['delivery_history'] = {'status': row['status'], 'plan_ref': row.get('plan_ref'),
+                                           'evidence_ref': row.get('evidence_ref')}
             row.update({'status': 'BLOCKED', 'reason': str(exc)})
         results[pid] = row
     return results
@@ -271,6 +338,7 @@ def update_checkpoint(paths, *, product_id, encoding_id, status, plan_ref=None, 
         row = {'status': status, 'encoding_id': encoding_id, 'plan_ref': plan_ref,
                'plan_digest': plan['body_digest'] if plan else None, 'evidence_ref': evidence_ref,
                'context': captured, 'reason': reason}
+        row.update(variant_checkpoint_fields(plan, status))
         # A retry of the same verified result is not a second completion.
         if old != row:
             ledger['products'][str(product_id)] = row

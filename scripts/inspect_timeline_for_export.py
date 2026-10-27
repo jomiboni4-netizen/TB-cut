@@ -41,7 +41,7 @@ def main() -> None:
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
     expected_identity(paths)  # Registered downstream migration is required before I/O.
-    state = json.loads((paths.state_path).read_text(encoding="utf-8"))
+    state = paths.load_state()
     resolve = connect()
     if not resolve:
         raise SystemExit("未连接达芬奇")
