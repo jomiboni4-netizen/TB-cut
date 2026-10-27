@@ -16,20 +16,38 @@ import registered_pipeline as pipeline
 import owned_audio_refinement
 import project_scheduler as scheduler
 import project_editing_modes
+import final_quality_gate
 from init_project import initialize
 from product_checkpoints import load_stage, resume, read_ledger, update_checkpoint, capture_stage, publish_stage
-from final_quality_gate import final_task, import_final_review, plan_errors, approved_product
+from final_quality_gate import (final_task, import_final_review, plan_errors,
+                                source_overlap_details, approved_product)
 from project_registry import digest, atomic_json
 from runtime_meta import CacheIdentityError
 from resolve_write_v2 import load_products
+from types import SimpleNamespace
+from sentence_boundaries import CUTPOINT_CONTRACT
 
 
 class PlanContractTests(unittest.TestCase):
+    def test_physical_overlap_diagnostics_name_both_clips_and_exact_intersection(self):
+        plan = valid_plan(source='same-source.mp4')
+        duplicate = json.loads(json.dumps(plan['variants'][0]['clips'][0]))
+        duplicate.update(source_start_frame=250, audio_start_frame=250,
+                         source_end_frame=500, audio_end_frame=500)
+        plan['variants'][0]['clips'].append(duplicate)
+        details = source_overlap_details(plan)
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]['left']['unit_id'], 'clip_1')
+        self.assertEqual(details[0]['right']['unit_id'], 'clip_2')
+        self.assertEqual(details[0]['overlap_start_seconds'], 25.0)
+        self.assertEqual(details[0]['overlap_end_seconds'], 50.0)
+        self.assertIn('SOURCE_OVERLAP', plan_errors(plan))
+
     def test_old_sentence_edge_plan_cannot_drive_cache_or_repair(self):
         self.assertFalse(scheduler.current_plan_contract({'identity': {
             'stage': 'plan', 'model_version': 'sentence-owned-edges-v2-frame-estimate'}}))
         self.assertTrue(scheduler.current_plan_contract({'identity': {
-            'stage': 'plan', 'model_version': scheduler.SENTENCE_CONTRACT}}))
+            'stage': 'plan', 'model_version': CUTPOINT_CONTRACT}}))
 
     def test_worker_identity_retry_never_accepts_wrong_task(self):
         task = {'task_digest': 'expected'}
@@ -41,6 +59,25 @@ class PlanContractTests(unittest.TestCase):
         with patch.object(codex_worker, 'launch', return_value=wrong):
             with self.assertRaisesRegex(CacheIdentityError, 'worker_response_identity_mismatch'):
                 codex_worker.matching_outcome(task)
+
+    def test_project_audit_reports_delivery_readiness_without_legacy_placeholder(self):
+        paths = SimpleNamespace(load_state=lambda: {'batch': {'failed_product_ids': []}})
+        target = {'product_id': 1, 'encoding_id': '001'}
+        with patch.object(scheduler, 'targets', return_value=[target]), \
+             patch.object(scheduler, 'resume', return_value={1: {
+                 'status': 'FINAL_PASS', 'encoding_id': '001'}}), \
+             patch.object(scheduler, 'approved_product', return_value={
+                 'product_index': 1, 'plans': []}):
+            audit = scheduler.project_audit(paths)
+        self.assertEqual(audit['delivery_status'], 'READY_FOR_DELIVERY')
+        self.assertNotIn('BLOCKED_UNMIGRATED_RESOLVE_EXPORT_VERIFIERS', audit['errors'])
+
+    def test_memory_pressure_reduces_product_workers_to_one(self):
+        outcomes = [SimpleNamespace(stdout='4096\n'), SimpleNamespace(stdout=(
+            'Mach Virtual Memory Statistics: (page size of 4096 bytes)\n'
+            'Pages free: 1000.\nPages inactive: 1000.\nPages speculative: 0.\n'))]
+        with patch.object(scheduler.subprocess, 'run', side_effect=outcomes):
+            self.assertEqual(scheduler.controlled_product_workers(2), 1)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -111,7 +148,9 @@ class SchedulerTests(unittest.TestCase):
         return stack
 
     def full(self):
-        with self.engine(): return scheduler.run_project(self.paths,mode='codex',detector=self.detector)
+        with self.engine():
+            return scheduler.run_project(self.paths,mode='codex',detector=self.detector,
+                                         product_workers=1)
 
     def test_twelve_products_four_groups_independent_bounded_inputs_and_final_gate(self):
         result=self.full()
@@ -131,10 +170,72 @@ class SchedulerTests(unittest.TestCase):
     def test_group_two_failure_stops_with_full_pending_target_set(self):
         self.fail_pid=5
         result=self.full()
-        self.assertEqual(len(result['groups_processed']),2)
-        self.assertFalse(result['final_review_complete'])
+        self.assertEqual(len(result['groups_processed']),4)
+        self.assertTrue(result['final_review_complete'])
+        self.assertFalse(result['all_variants_complete'])
+        self.assertIn(5, result['pending_product_ids'])
         self.assertEqual(resume(self.paths)[5]['status'],'REPAIRABLE')
-        self.assertEqual(resume(self.paths)[7]['status'],'PENDING')
+        self.assertEqual(resume(self.paths)[7]['status'],'FINAL_PASS')
+
+    def test_post_asr_overlap_returns_to_semantic_selection_with_exact_exclusion_once(self):
+        left = {'variant_id': 'variant_1', 'unit_id': 'variant_1_1',
+                'source_file': self.video.name, 'start_frame': 600, 'end_frame': 900,
+                'fps': 30.0, 'start_seconds': 20.0, 'end_seconds': 30.0}
+        right = {'variant_id': 'variant_1', 'unit_id': 'variant_1_2',
+                 'source_file': self.video.name, 'start_frame': 690, 'end_frame': 810,
+                 'fps': 30.0, 'start_seconds': 23.0, 'end_seconds': 27.0}
+        overlap = {'source_file': self.video.name, 'left': left, 'right': right,
+                   'overlap_start_seconds': 23.0, 'overlap_end_seconds': 27.0,
+                   'overlap_seconds': 4.0}
+        tasks = []
+        gate_calls = [0]
+
+        def plan_errors(_plan):
+            gate_calls[0] += 1
+            return ['SOURCE_OVERLAP'] if gate_calls[0] == 1 else []
+
+        def launch(task):
+            tasks.append(task)
+            if task['role'] == 'selection':
+                candidate = task['candidates'][0]
+                if task.get('issues'):
+                    selected = [
+                        {'candidate_id': candidate['candidate_id'], 'variant_id': 'variant_1',
+                         'start': 0.0, 'end': 23.0},
+                        {'candidate_id': candidate['candidate_id'], 'variant_id': 'variant_1',
+                         'start': 27.0, 'end': 50.0},
+                    ]
+                else:
+                    selected = [{'candidate_id': candidate['candidate_id'],
+                                 'variant_id': 'variant_1', **candidate['time_range']}]
+                outcome = fake_outcome(task, selected_ranges=selected)
+                outcome['result']['semantic_map'] = [{'candidate_id': candidate['candidate_id'],
+                    'selling_point': 'Synthetic selling point', 'quote': candidate['asr_text']}]
+                return outcome
+            return fake_outcome(task)
+
+        with self.engine(), patch.object(codex_worker, 'launch', side_effect=launch), \
+             patch.object(final_quality_gate, 'plan_errors', side_effect=plan_errors), \
+             patch.object(final_quality_gate, 'source_overlap_details', return_value=[overlap]), \
+             patch.object(scheduler, 'vision_audit', wraps=scheduler.vision_audit) as vision_call:
+            result = scheduler.process_product(
+                self.paths, {'product_id': 1, 'encoding_id': '001'}, mode='codex',
+                detector=self.detector, repair_limit=1)
+
+        self.assertEqual(result['status'], 'FINAL_PASS', result)
+        selection_tasks = [task for task in tasks if task['role'] == 'selection']
+        self.assertEqual(len(selection_tasks), 2)
+        self.assertEqual(vision_call.call_count, 1,
+                         'the plan overlap must be rejected before final person sampling')
+        repaired = selection_tasks[1]
+        self.assertEqual(repaired['repair_route'], 'semantic_reselection')
+        self.assertEqual(repaired['hard_excluded_source_ranges'], [{
+            'source_file': self.video.name, 'start': 23.0, 'end': 27.0,
+            'variant_ids': ['variant_1'], 'reason': 'post_asr_source_overlap'}])
+        self.assertIn('重新理解当前商品', repaired['repair_instruction'])
+        cursor = json.loads((self.paths.project_records_dir / 'cursors' / '1.json').read_text())
+        self.assertEqual(cursor['repair_attempts'], 1)
+        self.assertEqual(cursor['repair_history'][-1]['repair_route'], 'semantic_reselection')
 
     def test_restart_completed_products_not_recomputed_or_counted_twice(self):
         first=self.full(); count=len(self.calls)
@@ -146,7 +247,11 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.project_audit(self.paths)['final_pass_count'],12)
 
     def test_missing_true_review_and_package_mode_never_grant_final_pass(self):
-        result=scheduler.run_project(self.paths,mode='package')
+        with patch.object(project_editing_modes,'resolve_editing_mode',return_value=(
+                'taobao_legacy',{'duration_exclusive_seconds':[45,60],'target_variant_count':3,
+                    'allow_fewer_variants_when_exhausted':True,
+                    'closeup_duration_ratio_max_inclusive':.3})):
+            result=scheduler.run_project(self.paths,mode='package')
         self.assertFalse(result['final_review_complete'])
         self.assertEqual(self.calls,[])
         task_paths=list((self.paths.project_records_dir/'tasks').glob('*.json'))
@@ -178,19 +283,27 @@ class SchedulerTests(unittest.TestCase):
             audit_fixture(self.paths,ref)
         self.assertEqual(resume(self.paths)[1]['status'],'BLOCKED')
 
-    def test_asr_edge_miss_still_runs_vision_without_reselecting_semantics(self):
+    def test_asr_edge_miss_keeps_codex_boundary_and_still_passes_product(self):
         with self.engine():
             with patch.object(pipeline,'transcribe_window',return_value=[
                     {'start':0.5,'end':1.0,'text':'unrelated synthetic speech'}]):
                 result=scheduler.process_product(self.paths,{'product_id':1,'encoding_id':'001'},
                     mode='codex',detector=self.detector)
-        self.assertEqual(result['status'],'REPAIRABLE_ASR_CUTPOINT',result)
-        self.assertTrue(result['vision_audited'])
-        self.assertFalse(result['semantic_rerun'])
+        self.assertEqual(result['status'],'FINAL_PASS',result)
+        row=resume(self.paths)[1]
+        plan=load_stage(self.paths,row['plan_ref'])['body']
+        clip=plan['variants'][0]['clips'][0]
+        self.assertEqual(clip['cutpoint_review']['status'],'WAITING_FOR_MANUAL_EDGE_REVIEW')
+        self.assertEqual(clip['cutpoint_review']['pending_edges'],['ending'])
+        self.assertEqual(clip['cutpoint_proof']['ending']['status'],'CODEX_FALLBACK')
+        self.assertEqual(clip['source_end_frame'],round(50*30))
+        self.assertFalse(plan['cutpoint_execution']['asr_is_quality_gate'])
         cursor=json.loads((self.paths.project_records_dir/'cursors/1.json').read_text())
         self.assertTrue(cursor.get('rough'))
         self.assertTrue(cursor.get('semantic_review'))
+        self.assertTrue(cursor.get('selection_vision'), cursor)
         self.assertTrue(cursor.get('vision'))
+        self.assertNotIn('manual_cutpoint_preview_request',cursor)
         self.assertNotIn('selection_repair_context',cursor)
         self.assertEqual([row['role'] for row in self.calls].count('selection'),1)
         self.assertEqual([row['role'] for row in self.calls].count('final_review'),1)
@@ -210,8 +323,9 @@ class SchedulerTests(unittest.TestCase):
         ref=publish_stage(self.paths,**args,body=changed,snapshot=capture_stage(self.paths,**args))
         self.assertEqual(resume(self.paths)[1]['status'],'BLOCKED')
         with self.assertRaises(CacheIdentityError):
-            import_final_review(self.paths,ref,load_stage(self.paths,row['evidence_ref'])['body']['vision_ref'],
-                                load_stage(self.paths,row['evidence_ref'])['body']['codex_receipt'])
+            final_body=load_stage(self.paths,row['evidence_ref'])['body']
+            import_final_review(self.paths,ref,final_body['vision_ref'],
+                                semantic_review_ref=final_body['semantic_review_ref'])
 
     def test_cross_group_source_overlap_fails_global_gate(self):
         self.full()
@@ -225,7 +339,8 @@ class SchedulerTests(unittest.TestCase):
     def test_seal_tamper_rejected_and_product_lease_denies_concurrent_worker(self):
         self.full()
         row=resume(self.paths)[1];body=load_stage(self.paths,row['evidence_ref'])['body']
-        path=self.paths.resolve_reference(body['codex_receipt']).path
+        semantic=load_stage(self.paths,body['semantic_review_ref'])
+        path=self.paths.resolve_reference(semantic['body']['receipt']).path
         value=json.loads(path.read_text());value['result']['checks']['seams']=False
         atomic_json(path,value)
         self.assertEqual(resume(self.paths)[1]['status'],'BLOCKED')
@@ -238,7 +353,11 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaisesRegex(CacheIdentityError,'registered_downstream_not_integrated'):expected_identity(self.paths)
 
     def test_unavailable_cli_keeps_task_package_blocked(self):
-        with patch.object(codex_worker.shutil, 'which', return_value=None):
+        with patch.object(codex_worker.shutil, 'which', return_value=None), \
+             patch.object(project_editing_modes,'resolve_editing_mode',return_value=(
+                 'taobao_legacy',{'duration_exclusive_seconds':[45,60],'target_variant_count':3,
+                     'allow_fewer_variants_when_exhausted':True,
+                     'closeup_duration_ratio_max_inclusive':.3})):
             result=scheduler.process_product(self.paths,{'product_id':1,'encoding_id':'001'},mode='codex')
         self.assertEqual(result['status'],'BLOCKED')
         self.assertIn('independent_codex_cli_unavailable',result['reason'])
@@ -254,14 +373,14 @@ class SchedulerTests(unittest.TestCase):
             with patch.object(sys,'argv',args), self.assertRaisesRegex(SystemExit,'not_migrated'):
                 module.main()
 
-    def test_whole_project_restores_full_targets_without_registering_paths_again(self):
-        before=json.loads(self.paths.state_path.read_text())
+    def test_batch_schedule_keeps_the_explicit_product_scope_without_registering_paths_again(self):
+        before=self.paths.load_state()
         upstream=self.paths.upstream_cache_dir
         initialize(self.paths,products=[1,2,3])
         result=scheduler.schedule(self.paths)
-        after=json.loads(self.paths.state_path.read_text())
-        self.assertEqual(len(result['targets']),12)
-        self.assertEqual(result['groups'],[[1,2,3],[4,5,6],[7,8,9],[10,11,12]])
+        after=self.paths.load_state()
+        self.assertEqual(len(result['targets']),3)
+        self.assertEqual(result['groups'],[[1,2,3]])
         self.assertEqual(upstream,self.paths.upstream_cache_dir)
         for field in ('title_path','subtitle_paths','video_paths','resolve','project_identity'):
             self.assertEqual(before[field],after[field])

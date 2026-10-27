@@ -89,7 +89,10 @@ def semantic_windows(index: dict, products: list[dict], *, before: float = 75.0,
             discovery = [term for term in found if term in DISCOVERY_FEATURES]
             strong = [term for term in found if term not in GENERIC and len(term) > 1]
             score = sum(1 if term in GENERIC else 3 if len(term) >= 3 else 2 for term in found)
-            if discovery:
+            # Distinctive cues are preferred, while other non-generic title
+            # matches remain useful search context for Codex when a product
+            # title has no configured discovery feature.
+            if discovery or strong:
                 matches.append({"cue_index": cue_index, "cue": cue, "terms": found,
                                 "discovery_terms": discovery,
                                 "strong_terms": strong, "score": score})

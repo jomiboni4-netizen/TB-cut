@@ -117,6 +117,28 @@ def validate_written_rows(expected: list[dict], video: list[dict], audio: list[d
     return errors
 
 
+def manual_cutpoint_marker_specs(product_index: int, encoding_id: str, variant_index: int,
+                                 variant_id: str, clip: dict, record_frame: int,
+                                 duration_frames: int) -> list[dict]:
+    """Place red timeline review markers one frame inside each unresolved edge."""
+    if duration_frames < 2:
+        raise ValueError('manual_cutpoint_marker_clip_too_short')
+    review = clip.get('cutpoint_review') or {}
+    unit_id = str(clip.get('unit_id') or f'{variant_id}_clip')
+    markers = []
+    for edge in review.get('pending_edges', []):
+        if edge not in ('opening', 'ending'):
+            raise ValueError('unknown_manual_cutpoint_edge')
+        marker_frame = record_frame + 1 if edge == 'opening' else record_frame + duration_frames - 1
+        custom = f'tb_cut_manual_edge:{encoding_id}:{variant_id}:{unit_id}:{edge}'
+        markers.append({'frame':marker_frame,'custom_data':custom,
+                        'product_index':product_index,'variant_index':variant_index,
+                        'variant_id':variant_id,'unit_id':unit_id,'edge':edge,
+                        'record_boundary':record_frame if edge == 'opening'
+                                          else record_frame+duration_frames})
+    return markers
+
+
 def record_written_checkpoints(paths, wanted: list[int], report: dict, report_digest: str,
                               target_id: str) -> None:
     from product_checkpoints import capture_stage, publish_stage, read_ledger, resume, update_checkpoint
@@ -127,8 +149,6 @@ def record_written_checkpoints(paths, wanted: list[int], report: dict, report_di
             raise SystemExit('resolve_write_verified_but_product_checkpoint_not_passed:'
                              + str(approved.get('status')) + ':' + str(approved.get('reason'))
                              + '; do_not_replay')
-        cursor_path = paths.project_records_dir / 'cursors' / f'{pid}.json'
-        cursor = json.loads(cursor_path.read_text(encoding='utf-8'))
         plan_ref, audit_ref = approved.get('plan_ref'), approved.get('evidence_ref')
         if not plan_ref or not audit_ref:
             raise SystemExit('resolve_write_verified_but_checkpoint_evidence_missing; do_not_replay')
@@ -158,7 +178,7 @@ def recover_registered_append(paths, wanted: list[int]) -> None:
     if not tx_path.is_file() or not report_path.is_file():
         raise SystemExit('append_recovery_artifacts_missing; do_not_replay')
     tx, report = read(tx_path), read(report_path)
-    if (tx.get('status') != 'APPENDED_PENDING_VERIFY'
+    if (tx.get('status') != 'WRITTEN'
             or tx.get('products') != wanted
             or report.get('passed') is not True or report.get('errors')
             or report.get('product_ids') != wanted
@@ -172,8 +192,11 @@ def recover_registered_append(paths, wanted: list[int]) -> None:
     if not resolve:
         raise SystemExit('append_recovery_resolve_unavailable; do_not_replay')
     project = resolve.GetProjectManager().GetCurrentProject()
-    if (not project or stable_id(project) != report['project_id']
-            or project.GetName() != report['project']):
+    from resolve_session_identity import confirm_project
+    if not project:
+        raise SystemExit('append_recovery_project_identity_mismatch; do_not_replay')
+    confirmed_project_id, _ = confirm_project(paths, project)
+    if (confirmed_project_id != report['project_id'] or project.GetName() != report['project']):
         raise SystemExit('append_recovery_project_identity_mismatch; do_not_replay')
     from coldstart_resolve import snapshot as resolve_snapshot
     timeline = next((project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount()+1)
@@ -200,7 +223,7 @@ def recover_registered_append(paths, wanted: list[int]) -> None:
     report_digest = hashlib.sha256(json.dumps(report, ensure_ascii=False, sort_keys=True,
         separators=(',', ':')).encode()).hexdigest()
     record_written_checkpoints(paths, wanted, report, report_digest, report['target_timeline_id'])
-    atomic_json(tx_path, {'status': 'VERIFIED', 'report': str(report_path),
+    atomic_json(tx_path, {'status': 'READBACK_VERIFIED', 'report': str(report_path),
                           'report_sha256': report_digest, 'backup': str(backup),
                           'products': wanted, 'recovered_without_reappend': True})
     print(f'追加事务恢复并回读通过：商品{len(wanted)}款；未重复追加。')
@@ -221,7 +244,8 @@ def snapshot_preserved(before: dict, after: dict) -> bool:
     return all(new_markers.get(key) == value for key, value in old_markers.items())
 
 
-def registered_append_authorization(paths, state, target_id: str, product_ids: list[int]) -> dict:
+def registered_append_authorization(paths, state, target_id: str, target_name: str,
+                                   product_ids: list[int]) -> dict:
     path = paths.workspace_root / "delivery" / "USER_OVERRIDE.json"
     if not path.is_file():
         raise SystemExit("existing_target_append_user_authorization_missing")
@@ -229,13 +253,21 @@ def registered_append_authorization(paths, state, target_id: str, product_ids: l
     authorization = override.get("resolve_write_authorization", {})
     if (override.get("scope") != "this_batch_only" or override.get("confirmed_by_user") is not True
             or authorization.get("action") != "append_existing_target"
-            or authorization.get("target_timeline") != state["resolve"]["target_timeline"]
-            or authorization.get("target_timeline_id") != target_id
+            or authorization.get("target_timeline") != target_name
+            or authorization.get("target_timeline_id") not in (None, target_id)
             or authorization.get("project_id") != state["project_identity"]["resolve_project_id"]
             or authorization.get("product_ids") != product_ids
             or authorization.get("clear_existing") is not False):
         raise SystemExit("existing_target_append_authorization_scope_mismatch")
     return authorization
+
+
+def unique_timeline_by_name(project, name: str):
+    matches = [project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)
+               if project.GetTimelineByIndex(i).GetName() == name]
+    if len(matches) != 1:
+        raise SystemExit("指定目标时间线不存在或名称不唯一：" + name)
+    return matches[0]
 
 
 def repair_registered_timeline_layout(paths, wanted: list[int]) -> None:
@@ -303,8 +335,11 @@ def repair_registered_timeline_layout(paths, wanted: list[int]) -> None:
         raise SystemExit('layout_repair_resolve_unavailable')
     manager = resolve.GetProjectManager()
     project = manager.GetCurrentProject() if manager else None
-    if (not project or project.GetName() != state['resolve']['project_name']
-            or stable_id(project) != project_id):
+    from resolve_session_identity import confirm_project
+    if not project or project.GetName() != state['resolve']['project_name']:
+        raise SystemExit('layout_repair_project_identity_mismatch')
+    confirmed_project_id, _ = confirm_project(paths, project)
+    if confirmed_project_id != project_id:
         raise SystemExit('layout_repair_project_identity_mismatch')
     from coldstart_resolve import snapshot as resolve_snapshot
     timelines = [project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)]
@@ -579,9 +614,15 @@ def main() -> None:
     parser.add_argument('--trial-write', action='store_true', help='Dedicated bounded trial only; formal timeline never writable')
     parser.add_argument('--append-registered-target', action='store_true',
                         help='Append only to the user-authorized, registered final timeline after all quality gates pass')
+    parser.add_argument('--target-timeline',
+                        help='本次明确选择的时间线名称；默认使用项目登记的成片时间线')
     args = parser.parse_args()
     root = Path(args.root).resolve()
     paths = resolve_runtime_paths(root, args.workspace)
+    from project_task import guard
+    guard(paths, "write")
+    if args.recover_append or args.repair_layout:
+        guard(paths, "recover")
     if args.repair_layout:
         state = paths.load_state()
         wanted = ([int(v) for v in args.products.split(',') if v.strip()] if args.products
@@ -611,24 +652,28 @@ def main() -> None:
                 resolve = connect(status_path=paths.workspace_root/'resolve_connection_status.json')
                 if not resolve: raise SystemExit('未连接达芬奇')
                 project = resolve.GetProjectManager().GetCurrentProject()
-                if (not project or project.GetName() != state['resolve']['project_name']
-                        or stable_id(project) != state['project_identity']['resolve_project_id']):
+                from resolve_session_identity import confirm_project
+                if not project or project.GetName() != state['resolve']['project_name']:
+                    raise SystemExit('当前达芬奇项目身份不匹配')
+                confirmed_project_id, _ = confirm_project(paths, project)
+                if confirmed_project_id != state['project_identity']['resolve_project_id']:
                     raise SystemExit('当前达芬奇项目身份不匹配')
                 from coldstart_resolve import snapshot as resolve_snapshot
                 live = [project.GetTimelineByIndex(i) for i in range(1,project.GetTimelineCount()+1)]
                 inventory = {stable_id(t):resolve_snapshot(t) for t in live}
+                target_name = args.target_timeline or state['resolve'].get('target_timeline')
                 target_id = state['resolve'].get('target_timeline_id')
                 source_id = state['resolve'].get('source_timeline_id')
-                target = next((t for t in live if stable_id(t)==target_id),None)
-                if (not target or not source_id or source_id == target_id
-                        or target.GetName() != state['resolve']['target_timeline']):
-                    raise SystemExit('registered_target_identity_missing_or_mismatched')
+                target = unique_timeline_by_name(project, target_name)
+                target_id = stable_id(target)
+                if not source_id or source_id == target_id:
+                    raise SystemExit('selected_target_conflicts_with_registered_source')
                 preflight = {'project_id': stable_id(project), 'protected': inventory}
-                if not target or target.GetName()==state['resolve']['source_timeline']:
+                if not target or stable_id(target)==source_id:
                     raise SystemExit('登记目标与源时间线冲突')
                 if not target.GetTrackCount('video') or not target.GetTrackCount('audio'):
                     raise SystemExit('登记目标缺少音视频轨，拒绝自动改动时间线结构')
-                registered_append_authorization(paths,state,target_id,wanted)
+                registered_append_authorization(paths,state,target_id,target_name,wanted)
                 from registered_pipeline import inputs
                 titles,_ = inputs(paths)
                 product_by_id = {int(row['product_index']):row for row in titles['products']}
@@ -674,11 +719,15 @@ def main() -> None:
             raise SystemExit('未连接达芬奇')
         manager = resolve.GetProjectManager()
         project = manager.GetCurrentProject() if manager else None
-        if (not project or project.GetName() != config['project_name']
-                or stable_id(project) != state['project_identity']['resolve_project_id']):
+        from resolve_session_identity import confirm_project
+        if not project or project.GetName() != config['project_name']:
+            raise SystemExit('当前达芬奇项目身份不匹配')
+        confirmed_project_id, _ = confirm_project(paths, project)
+        if confirmed_project_id != state['project_identity']['resolve_project_id']:
             raise SystemExit('当前达芬奇项目身份不匹配')
         from coldstart_resolve import snapshot as resolve_snapshot
         timelines = [project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount()+1)]
+        target_name = args.target_timeline or config.get('target_timeline')
         target_id = config.get('target_timeline_id')
         source_id = config.get('source_timeline_id')
         before_inventory = {stable_id(t): resolve_snapshot(t) for t in timelines}
@@ -686,11 +735,12 @@ def main() -> None:
             raise SystemExit('registered_source_target_ids_missing_or_conflicting')
         preflight = {'project_id': stable_id(project), 'protected': before_inventory}
         source = next((t for t in timelines if stable_id(t) == source_id), None)
-        target = next((t for t in timelines if stable_id(t) == target_id), None)
+        target = unique_timeline_by_name(project, target_name)
+        target_id = stable_id(target)
         if (not source or not target or source.GetName() != config['source_timeline']
-                or target.GetName() != config['target_timeline']):
+                or stable_id(target) == source_id):
             raise SystemExit('源或目标时间线身份不匹配')
-        registered_append_authorization(paths, state, target_id, wanted)
+        registered_append_authorization(paths, state, target_id, target_name, wanted)
         batch_key = str(state['batch']['batch_id'])
         scope_key = '-'.join(str(pid) for pid in wanted)
         report_path = paths.cache_dir / 'resolve_delivery' / batch_key / f'resolve_write_report_{scope_key}.json'
@@ -716,6 +766,10 @@ def main() -> None:
         old_video = list(target.GetItemListInTrack('video', 1) or [])
         old_audio = list(target.GetItemListInTrack('audio', 1) or [])
         old_custom = {row.get('customData', '') for row in (target.GetMarkers() or {}).values() if isinstance(row, dict)}
+        test_binding = state.get('runtime', {}).get('test_timeline_binding', {})
+        if (stable_id(target) == test_binding.get('timeline_id')
+                and (old_video or old_audio or target.GetMarkers())):
+            raise SystemExit('reusable_test_timeline_not_empty_clear_transaction_required')
         for product in products:
             if f"tb_cut_product_start:{product['encoding_id']}" in old_custom:
                 raise SystemExit(f"商品{product['product_index']}已经写入，拒绝重复")
@@ -724,7 +778,7 @@ def main() -> None:
                          for track in range(1, int(target.GetTrackCount(kind))+1)
                          for item in (target.GetItemListInTrack(kind,track) or [])]
         record = timeline_block_start(int(target.GetStartFrame()), end_positions, gap)
-        append_infos, expected, markers = [], [], []
+        append_infos, expected, markers, cutpoint_markers = [], [], [], []
         total_variants = sum(len(product['plans']) for product in products)
         variant_position = 0
         for product in products:
@@ -746,8 +800,16 @@ def main() -> None:
                     append_infos.append({'mediaPoolItem':media_items[media_name],'startFrame':start,'endFrame':end,
                                          'recordFrame':record,'trackIndex':1})
                     expected.append({'product_index':product['product_index'],'variant_index':variant_index,
+                                     'variant_id': str(plan.get('variant_id') or f'variant_{variant_index}'),
                                      'media':media_name,'record_start':record,'record_end':record+end-start,
                                      'source_start':start,'source_end':end})
+                    variant_id = str(plan.get('variant_id') or f'variant_{variant_index}')
+                    try:
+                        cutpoint_markers.extend(manual_cutpoint_marker_specs(
+                            product['product_index'], product['encoding_id'], variant_index,
+                            variant_id, clip, record, end-start))
+                    except ValueError as exc:
+                        raise SystemExit(str(exc)) from exc
                     record += end-start
                 variant_position += 1
                 if variant_position < total_variants:
@@ -757,6 +819,14 @@ def main() -> None:
         print(f'预检通过：追加商品{len(products)}款，方案{sum(len(p["plans"]) for p in products)}条，素材段{len(expected)}个')
         if not append_infos:
             raise SystemExit('append_plan_empty')
+        review_frames = [int(marker['frame']) for marker in cutpoint_markers]
+        product_frames = [int(marker['frame']) for marker in markers]
+        if len(review_frames) != len(set(review_frames)) or set(review_frames) & set(product_frames):
+            raise SystemExit('manual_cutpoint_marker_frame_collision')
+        occupied_marker_frames = {int(target.GetStartFrame()) + int(offset)
+                                  for offset in (target.GetMarkers() or {})}
+        if set(review_frames) & occupied_marker_frames:
+            raise SystemExit('manual_cutpoint_marker_conflicts_with_existing_marker')
         if not target.GetTrackCount('video') or not target.GetTrackCount('audio'):
             raise SystemExit('登记目标缺少音视频轨，拒绝自动改动时间线结构')
         backup_dir = paths.cache_dir / 'backups'; backup_dir.mkdir(parents=True,exist_ok=True)
@@ -782,7 +852,7 @@ def main() -> None:
         created = project.GetMediaPool().AppendToTimeline(append_infos)
         if not created or len(created) != len(append_infos):
             raise SystemExit(f'追加结果不完整；禁止自动重试；备份：{backup}')
-        atomic_json(transaction_path,{'status':'APPENDED_PENDING_VERIFY','project_id':stable_id(project),
+        atomic_json(transaction_path,{'status':'WRITTEN','project_id':stable_id(project),
                     'target_timeline_id':target_id,'products':wanted,'existing_video_count':len(old_video),
                     'existing_audio_count':len(old_audio),'backup':str(backup),'preflight_snapshot':preflight})
         for marker in markers:
@@ -790,6 +860,12 @@ def main() -> None:
                                     f"商品{marker['product_index']}｜{marker['title']}",1,
                                     f"tb_cut_product_start:{marker['encoding_id']}"):
                 raise SystemExit(f"商品{marker['product_index']}标记添加失败；禁止自动重试；备份：{backup}")
+        for marker in cutpoint_markers:
+            label = (f"待人工修边｜商品{marker['product_index']}｜"
+                     f"{marker['variant_id']}｜{marker['edge']}")
+            if not target.AddMarker(marker['frame']-int(target.GetStartFrame()), 'Red',
+                                    marker['custom_data'], label, 1, marker['custom_data']):
+                raise SystemExit(f"人工修边标记添加失败；禁止自动重试；备份：{backup}")
         if not manager.SaveProject():
             raise SystemExit(f'写入后保存失败；禁止自动重试；备份：{backup}')
         new_video = list(target.GetItemListInTrack('video',1) or [])[len(old_video):]
@@ -808,23 +884,35 @@ def main() -> None:
             row = current_markers.get(int(marker['frame']-int(target.GetStartFrame())),{})
             if row.get('customData') != f"tb_cut_product_start:{marker['encoding_id']}":
                 errors.append(f"商品{marker['product_index']}标记验收失败")
+        for marker in cutpoint_markers:
+            row = current_markers.get(int(marker['frame']-int(target.GetStartFrame())), {})
+            if row.get('customData') != marker['custom_data'] or row.get('color') != 'Red':
+                errors.append('人工修边标记回读失败')
         report = {'schema_version':2,'pipeline_version':'2.1','passed':not errors,'errors':errors,
             'backup_project':str(backup),'project':project.GetName(),'project_id':stable_id(project),
             'source_timeline':source.GetName(),'target_timeline':target.GetName(),'target_timeline_id':target_id,
             'product_ids':wanted,'variant_count':sum(len(p['plans']) for p in products),
+            'variant_delivery_scope': {str(p['product_index']): {
+                'approved_variant_ids': [v['variant_id'] for v in p['plans']],
+                'pending_variants': (p.get('delivery_scope') or {}).get('pending_variants', []),
+                'product_complete': p.get('product_complete', True)} for p in products},
             'existing_video_count':len(old_video),'existing_audio_count':len(old_audio),
             'expected':expected,'actual':[item_row(x) for x in new_video],'markers':markers,
+            'cutpoint_review_markers':cutpoint_markers,
             'target_before':preflight['protected'][target_id],'target_after':after_inventory[target_id],
             'protected_before':preflight['protected'],'protected_after':after_inventory,
             'final_variant_metrics':[{'product_index':p['product_index'],'variant_id':v['variant_id'],
                 'duration':v.get('duration'),'status':v.get('status')} for p in products for v in p['plans']]}
         for marker in report['markers']:
             marker['timeline_frame_offset'] = marker['frame'] - int(target.GetStartFrame())
+        report['delivery_status'] = 'READBACK_VERIFIED' if not errors else 'WRITTEN'
+        report['export_status'] = 'NOT_REQUESTED'
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
         report_digest = hashlib.sha256(json.dumps(report,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-        record_written_checkpoints(paths, wanted, report, report_digest, target_id)
-        atomic_json(transaction_path,{'status':'VERIFIED' if not errors else 'FAILED_VERIFICATION',
+        if not errors:
+            record_written_checkpoints(paths, wanted, report, report_digest, target_id)
+        atomic_json(transaction_path,{'status':'READBACK_VERIFIED' if not errors else 'FAILED_VERIFICATION',
             'report':str(report_path),'report_sha256':report_digest,'backup':str(backup),'products':wanted})
         if errors:
             raise SystemExit(f'追加后复验失败；禁止重试；备份：{backup}')

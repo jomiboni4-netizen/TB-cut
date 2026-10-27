@@ -23,7 +23,7 @@ PRODUCERS = {
     'assembly': ['delivery_editorial.py','delivery_fps.py','delivery_assembly.py','sentence_boundaries.py','refine_plans_v2.py'],
     'audio': ['owned_audio_refinement.py','audio_boundary_evidence.py','refine_plans_v2.py','sentence_boundaries.py','final_quality_gate.py'],
     'semantic': ['delivery_pipeline.py','delivery_editorial.py','codex_worker.py','final_quality_gate.py','sentence_boundaries.py'],
-    'vision': ['adaptive_vision.py','vision_record_score_v5.py','apple_frame_probe.swift'],
+    'vision': ['adaptive_vision.py','vision_record_score_v5.py','apple_frame_probe.swift','vision_contact_sheet.swift'],
 }
 CHECKS = {'opening','ending','causal_logic','seams','selling_value','duplicates'}
 

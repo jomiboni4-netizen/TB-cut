@@ -203,7 +203,8 @@ def load_rough_preview_products(paths, variants: dict[int, list[str]], *, allow_
 
 
 def execute(paths, variants: dict[int, list[str]], *, check_only=False,
-            allow_vfr_approximate=False, rough_semantic=False):
+            allow_vfr_approximate=False, rough_semantic=False,
+            target_timeline=None, target_timeline_id=None):
     state, products, evidence = (load_rough_preview_products(
         paths, variants, allow_vfr_approximate=allow_vfr_approximate)
         if rough_semantic else load_preview_products(paths, variants))
@@ -219,12 +220,19 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
     timelines = [project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)]
     by_id = {stable_id(timeline): timeline for timeline in timelines}
     source_id = project_config.get("source_timeline_id")
-    target_id = project_config.get("target_timeline_id")
+    target_id = target_timeline_id or project_config.get("target_timeline_id")
     source, target = by_id.get(source_id), by_id.get(target_id)
     if (not source or not target or source_id == target_id
             or source.GetName() != project_config["source_timeline"]
-            or target.GetName() != project_config["target_timeline"]):
+            or target.GetName() != (target_timeline or project_config["target_timeline"])):
         raise SystemExit("preview_timeline_identity_mismatch")
+    if target_timeline:
+        binding = state.get("runtime", {}).get("test_timeline_binding", {})
+        if (binding.get("project_id") != state["project_identity"]["resolve_project_id"]
+                or binding.get("timeline_id") != target_id
+                or binding.get("name") != target_timeline
+                or target_id in {source_id, project_config.get("target_timeline_id")}):
+            raise SystemExit("preview_selected_target_not_registered_test_timeline")
     if not target.GetTrackCount("video") or not target.GetTrackCount("audio"):
         raise SystemExit("preview_target_missing_audio_or_video_track")
 
@@ -346,8 +354,11 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
         prefix = "ASR待修" if rough_semantic else "预审"
         name = (f"{prefix}｜商品 ID {marker['encoding_id']}｜开始" if marker["kind"] == "product"
                 else f"{prefix}｜商品 ID {marker['encoding_id']}｜{marker['variant_id']}")
-        if not target.AddMarker(marker["frame"] - int(target.GetStartFrame()), "Blue",
-                                str(marker["encoding_id"]), "", 1, marker["custom_data"]):
+        marker_color = "Red" if rough_semantic else "Blue"
+        marker_name = "MANUAL_CUTPOINT" if rough_semantic else str(marker["encoding_id"])
+        marker_note = name if rough_semantic else ""
+        if not target.AddMarker(marker["frame"] - int(target.GetStartFrame()), marker_color,
+                                marker_name, marker_note, 1, marker["custom_data"]):
             raise SystemExit("preview_marker_write_failed_no_automatic_retry")
     if not manager.SaveProject():
         raise SystemExit("preview_save_failed_no_automatic_retry")
@@ -368,9 +379,11 @@ def execute(paths, variants: dict[int, list[str]], *, check_only=False,
     for marker in markers:
         offset = marker["frame"] - int(target.GetStartFrame())
         current_marker = current_markers.get(int(offset), {}) or {}
+        expected_color = "Red" if rough_semantic else "Blue"
+        expected_name = "MANUAL_CUTPOINT" if rough_semantic else str(marker["encoding_id"])
         if (current_marker.get("customData") != marker["custom_data"]
-                or current_marker.get("color") != "Blue"
-                or current_marker.get("name") != str(marker["encoding_id"])):
+                or current_marker.get("color") != expected_color
+                or current_marker.get("name") != expected_name):
             errors.append("preview_marker_readback_failed")
     report = {"schema_version": 1, "mode": transaction["mode"],
               "passed": not errors, "errors": errors, "project_id": stable_id(project),
@@ -975,6 +988,8 @@ def main():
                         help="Complete markers/readback for an appended transaction without replaying clips")
     parser.add_argument("--rough-semantic", action="store_true",
                         help="Preview current semantic PASS when ASR cutpoint alignment failed")
+    parser.add_argument("--target-timeline")
+    parser.add_argument("--target-timeline-id")
     parser.add_argument("--review-manual-edits", action="store_true",
                         help="Read back the user's manual cutpoint edits without changing Resolve")
     parser.add_argument("--normalize-manual-markers", action="store_true",
@@ -983,6 +998,10 @@ def main():
                         help="Write standard product IDs and sequence/title notes on registered blue markers")
     args = parser.parse_args()
     paths = resolve_runtime_paths(args.root, args.workspace)
+    from project_task import guard
+    guard(paths, "write")
+    if args.recover_markers:
+        guard(paths, "recover")
     if sum((args.normalize_manual_markers, args.review_manual_edits,
             args.label_product_markers, args.recover_markers)) > 1:
         parser.error("choose one preview recovery, review, or marker operation")
@@ -999,7 +1018,9 @@ def main():
             parser.error("--variants is required unless --recover-markers is set")
         result = execute(paths, parse_variants(args.variants), check_only=args.check_only,
                          allow_vfr_approximate=args.allow_vfr_approximate,
-                         rough_semantic=args.rough_semantic)
+                         rough_semantic=args.rough_semantic,
+                         target_timeline=args.target_timeline,
+                         target_timeline_id=args.target_timeline_id)
     print(json.dumps(result, ensure_ascii=False))
 
 

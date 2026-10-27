@@ -34,6 +34,8 @@ def main():
             state = paths.load_state()
             if state.get("project_identity"):
                 checked_project(paths, state)
+                from project_task import load
+                load(paths)
             elif paths.project_ref_path.is_file():
                 raise ProjectIdentityError('workspace_project_reference_missing')
             else:

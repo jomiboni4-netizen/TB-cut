@@ -89,10 +89,13 @@ def validate_accepted_ranges(document, meta, titles, index, product_ids):
 
 def expanded_request(product, candidates, removed, range_digest, editing_mode, editing_policy):
     duration=round(float(product["global_end"])-float(product["global_start"]),3)
+    inferred_search = product.get("boundary_mode") == "neighbor_inferred_search_envelope"
     rules={"product_title":product["title"],"product_index":product["product_index"],
-           "encoding_id":product["encoding_id"],"phase":"完整商品范围宽候选池语义选择",
+           "encoding_id":product["encoding_id"],
+           "phase":"相邻商品推断搜索窗口内的卖点语义选择" if inferred_search else "完整商品范围宽候选池语义选择",
            "requirements":[
-             "仅在已验证的当前商品区间内选择",
+             ("候选窗口是依据当前商品标题/卖点及前后商品边界推断的搜索包络，不是本商品整体精确起止；只选明确属于当前商品的完整卖点。"
+              if inferred_search else "仅在已验证的当前商品区间内选择"),
              f"每条成片严格大于{editing_policy['duration_exclusive_seconds'][0]}秒且小于{editing_policy['duration_exclusive_seconds'][1]}秒",
              "候选不限长度，允许从长语义块内部选择完整句群，不可截断依赖","每条开头独立、结尾完整",
              f"目标时长约{editing_policy.get('target_duration_seconds', editing_policy['duration_exclusive_seconds'][1])}秒；完整自然语义优先于贴近目标时长",
@@ -100,15 +103,26 @@ def expanded_request(product, candidates, removed, range_digest, editing_mode, e
              "保留完整字幕语境并标注禁用话术；理解后避开禁用片段，不得把它剪入成片",
              "不同版本源时间零重叠且口播语义不重复",
              "输出卖点清单及其候选编号、逐字原文证据；不得修改商品范围、决定物理切点或控制 Resolve"]}
+    if inferred_search:
+        rules["requirements"] = [row for row in rules["requirements"]
+                                 if "完整候选池耗尽后才可减少" not in row]
+        rules["requirements"].append(
+            "目标是三条不同卖点成片；不能因整体商品起点/终点不确定而阻断或减少数量，邻商品交界处归属不清的内容跳过并从其它候选窗口继续找。")
     pool_duration=round(sum(float(r["time_range"]["end"])-float(r["time_range"]["start"]) for r in candidates),3)
     rules["editing_mode"] = editing_mode
     rules["editing_policy"] = editing_policy
+    pool_summary={"segment_count":len(candidates),"duration":pool_duration,
+            "product_range_duration":duration,
+            "coverage":None if inferred_search else round(pool_duration/duration,6) if duration else 0.0,
+            "search_scope":"neighbor_inferred_search_windows" if inferred_search else "confirmed_product_range",
+            "complete_product_range_scanned":not inferred_search}
     return {"schema_version":2,"pipeline_version":"2.2","product_index":product["product_index"],
             "rules":rules,"model":"codex","product_range":{"start":product["global_start"],
-            "end":product["global_end"],"duration":duration,"basis":product.get("range_basis")},
+            "end":product["global_end"],"duration":duration,"basis":product.get("range_basis"),
+            "boundary_mode":product.get("boundary_mode"),
+            "boundary_notes":product.get("boundary_notes",[])},
             "product_range_sha256":range_digest,"candidates":candidates,"local_forbidden_cues":removed,
-            "candidate_pool_summary":{"segment_count":len(candidates),"duration":pool_duration,
-            "product_range_duration":duration,"coverage":round(pool_duration/duration,6) if duration else 0.0}}
+            "candidate_pool_summary":pool_summary}
 
 
 def build_requests(paths, product_ids):

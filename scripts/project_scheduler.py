@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 import time
+import subprocess
 from itertools import combinations
+from concurrent.futures import ThreadPoolExecutor
 from project_registry import atomic_json, digest, workspace_lock
 from runtime_paths import resolve_runtime_paths
 from runtime_meta import CacheIdentityError
@@ -16,15 +18,17 @@ from final_quality_gate import (semantic_selection_task, publish_semantic_review
                                 import_final_review, approved_product)
 from codex_worker import execute
 from registered_pipeline import (inputs, candidates, selection_task, rough_selection, local_asr,
-                                 physical_plan, vision_audit, visual_repair_samples)
+                                 physical_plan, vision_audit, selection_visual_audit, visual_repair_samples,
+                                 visual_repair_ranges)
 from compute_metrics import Metrics, scope, span, count
-from sentence_boundaries import CONTRACT as SENTENCE_CONTRACT
+from stage_graph import PARENTS, descendants
+from sentence_boundaries import CUTPOINT_CONTRACT
 
 
 def current_plan_contract(record):
-    """A saved plan cannot survive a changed sentence-edge producer."""
+    """A saved plan must use Codex-authoritative, non-gating ASR cutpoints."""
     return (record.get('identity', {}).get('stage') == 'plan'
-            and record['identity'].get('model_version') == SENTENCE_CONTRACT)
+            and record['identity'].get('model_version') == CUTPOINT_CONTRACT)
 
 
 def targets(paths):
@@ -51,6 +55,37 @@ def groups(values, size=3):
     return [values[i:i+size] for i in range(0, len(values), size)]
 
 
+STAGE_LABELS = {
+    'selection_vision': 'selection_person_prescreen',
+    'asr': 'asr_nearby_cutpoint_execution',
+    'plan': 'physical_plan',
+    'vision': 'final_person_audit',
+}
+
+
+def controlled_product_workers(requested=2):
+    """Cap product work at two and fall back to one under memory pressure."""
+    if type(requested) is not int or not 1 <= requested <= 2:
+        raise CacheIdentityError('product_worker_limit_must_be_one_or_two')
+    if requested == 1:
+        return 1
+    try:
+        page_size = int(subprocess.run(['sysctl', '-n', 'hw.pagesize'], text=True,
+                                       capture_output=True, check=True, timeout=5).stdout.strip())
+        output = subprocess.run(['vm_stat'], text=True, capture_output=True,
+                                check=True, timeout=5).stdout
+        pages = {}
+        for line in output.splitlines():
+            name, separator, value = line.partition(':')
+            if separator:
+                pages[name.strip()] = int(value.strip().rstrip('.'))
+        available = sum(pages.get(name, 0) for name in
+                        ('Pages free', 'Pages inactive', 'Pages speculative')) * page_size
+        return 1 if available < 4 * 1024 ** 3 else 2
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 1
+
+
 def save_product_metrics(paths, product_id, run_record):
     """Retain bounded per-invocation timing instead of replacing the prior run."""
     path = paths.project_records_dir / 'metrics' / f'{product_id}.json'
@@ -67,8 +102,8 @@ def save_product_metrics(paths, product_id, run_record):
                            'time_semantics': 'per-invocation wall clock; nested stage spans are inclusive'})
 
 
-def selection_overlap_issues(paths, candidate_ref, selected_ranges):
-    """Reject same-source reuse before ASR and plan work are scheduled."""
+def selection_overlap_details(paths, candidate_ref, selected_ranges):
+    """Describe exact intersections in Codex's selected source ranges."""
     candidate = load_stage(paths, candidate_ref)
     by_id = {row['candidate_id']: row for row in candidate['body']['candidates']}
     intervals = []
@@ -80,13 +115,72 @@ def selection_overlap_issues(paths, candidate_ref, selected_ranges):
             start, end = float(row['start']), float(row['end'])
         except (KeyError, TypeError, ValueError):
             continue  # let rough_selection validate malformed timestamps.
-        intervals.append((source['source_file'], start, end, row.get('variant_id')))
-    errors = []
+        intervals.append({'source_file': source['source_file'], 'start': start, 'end': end,
+                          'variant_id': row.get('variant_id'),
+                          'candidate_id': row.get('candidate_id')})
+    details = []
     for index, left in enumerate(intervals):
         for right in intervals[index + 1:]:
-            if left[0] == right[0] and min(left[2], right[2]) > max(left[1], right[1]) + 1e-9:
-                errors.append(f"SOURCE_RANGE_REUSE:{left[3]}:{right[3]}:{max(left[1], right[1]):.3f}-{min(left[2], right[2]):.3f}")
-    return errors
+            overlap_start, overlap_end = max(left['start'], right['start']), min(left['end'], right['end'])
+            if (left['source_file'] == right['source_file']
+                    and overlap_end > overlap_start + 1e-9):
+                details.append({'source_file': left['source_file'], 'left': left, 'right': right,
+                                'overlap_start': overlap_start, 'overlap_end': overlap_end,
+                                'overlap_seconds': overlap_end - overlap_start})
+    return details
+
+
+def selection_overlap_issue(detail):
+    left, right = detail['left'], detail['right']
+    return (f"SOURCE_RANGE_REUSE:{left['variant_id']}:{right['variant_id']}:{detail['source_file']}"
+            f":{detail['overlap_start']:.3f}-{detail['overlap_end']:.3f}秒")
+
+
+def selection_overlap_issues(paths, candidate_ref, selected_ranges):
+    """Compatibility wrapper returning actionable same-source overlap issues."""
+    return [selection_overlap_issue(row)
+            for row in selection_overlap_details(paths, candidate_ref, selected_ranges)]
+
+
+def selected_range_exclusion_issues(paths, candidate_ref, selected_ranges, exclusions):
+    candidate = load_stage(paths, candidate_ref)
+    by_id = {row['candidate_id']: row for row in candidate['body']['candidates']}
+    issues = []
+    for row in selected_ranges:
+        source = by_id.get(row.get('candidate_id'))
+        if source is None:
+            continue
+        try:
+            start, end = float(row['start']), float(row['end'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for exclusion in exclusions or []:
+            if (source['source_file'] != exclusion.get('source_file')
+                    or row.get('variant_id') not in (exclusion.get('variant_ids') or [])):
+                continue
+            overlap_start = max(start, float(exclusion['start']))
+            overlap_end = min(end, float(exclusion['end']))
+            if overlap_end > overlap_start + 1e-9:
+                issues.append(f"HARD_SOURCE_RANGE_EXCLUSION_VIOLATION:{row.get('variant_id')}:{source['source_file']}:{overlap_start:.3f}-{overlap_end:.3f}秒")
+    return issues
+
+
+def plan_overlap_issue(detail):
+    def clip_label(row):
+        return (f"{row['variant_id']}/{row['unit_id']}[{row['source_file']}"
+                f" {row['start_frame']}-{row['end_frame']}f"
+                f" {row['start_seconds']:.3f}-{row['end_seconds']:.3f}秒]")
+    return (f"SOURCE_OVERLAP:{clip_label(detail['left'])} 与 {clip_label(detail['right'])}"
+            f" 重叠 {detail['overlap_start_seconds']:.3f}-{detail['overlap_end_seconds']:.3f}秒"
+            f"（{detail['overlap_seconds']:.3f}秒）；重新理解并选择受影响版本，排除此交集")
+
+
+def plan_overlap_exclusions(details):
+    return [{'source_file': row['source_file'],
+             'start': row['overlap_start_seconds'],
+             'end': row['overlap_end_seconds'],
+             'variant_ids': sorted({row['left']['variant_id'], row['right']['variant_id']}),
+             'reason': 'post_asr_source_overlap'} for row in details]
 
 
 def schedule(paths, size=3):
@@ -129,19 +223,26 @@ def checkpoint(paths, pid, encoding, status, plan=None, evidence=None, reason=No
 
 
 def process_product(paths, product, *, mode='package', detector=None, include_cross_boundary_cues=False,
-                    allow_vfr_approximate=False, preferred_fps=None, repair_limit=2):
+                    allow_vfr_approximate=False, preferred_fps=None, repair_limit=2,
+                    blind_fresh=False):
     from codex_worker import verify_receipt
     pid, encoding = product['product_id'], product['encoding_id']
     with product_lease(paths, pid):
         resumed_at = time.perf_counter()
         run_started_at = time.time()
         existing = resume(paths, [pid])[pid]
+        raw = read_ledger(paths)['products'].get(str(pid), {})
+        if raw.get('status') in ('WRITTEN', 'EXPORT_VERIFIED') and existing['status'] == 'BLOCKED':
+            return {'product_id': pid, 'status': 'WAITING_EVIDENCE',
+                    'reason': 'written_evidence_stale_do_not_reselect_or_replay',
+                    'product_complete': raw.get('product_complete', True)}
         if existing.get('status') == 'BLOCKED' and existing.get('reason') == 'checkpoint_context_stale':
             # A temporary implementation edit can stale only the checkpoint
             # envelope while its immutable plan and audit remain valid. Rebind
             # that exact passing evidence through the normal checkpoint API;
             # never rerun selection or alter the approved plan.
-            cursor_path = paths.project_records_dir / 'cursors' / f'{pid}.json'
+            cursor_path = ((paths.cache_dir / 'cursors' / f'{pid}.json') if blind_fresh
+                           else (paths.project_records_dir / 'cursors' / f'{pid}.json'))
             try:
                 recovery_cursor = json.loads(cursor_path.read_text())
                 plan_ref = recovery_cursor.get('plan')
@@ -163,13 +264,20 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
             save_product_metrics(paths, pid, {'started_at_epoch': run_started_at,
                 'elapsed_seconds': round(time.perf_counter()-resumed_at, 3), 'stages': [],
                 'compute': detailed.rows, 'resumed_valid': True, 'repair_attempts': 0})
-            return {'product_id': pid, 'status': existing['status'], 'cache_hit': True}
-        cursor_path = paths.project_records_dir / 'cursors' / f'{pid}.json'
+            delivery_scope = existing.get('delivery_scope') or {}
+            return {'product_id': pid, 'status': existing['status'], 'cache_hit': True,
+                    'product_complete': existing.get('product_complete', True),
+                    'pending_variants': delivery_scope.get('pending_variants', []),
+                    'pending_recovery_requires_separate_dispatch': bool(delivery_scope.get('pending_variants'))}
+        cursor_path = ((paths.cache_dir / 'cursors' / f'{pid}.json') if blind_fresh
+                       else (paths.project_records_dir / 'cursors' / f'{pid}.json'))
         cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {}
         metrics = []
         detailed = Metrics()
         active_scope = scope(detailed)
         active_scope.__enter__()
+        recovery_context = None
+        recovery = None
         def stage(name, function):
             started = time.perf_counter()
             ref = cursor.get(name)
@@ -177,9 +285,7 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
             if ref:
                 try:
                     record = load_stage(paths, ref, product_id=pid, encoding_id=encoding)
-                    parents = {'rough': ['candidate'], 'semantic_review': ['rough'],
-                               'asr': ['rough'], 'plan': ['rough', 'asr'],
-                               'vision': ['plan'], 'final_audit': ['plan', 'vision']}.get(name, [])
+                    parents = PARENTS.get(name, ())
                     dependencies = {d['path'] for d in record['identity']['dependencies']}
                     if any(cursor.get(parent) not in dependencies for parent in parents):
                         raise CacheIdentityError('cursor_dependency_changed')
@@ -188,13 +294,27 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                         if record['identity']['model_version'] != vision_model_version(
                                 detector, allow_vfr_approximate=allow_vfr_approximate):
                             raise CacheIdentityError('vision_classifier_or_policy_changed')
+                    if name == 'selection_vision':
+                        from registered_pipeline import vision_model_version
+                        if record['identity']['model_version'] != vision_model_version(
+                                detector, allow_vfr_approximate=allow_vfr_approximate,
+                                audit_mode='selection_prescreen'):
+                            raise CacheIdentityError('selection_vision_classifier_or_policy_changed')
                     if name == 'plan' and not current_plan_contract(record):
                         raise CacheIdentityError('sentence_edge_contract_changed')
                     if name == 'asr':
                         from registered_pipeline import asr_model_identity, current_asr_parameters
                         body = record['body']
-                        if body.get('parameters') != current_asr_parameters() or body.get('model') != asr_model_identity(body['model']['name']):
-                            raise CacheIdentityError('asr_model_or_parameters_changed')
+                        if (body.get('parameters') != current_asr_parameters()
+                                or body.get('cutpoint_contract') != CUTPOINT_CONTRACT):
+                            raise CacheIdentityError('asr_execution_contract_changed')
+                        model = body.get('model')
+                        if model:
+                            try:
+                                if asr_model_identity(model['name']) != model:
+                                    raise CacheIdentityError('asr_cache_model_identity_changed')
+                            except (OSError, ValueError, KeyError, TypeError):
+                                raise CacheIdentityError('asr_cache_model_identity_changed')
                     if name == 'final_audit':
                         from final_quality_gate import verify_final_record
                         verify_final_record(paths, cursor['plan'], record['body'])
@@ -208,23 +328,18 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                 with span(name):
                     ref = function()
                 cursor[name] = ref
-                descendants = {
-                    'candidate': ('rough', 'asr', 'plan', 'vision', 'final_audit'),
-                    'rough': ('semantic_review', 'asr', 'plan', 'vision', 'final_audit'),
-                    'semantic_review': ('asr', 'plan', 'vision', 'final_audit'),
-                    'asr': ('plan', 'vision', 'final_audit'),
-                    'plan': ('vision', 'final_audit'),
-                    'vision': ('final_audit',),
-                }.get(name, ())
+                invalidated_stages = descendants(name)
                 if previous_ref != ref:
-                    for child in descendants:
+                    for child in invalidated_stages:
                         cursor.pop(child, None)
                     if name in ('candidate', 'rough'):
                         cursor.pop('semantic_map', None)
                         cursor.pop('audio_repair_request', None)
                 with workspace_lock(paths):
                     atomic_json(cursor_path, cursor)
-            metrics.append({'stage': name, 'elapsed_seconds': time.perf_counter()-started, 'cache_hit': hit,
+            metrics.append({'stage': STAGE_LABELS.get(name, name),
+                            'internal_stage': name,
+                            'elapsed_seconds': time.perf_counter()-started, 'cache_hit': hit,
                             'invalidation_reason': invalidation_reason})
             if hit:
                 count(name, hits=1)
@@ -241,18 +356,52 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
             finally:
                 metrics.append({'stage': task['role'], 'elapsed_seconds': time.perf_counter()-started, 'cache_hit': cached})
         try:
+            from vision_recovery import recovery_scope
+            recovery_context = recovery_scope(paths, pid)
+            recovery = recovery_context.__enter__()
+
+            def waiting_evidence(stage_name, reference, body):
+                from vision_recovery import technical_failure
+                technical = any(technical_failure(sample.get('classification', {}))
+                                for row in body.get('variants', []) for sample in row.get('samples', []))
+                request = {'stage': stage_name, 'reference': reference,
+                           'pending_variant_ids': [v['variant_id'] for v in body.get('variants', [])
+                                                   if v.get('status') != 'PASS'],
+                           'recovery': recovery.summary(), 'automatic_resume': False,
+                           'reason': ('technical_vision_recovery_exhausted' if technical
+                                      else 'vision_evidence_unresolved_not_quality_failure')}
+                cursor['evidence_recovery_request'] = request
+                with workspace_lock(paths):
+                    atomic_json(cursor_path, cursor)
+                checkpoint(paths, pid, encoding, 'WAITING_EVIDENCE', cursor.get('plan'),
+                           reason=request['reason'])
+                return {'product_id': pid, 'status': 'WAITING_EVIDENCE', **request}
+
             checkpoint(paths, pid, encoding, 'IN_PROGRESS')
-            if not detector:
-                raise CacheIdentityError('verified_person_detector_required_before_selection')
             pointer = current_range_path(paths, pid, encoding)
             if not pointer.exists():
                 raise CacheIdentityError('confirmed_product_range_missing')
             range_ref = json.loads(pointer.read_text())['reference']
             load_stage(paths, range_ref)
+            if cursor.get('range') != range_ref:
+                cursor['range'] = range_ref
+                with workspace_lock(paths):
+                    atomic_json(cursor_path, cursor)
             candidate_ref = stage('candidate', lambda: candidates(
                 paths, range_ref, include_cross_boundary_cues=include_cross_boundary_cues))
-            from final_quality_gate import plan_errors
+            from final_quality_gate import plan_errors, source_overlap_details
             repair_history = cursor.get('repair_history', [])
+            # The ASR coordinate workflow no longer enters the local-audio
+            # recheck loop. Retire legacy repair flags from earlier cursors.
+            stale_cutpoint_flags = [key for key in ('audio_repair_request', 'asr_edge_repair_request')
+                                    if cursor.pop(key, None) is not None]
+            stale_preview_request = cursor.pop('manual_cutpoint_preview_request', None)
+            if stale_cutpoint_flags:
+                with workspace_lock(paths):
+                    atomic_json(cursor_path, cursor)
+            elif stale_preview_request is not None:
+                with workspace_lock(paths):
+                    atomic_json(cursor_path, cursor)
             # A repair request is meaningful only while its prior selection is
             # identity-valid. Otherwise discard the stale local repair context
             # and make one fresh selection from the complete candidate pool.
@@ -296,6 +445,9 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                 except (CacheIdentityError, ValueError, OSError, KeyError):
                     latest_repair_current = False
             repair_issues = latest_repair.get('issues', []) if latest_repair_current else []
+            repair_range_exclusions = (latest_repair.get('range_exclusion_ranges', [])
+                                       if latest_repair_current else [])
+            repair_route = latest_repair.get('repair_route') if latest_repair_current else None
             repair_attempts = int(cursor.get('repair_attempts', 0))
             repair_attempts_by_key = cursor.setdefault('repair_attempts_by_key', {})
             last_repair_key = latest_repair.get('repair_key') if latest_repair_current else None
@@ -303,7 +455,7 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
             if repair_limit < 1 or repair_attempts < 0:
                 raise CacheIdentityError('repair_attempt_state_invalid')
             total_repair_limit = repair_limit * 3
-            if repair_attempts >= total_repair_limit:
+            if repair_attempts > total_repair_limit:
                 checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
                            reason='total_repair_limit_reached')
                 return {'product_id': pid, 'status': 'REPAIRABLE',
@@ -311,7 +463,7 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                         'repair_attempts': repair_attempts,
                         'total_repair_limit': total_repair_limit}
             if (last_repair_key and repair_issues
-                    and int(repair_attempts_by_key.get(last_repair_key, 0)) >= repair_limit):
+                    and int(repair_attempts_by_key.get(last_repair_key, 0)) > repair_limit):
                 checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
                            reason='same_failure_repair_limit_reached')
                 return {'product_id': pid, 'status': 'REPAIRABLE',
@@ -320,7 +472,8 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                         'repair_attempts_for_failure': int(repair_attempts_by_key[last_repair_key]),
                         'repair_limit': repair_limit}
 
-            def record_repair_failure(failure_stage, issues):
+            def record_repair_failure(failure_stage, issues, *, range_exclusions=None,
+                                      repair_route=None):
                 nonlocal repair_attempts, repair_rounds
                 selected_ranges = []
                 if cursor.get('rough'):
@@ -339,6 +492,8 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                 repair_attempts_by_key[repair_key] = int(repair_attempts_by_key.get(repair_key, 0)) + 1
                 cursor.setdefault('repair_history', []).append({'attempt': repair_attempts,
                     'issues': issues[:20], 'from_stage': failure_stage, 'repair_key': repair_key,
+                    'repair_route': repair_route,
+                    'range_exclusion_ranges': [dict(row) for row in (range_exclusions or [])],
                     'candidate_ref': candidate_ref,
                     'rough_ref': cursor.get('rough') if failure_stage == 'semantic_review' else None,
                     'selection_digest': selection_digest,
@@ -349,12 +504,12 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                     atomic_json(cursor_path, cursor)
                 checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
                            reason=','.join(issues)[:180])
-                if (repair_rounds >= repair_limit or repair_attempts >= total_repair_limit
-                        or repair_attempts_by_key[repair_key] >= repair_limit):
+                if (repair_rounds > repair_limit or repair_attempts > total_repair_limit
+                        or repair_attempts_by_key[repair_key] > repair_limit):
                     return {'product_id': pid, 'status': 'REPAIRABLE', 'errors': issues,
                             'repair_attempts': repair_attempts, 'repair_limit_reached': True,
-                            'same_failure_limit_reached': repair_attempts_by_key[repair_key] >= repair_limit,
-                            'total_repair_limit_reached': repair_attempts >= total_repair_limit}
+                            'same_failure_limit_reached': repair_attempts_by_key[repair_key] > repair_limit,
+                            'total_repair_limit_reached': repair_attempts > total_repair_limit}
                 return None
             while True:
                 current_repair_attempt = repair_attempts
@@ -409,16 +564,33 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                             if previous_selected_ranges:
                                 break
                     visual_samples = []
-                    if repair_issues and all('人物画面比例超限' in str(issue) for issue in repair_issues) and cursor.get('vision'):
-                        prior_vision = load_stage(paths, cursor['vision'], product_id=pid,
+                    visual_exclusion_ranges = []
+                    # A final-plan person failure must use the final audit's
+                    # samples, not the earlier lightweight prescreen (whose
+                    # variants may all be PASS and therefore have no repair
+                    # samples). Rough-stage invalidation already removes stale
+                    # final vision before a new prescreen.
+                    visual_stage_ref = cursor.get('vision') or cursor.get('selection_vision')
+                    if (repair_issues and all('人物画面比例超限' in str(issue) for issue in repair_issues)
+                            and visual_stage_ref):
+                        prior_vision = load_stage(paths, visual_stage_ref, product_id=pid,
                                                   encoding_id=encoding)
+                        prior_plan_body = prior_vision['body'].get('selection_plan')
+                        if prior_plan_body is None and cursor.get('plan'):
+                            prior_plan_body = load_stage(paths, cursor['plan'], product_id=pid,
+                                                         encoding_id=encoding)['body']
                         visual_samples = visual_repair_samples(prior_vision['body'])
+                        if prior_plan_body:
+                            visual_exclusion_ranges = visual_repair_ranges(prior_vision['body'], prior_plan_body)
                     if repair_issues and all('人物画面比例超限' in str(issue) for issue in repair_issues) and not visual_samples:
                         raise CacheIdentityError('visual_repair_samples_missing')
                     task = selection_task(paths, candidate_ref, issues=repair_issues,
                                           repair_attempt=current_repair_attempt, semantic_map=semantic_map,
                                           previous_selected_ranges=previous_selected_ranges,
-                                          visual_samples=visual_samples)
+                                          visual_samples=visual_samples,
+                                          visual_exclusion_ranges=visual_exclusion_ranges,
+                                          range_exclusion_ranges=repair_range_exclusions,
+                                          repair_route=repair_route)
                     task_path = paths.project_records_dir / 'tasks' / f'{task["task_digest"]}.json'
                     with workspace_lock(paths):
                         atomic_json(task_path, {'status': 'REVIEW_PENDING', 'task': task})
@@ -431,9 +603,21 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                     response = verify_receipt(paths, receipt, task)['result']
                 semantic_map_error = None
                 if response.get('verdict') == 'PASS' and response.get('selected_ranges'):
-                    conflicts = selection_overlap_issues(paths, candidate_ref, response['selected_ranges'])
-                    if conflicts:
-                        response = {**response, 'verdict': 'REPAIRABLE', 'issues': conflicts}
+                    excluded = selected_range_exclusion_issues(
+                        paths, candidate_ref, response['selected_ranges'], repair_range_exclusions)
+                    conflicts = selection_overlap_details(paths, candidate_ref, response['selected_ranges'])
+                    if excluded:
+                        response = {**response, 'verdict': 'REPAIRABLE', 'issues': excluded}
+                        repair_route = 'semantic_reselection'
+                    elif conflicts:
+                        response = {**response, 'verdict': 'REPAIRABLE',
+                                    'issues': [selection_overlap_issue(row) for row in conflicts]}
+                        repair_range_exclusions = [
+                            {'source_file': row['source_file'], 'start': row['overlap_start'],
+                             'end': row['overlap_end'],
+                             'variant_ids': sorted({row['left']['variant_id'], row['right']['variant_id']}),
+                             'reason': 'codex_selection_source_overlap'} for row in conflicts]
+                        repair_route = 'semantic_reselection'
                 if response.get('semantic_map'):
                     try:
                         from registered_pipeline import _validate_semantic_map
@@ -466,7 +650,10 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                             paths, candidate_ref, receipt, issues=repair_issues,
                             repair_attempt=current_repair_attempt, semantic_map=semantic_map,
                             previous_selected_ranges=previous_selected_ranges,
-                            visual_samples=visual_samples))
+                            visual_samples=visual_samples,
+                            visual_exclusion_ranges=visual_exclusion_ranges,
+                            range_exclusion_ranges=repair_range_exclusions,
+                            repair_route=repair_route))
                         if cursor.pop('selection_repair_context', None) is not None:
                             with workspace_lock(paths):
                                 atomic_json(cursor_path, cursor)
@@ -489,70 +676,89 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                                 raise CacheIdentityError('semantic_selection_review_blocked')
                             repair_issues = semantic_result.get('issues') or [
                                 'semantic_selection_review_checks_incomplete_or_failed']
-                            failure = record_repair_failure('semantic_review', repair_issues)
+                            repair_route = 'semantic_reselection'
+                            failure = record_repair_failure(
+                                'semantic_review', repair_issues,
+                                range_exclusions=repair_range_exclusions,
+                                repair_route=repair_route)
                             if failure:
                                 return failure
                             continue
+                    semantic_ref = cursor.get('semantic_review')
+                    if not semantic_ref:
+                        raise CacheIdentityError('selection_visual_gate_missing_semantic_review')
+                    if not detector:
+                        raise CacheIdentityError('verified_person_detector_required_before_person_prescreen')
+                    selection_vision_ref = stage('selection_vision', lambda: selection_visual_audit(
+                        paths, rough_ref, semantic_ref, detector,
+                        allow_vfr_approximate=allow_vfr_approximate, preferred_fps=preferred_fps))
+                    selection_vision_body = load_stage(paths, selection_vision_ref, product_id=pid,
+                                                       encoding_id=encoding)['body']
+                    visual_failures = [row for row in selection_vision_body.get('variants', [])
+                                       if row.get('status') == 'REPAIRABLE']
+                    if visual_failures:
+                        repair_issues = [
+                            f"{row['variant_id']}人物画面比例超限：无人物估算"
+                            f"{row.get('no_person_ratio_estimate', row.get('confirmed_absent_sample_ratio'))}，近景估算"
+                            f"{row.get('closeup_duration_ratio_estimate')}；重组选段后复查。"
+                            for row in visual_failures]
+                        failure = record_repair_failure('vision', repair_issues)
+                        if failure:
+                            return failure
+                        continue
+                    if any(row.get('status') != 'PASS'
+                           for row in selection_vision_body.get('variants', [])):
+                        return waiting_evidence('selection_vision', selection_vision_ref, selection_vision_body)
+                    # ASR runs after semantic review and the person pre-screen.
+                    # It only snaps Codex coordinates locally; all missed edges
+                    # retain Codex coordinates and remain editable on the timeline.
                     asr_ref = stage('asr', lambda: local_asr(paths, rough_ref))
-                    try:
-                        plan_ref = stage('plan', lambda: physical_plan(
-                            paths, rough_ref, asr_ref, fps=preferred_fps,
-                            allow_vfr_approximate=allow_vfr_approximate))
-                    except ValueError as exc:
-                        reason = str(exc)
-                        if not (reason.startswith('sentence_local_text_')
-                                or reason.startswith('sentence_edge_inside_asr_token')
-                                or reason.startswith('sentence_alignment_')
-                                or reason in ('asr_cut_neighborhood_order_invalid',
-                                              'overlapping_asr_tokens_no_safe_sentence_edge',
-                                              'word_alignment_uncertain_needs_local_audio_review',
-                                              'word_alignment_interval_too_short')):
-                            raise
-                        repair_body = {'schema_version': 1, 'failed_stage': 'asr_text_edge',
-                            'reason': reason, 'rollback_to': 'local_asr_edge_review',
-                            'invalidate': ['plan', 'vision', 'final_audit'],
-                            'preserve': ['range', 'candidate', 'rough', 'semantic_review',
-                                         'semantic_map', 'asr'],
-                            'rough_reference': rough_ref, 'asr_reference': asr_ref,
-                            'semantic_rerun': False}
-                        repair_body['repair_digest'] = digest(repair_body)
-                        prior = cursor.get('asr_edge_repair_request') or {}
-                        repeated = prior.get('repair_digest') == repair_body['repair_digest']
-                        repair_path = paths.project_records_dir / 'tasks' / (
-                            f"asr_edge_repair_{pid}_{repair_body['repair_digest'][:12]}.json")
-                        if not repair_path.exists():
-                            with workspace_lock(paths):
-                                atomic_json(repair_path, repair_body)
-                        if repeated:
-                            # ASR alignment is a cutpoint-only concern. Keep
-                            # the reviewed selection and expose the cutpoint
-                            # for local/manual review; never request semantic
-                            # reselection because an edge could not be found.
-                            checkpoint(paths, pid, encoding, 'REPAIRABLE', cursor.get('plan'),
-                                       reason='asr_cutpoint_requires_manual_review:' + reason)
-                            return {'product_id': pid, 'status': 'REPAIRABLE_ASR_CUTPOINT',
-                                    'reason': reason, 'semantic_rerun': False,
-                                    'preserved_selection': True}
-                        cursor['asr_edge_repair_request'] = repair_body
-                        for name in ('plan', 'vision', 'final_audit'):
-                            cursor.pop(name, None)
-                        with workspace_lock(paths):
-                            atomic_json(cursor_path, cursor)
-                        checkpoint(paths, pid, encoding, 'REPAIRABLE',
-                                   reason='asr_text_edge_requires_local_review')
-                        return {'product_id': pid, 'status': 'REPAIRABLE_ASR_EDGE',
-                                'repair_reference': paths.reference(repair_path),
-                                'rollback_to': 'local_asr_edge_review',
-                                'semantic_rerun': False, 'repeated_same_failure': repeated}
+                    plan_ref = stage('plan', lambda: physical_plan(
+                        paths, rough_ref, asr_ref, fps=preferred_fps,
+                        allow_vfr_approximate=allow_vfr_approximate))
                     plan_body = load_stage(paths, plan_ref)['body']
-                    # Person visibility is independent of ASR edge matching.
-                    # Run it against the provisional cue-span plan too, while
-                    # keeping that plan ineligible for final approval.
+                    # Audit the physical plan immediately after ASR snapping.
+                    # A duplicate interval must return to semantic selection
+                    # before the more expensive final person audit runs.
+                    errors = plan_errors(plan_body)
+                    if errors:
+                        overlaps = source_overlap_details(plan_body)
+                        repair_issues = ([plan_overlap_issue(row) for row in overlaps]
+                                         + [error for error in errors if error != 'SOURCE_OVERLAP'])
+                        if overlaps:
+                            repair_range_exclusions = plan_overlap_exclusions(overlaps)
+                            repair_route = 'semantic_reselection'
+                        failure_stage = 'hard_gate'
+                        failure = record_repair_failure(
+                            failure_stage, repair_issues,
+                            range_exclusions=repair_range_exclusions,
+                            repair_route=repair_route)
+                        if failure:
+                            return failure
+                        continue
+                    # Person visibility remains an independent final hard gate.
                     vision_ref = stage('vision', lambda: vision_audit(
                         paths, plan_ref, detector,
                         allow_vfr_approximate=allow_vfr_approximate))
                     vision_body = load_stage(paths, vision_ref, product_id=pid,
                                              encoding_id=encoding)['body']
+                    if (any(row.get('status') == 'PASS' for row in vision_body.get('variants', []))
+                            and any(row.get('status') != 'PASS' for row in vision_body.get('variants', []))):
+                        from variant_delivery import retain_passed_variants
+                        complete_plan_ref, complete_vision_ref = plan_ref, vision_ref
+                        plan_ref, vision_ref = retain_passed_variants(paths, plan_ref, vision_ref)
+                        cursor.update(complete_plan=complete_plan_ref, complete_vision=complete_vision_ref,
+                                      plan=plan_ref, vision=vision_ref)
+                        cursor['pending_variant_recovery'] = {
+                            'source_vision_ref': complete_vision_ref, 'recovery': recovery.summary(),
+                            'variants': [{'variant_id': row['variant_id'],
+                                          'route': ('semantic_reselection' if row.get('status') == 'REPAIRABLE'
+                                                    else 'waiting_evidence')}
+                                         for row in vision_body['variants'] if row.get('status') != 'PASS'],
+                            'lock_approved_variants': True}
+                        with workspace_lock(paths):
+                            atomic_json(cursor_path, cursor)
+                        break
                     visual_failures = [row for row in vision_body.get('variants', [])
                                        if row.get('status') == 'REPAIRABLE']
                     if visual_failures:
@@ -567,80 +773,17 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                         continue
                     if any(row.get('status') != 'PASS'
                            for row in vision_body.get('variants', [])):
-                        raise CacheIdentityError('vision_uncertain_or_blocked_needs_evidence_repair')
-                    unresolved_cutpoints = [clip.get('cutpoint_review') for variant in plan_body.get('variants', [])
-                                            for clip in variant.get('clips', [])
-                                            if clip.get('cutpoint_review', {}).get('status') == 'REPAIRABLE']
-                    if unresolved_cutpoints:
-                        repair_body = {'schema_version': 1, 'failed_stage': 'asr_cutpoint',
-                            'issues': unresolved_cutpoints, 'rollback_to': 'local_audio_cutpoint_review',
-                            'invalidate': ['plan', 'final_audit'],
-                            'preserve': ['range', 'candidate', 'rough', 'semantic_review', 'asr', 'vision'],
-                            'rough_reference': rough_ref, 'asr_reference': asr_ref,
-                            'plan_reference': plan_ref, 'vision_reference': vision_ref,
-                            'semantic_rerun': False}
-                        repair_body['repair_digest'] = digest(repair_body)
-                        repair_path = paths.project_records_dir / 'tasks' / (
-                            f"asr_edge_repair_{pid}_{repair_body['repair_digest'][:12]}.json")
-                        if not repair_path.exists():
-                            with workspace_lock(paths):
-                                atomic_json(repair_path, repair_body)
-                        cursor['asr_edge_repair_request'] = repair_body
+                        return waiting_evidence('vision', vision_ref, vision_body)
+                    cleared_edge = cursor.pop('asr_edge_repair_request', None)
+                    cleared_audio = cursor.pop('audio_repair_request', None)
+                    if cleared_edge is not None or cleared_audio is not None:
                         with workspace_lock(paths):
                             atomic_json(cursor_path, cursor)
-                        checkpoint(paths, pid, encoding, 'REPAIRABLE', plan_ref,
-                                   reason='asr_cutpoint_requires_manual_review')
-                        return {'product_id': pid, 'status': 'REPAIRABLE_ASR_CUTPOINT',
-                                'repair_reference': paths.reference(repair_path),
-                                'rollback_to': 'local_audio_cutpoint_review',
-                                'vision_audited': True, 'semantic_rerun': False}
-                    errors = plan_errors(plan_body)
-                    if errors == ['AUDIO_BOUNDARY_UNVERIFIED']:
-                        plan_body = load_stage(paths, plan_ref)['body']
-                        affected = [{'variant_id': variant['variant_id'], 'unit_id': clip.get('unit_id'),
-                                     'edges': {name: value for name, value in
-                                               (clip.get('owned_audio_review', {}).get('edges') or {}).items()
-                                               if value.get('status') == 'REPAIRABLE'}}
-                                    for variant in plan_body.get('variants', []) for clip in variant.get('clips', [])
-                                    if not clip.get('audio_boundary_verified')]
-                        repair_body = {'schema_version': 1, 'failed_stage': 'audio_cutpoint',
-                            'rollback_to': 'audio_boundary_refinement',
-                            'invalidate': ['plan', 'vision', 'final_audit'],
-                            'preserve': ['range', 'candidate', 'rough_selection', 'asr', 'semantic_map'],
-                            'plan_reference': plan_ref, 'affected_edges': affected,
-                            'semantic_rerun': False}
-                        repair_body['repair_digest'] = digest(repair_body)
-                        prior_audio = cursor.get('audio_repair_request') or {}
-                        repair_path = paths.project_records_dir / 'tasks' / (
-                            f"audio_repair_{pid}_{repair_body['repair_digest'][:12]}.json")
-                        if not repair_path.exists():
-                            with workspace_lock(paths):
-                                atomic_json(repair_path, repair_body)
-                        repeated = prior_audio.get('repair_digest') == repair_body['repair_digest']
-                        if not repeated:
-                            cursor['audio_repair_request'] = repair_body
-                            cursor.pop('plan', None)
-                            cursor.pop('vision', None)
-                            cursor.pop('final_audit', None)
-                            with workspace_lock(paths):
-                                atomic_json(cursor_path, cursor)
-                        checkpoint(paths, pid, encoding, 'REPAIRABLE', plan_ref,
-                                   reason='audio_cutpoint_requires_local_retry')
-                        return {'product_id': pid, 'status': 'REPAIRABLE_AUDIO_CUTPOINT',
-                                'repair_reference': paths.reference(repair_path),
-                                'rollback_to': 'audio_boundary_refinement',
-                                'semantic_rerun': False, 'repeated_same_failure': repeated}
-                    if not errors:
-                        cleared_edge = cursor.pop('asr_edge_repair_request', None)
-                        cleared_audio = cursor.pop('audio_repair_request', None)
-                        if cleared_edge is not None or cleared_audio is not None:
-                            with workspace_lock(paths):
-                                atomic_json(cursor_path, cursor)
-                        break
-                    else:
-                        repair_issues = errors
-                        failure_stage = 'hard_gate'
-                failure = record_repair_failure(failure_stage, repair_issues)
+                    break
+                failure = record_repair_failure(
+                    failure_stage, repair_issues,
+                    range_exclusions=repair_range_exclusions,
+                    repair_route=repair_route)
                 if failure:
                     return failure
             vision_ref = stage('vision', lambda: vision_audit(
@@ -650,18 +793,35 @@ def process_product(paths, product, *, mode='package', detector=None, include_cr
                 raise CacheIdentityError('semantic_selection_review_missing_after_local_audits')
             evidence = stage('final_audit', lambda: import_final_review(
                 paths, plan_ref, vision_ref, semantic_review_ref=semantic_review_ref))
+            if cursor.pop('evidence_recovery_request', None) is not None:
+                with workspace_lock(paths):
+                    atomic_json(cursor_path, cursor)
             checkpoint(paths, pid, encoding, 'FINAL_PASS', plan_ref, evidence)
-            return {'product_id': pid, 'status': 'FINAL_PASS'}
+            delivery_scope = load_stage(paths, plan_ref)['body'].get('delivery_scope', {})
+            return {'product_id': pid, 'status': 'FINAL_PASS',
+                    'product_complete': delivery_scope.get('product_complete', True),
+                    'pending_variants': delivery_scope.get('pending_variants', [])}
         except Exception as exc:
             reason = str(exc)[:180]
             checkpoint(paths, pid, encoding, 'BLOCKED', reason=reason)
             return {'product_id': pid, 'status': 'BLOCKED', 'reason': reason}
         finally:
             # Product-only timing; no candidate text, transcript or chat events in controller summaries.
-            save_product_metrics(paths, pid, {'started_at_epoch': run_started_at,
-                'elapsed_seconds': round(time.perf_counter()-resumed_at, 3), 'stages': metrics,
-                'compute': detailed.rows, 'repair_attempts': cursor.get('repair_attempts', 0)})
-            active_scope.__exit__(None, None, None)
+            try:
+                save_product_metrics(paths, pid, {'started_at_epoch': run_started_at,
+                    'elapsed_seconds': round(time.perf_counter()-resumed_at, 3), 'stages': metrics,
+                    'compute': detailed.rows, 'repair_attempts': cursor.get('repair_attempts', 0),
+                    'technical_recovery': recovery.summary() if recovery else None,
+                    'summary': {
+                        'cache_hits': sum(bool(row.get('cache_hit')) for row in metrics),
+                        'sampled_frame_count': detailed.rows['frame_classification']['units'],
+                        'codex_contact_sheet_count': detailed.rows['codex_fallback']['calls'],
+                        'codex_reviewed_frame_count': detailed.rows['codex_fallback']['units'],
+                    }})
+            finally:
+                if recovery_context is not None and recovery is not None:
+                    recovery_context.__exit__(None, None, None)
+                active_scope.__exit__(None, None, None)
 
 
 def project_audit(paths, product_ids=None):
@@ -690,25 +850,56 @@ def project_audit(paths, product_ids=None):
         if (a['source_file'] == b['source_file'] and min(a['source_end_frame']/a['fps'], b['source_end_frame']/b['fps'])
                 > max(a['source_start_frame']/a['fps'], b['source_start_frame']/b['fps'])+1e-9):
             errors.append('CROSS_GROUP_SOURCE_OVERLAP')
-    return {'schema_version': 3, 'target_count': len(values), 'final_pass_count': len(passed),
-            'final_review_complete': not errors, 'written_count': sum(r['status'] in ('WRITTEN', 'EXPORT_VERIFIED') for r in rows.values()),
-            'export_verified_count': sum(r['status'] == 'EXPORT_VERIFIED' for r in rows.values()),
-            'delivery_complete': False, 'delivery_gate': 'BLOCKED_UNMIGRATED_RESOLVE_EXPORT_VERIFIERS',
-                'errors': sorted(set(errors))}
+    scoped_rows = [rows[value['product_id']] for value in values]
+    written_count = sum(r['status'] in ('WRITTEN', 'EXPORT_VERIFIED') for r in scoped_rows)
+    export_verified_count = sum(r['status'] == 'EXPORT_VERIFIED' for r in scoped_rows)
+    if errors:
+        delivery_status = 'BLOCKED'
+    elif written_count == len(values) and values:
+        delivery_status = 'READBACK_VERIFIED'
+    else:
+        delivery_status = 'READY_FOR_DELIVERY'
+    return {'schema_version': 4, 'target_count': len(values), 'final_pass_count': len(passed),
+            'pending_variants': {str(p['product_index']): p['delivery_scope']['pending_variants']
+                                 for p in passed if p.get('delivery_scope')
+                                 and not p.get('product_complete', True)},
+            'all_variants_complete': all(p.get('product_complete', True) for p in passed) and not errors,
+            'final_review_complete': not errors, 'written_count': written_count,
+            'export_verified_count': export_verified_count,
+            'delivery_complete': delivery_status in ('READBACK_VERIFIED', 'EXPORT_VERIFIED'),
+            'delivery_status': delivery_status,
+            'errors': sorted(set(errors))}
 
 
 def _run_project(paths, *, group_size=3, mode='package', detector=None, include_cross_boundary_cues=False,
                  allow_vfr_approximate=False, preferred_fps=None, repair_limit=2,
-                 allow_partial_delivery=False):
+                 allow_partial_delivery=True, blind_fresh=False, product_workers=2):
     manifest = schedule(paths, group_size)
     by_id = {v['product_id']: v for v in manifest['targets']}
     processed = []
+    worker_count = controlled_product_workers(product_workers)
+    from codex_worker import key
+    key(paths)
     for group in manifest['groups']:
-        results = [process_product(paths, by_id[pid], mode=mode, detector=detector,
+        def process(pid):
+            return process_product(paths, by_id[pid], mode=mode, detector=detector,
                                    include_cross_boundary_cues=include_cross_boundary_cues,
                                    allow_vfr_approximate=allow_vfr_approximate,
-                                   preferred_fps=preferred_fps, repair_limit=repair_limit) for pid in group]
-        processed.append({'products': group, 'statuses': [r['status'] for r in results]})
+                                   preferred_fps=preferred_fps, repair_limit=repair_limit,
+                                   blind_fresh=blind_fresh)
+        if worker_count == 1 or len(group) == 1:
+            results = [process(pid) for pid in group]
+        else:
+            with ThreadPoolExecutor(max_workers=min(worker_count, len(group)),
+                                    thread_name_prefix='tbcut-product') as pool:
+                futures = [pool.submit(process, pid) for pid in group]
+                results = [future.result() for future in futures]
+        processed.append({'products': group, 'statuses': [r['status'] for r in results],
+                          'product_workers': worker_count})
+        if (any(result['status'] not in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED') for result in results)
+                and (not allow_partial_delivery or any(
+                    result.get('status') == 'BLOCKED' for result in results))):
+            break
     delivery_ids = [row['product_id'] for row in manifest['targets']]
     if allow_partial_delivery:
         ledger_rows = resume(paths)
@@ -722,6 +913,7 @@ def _run_project(paths, *, group_size=3, mode='package', detector=None, include_
                   'batch_target_count': len(manifest['targets']),
                   'pending_product_ids': [row['product_id'] for row in manifest['targets']
                                           if row['product_id'] not in delivery_ids]}
+    result['all_variants_complete'] = bool(result.get('all_variants_complete')) and not result['pending_product_ids']
     with workspace_lock(paths):
         atomic_json(paths.project_records_dir / 'project_audit_v3.json', result)
     return result
@@ -729,7 +921,7 @@ def _run_project(paths, *, group_size=3, mode='package', detector=None, include_
 
 def run_project(paths, *, group_size=3, mode='package', detector=None, include_cross_boundary_cues=False,
                 allow_vfr_approximate=False, preferred_fps=None, repair_limit=2,
-                allow_partial_delivery=False):
+                allow_partial_delivery=True, blind_fresh=False, product_workers=2):
     metrics = Metrics()
     with scope(metrics):
         try:
@@ -738,7 +930,8 @@ def run_project(paths, *, group_size=3, mode='package', detector=None, include_c
                                     include_cross_boundary_cues=include_cross_boundary_cues,
                                     allow_vfr_approximate=allow_vfr_approximate,
                                     preferred_fps=preferred_fps, repair_limit=repair_limit,
-                                    allow_partial_delivery=allow_partial_delivery)
+                                    allow_partial_delivery=allow_partial_delivery,
+                                    blind_fresh=blind_fresh, product_workers=product_workers)
         finally:
             with workspace_lock(paths):
                 atomic_json(paths.project_records_dir/'metrics'/'project.json', {
@@ -763,8 +956,12 @@ def main():
                         help='Explicit batch override: use whole-file average rate for VFR source mapping')
     parser.add_argument('--preferred-fps', type=float,
                         help='Verified project/timeline rate used only when the approved mean-rate approximation agrees within tolerance')
-    parser.add_argument('--allow-partial-delivery', action='store_true',
+    parser.add_argument('--allow-partial-delivery', action='store_true', default=True,
                         help='Audit and deliver only products already at FINAL_PASS; leave blocked products pending')
+    parser.add_argument('--blind-fresh', action='store_true',
+                        help='Ignore project-level product cursors and start this batch from fresh semantic selection')
+    parser.add_argument('--product-workers', type=int, choices=(1, 2), default=2,
+                        help='Maximum product pipeline workers; ASR and Resolve remain serial')
     args = parser.parse_args()
     paths = resolve_runtime_paths(args.root, args.workspace)
     if args.product is not None:
@@ -775,14 +972,16 @@ def main():
                                          include_cross_boundary_cues=args.include_cross_boundary_cues,
                                          allow_vfr_approximate=args.allow_vfr_approximate,
                                          preferred_fps=args.preferred_fps,
-                                         repair_limit=args.repair_limit), ensure_ascii=False))
+                                         repair_limit=args.repair_limit,
+                                         blind_fresh=args.blind_fresh), ensure_ascii=False))
         return
     result = project_audit(paths) if args.audit_only else run_project(
         paths, group_size=args.group_size, mode=args.mode, detector=args.detector,
         include_cross_boundary_cues=args.include_cross_boundary_cues,
         allow_vfr_approximate=args.allow_vfr_approximate,
         preferred_fps=args.preferred_fps, repair_limit=args.repair_limit,
-        allow_partial_delivery=args.allow_partial_delivery)
+        allow_partial_delivery=args.allow_partial_delivery, blind_fresh=args.blind_fresh,
+        product_workers=args.product_workers)
     print(json.dumps(result, ensure_ascii=False))
     raise SystemExit(0 if result['final_review_complete'] else 2)
 

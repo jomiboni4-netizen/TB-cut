@@ -32,10 +32,15 @@ const formulas = used.formulas;
 const styles = values.map((row, rowIndex) => row.map((_, columnIndex) =>
   used.format.getStyleIndexAt(rowIndex, columnIndex)));
 const headers = values[0].map((value) => String(value ?? ""));
-const idCol = headers.indexOf("编码 ID");
+const idHeaderIndices = ["编码 ID", "ID"].flatMap((name) => {
+  const index = headers.indexOf(name);
+  return index < 0 ? [] : [index];
+});
+const idCol = idHeaderIndices.length === 1 ? idHeaderIndices[0] : -1;
 const titleCol = headers.indexOf("标题");
 const countCol = headers.indexOf("剪辑");
-if (idCol < 0 || titleCol < 0 || countCol < 0 || headers.lastIndexOf("编码 ID") !== idCol
+if (idCol < 0 || titleCol < 0 || countCol < 0
+    || headers.lastIndexOf(headers[idCol]) !== idCol
     || headers.lastIndexOf("标题") !== titleCol || headers.lastIndexOf("剪辑") !== countCol) {
   throw new Error("缺少或重复的编码 ID/标题/剪辑列");
 }

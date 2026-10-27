@@ -69,7 +69,7 @@ class ProjectResumeTests(unittest.TestCase):
         return initialize(paths, material_folder=self.material, resolve_project_id=identity,
                           title=self.title, subtitles=[str(self.srt)], videos=[str(self.video)],
                           resolve_project='same display name', source_timeline='source', target_timeline='target',
-                          batch_id='batch-a', products=[1])
+                          batch_id='batch-a', products=[1], force=True)
 
     def plan(self, paths=None, version='v1', body=None):
         paths = paths or self.paths

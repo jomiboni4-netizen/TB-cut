@@ -170,9 +170,14 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
         if not contiguous:
             merged.append(clip)
             continue
-        from sentence_boundaries import verify_edges
+        from sentence_boundaries import verify_edges, verify_cutpoint_proof
         left_proof = dict(previous.get('sentence_edges') or {})
-        proofs_mergeable = verify_edges(previous) and verify_edges(clip)
+        left_cutpoint = dict(previous.get('cutpoint_proof') or {})
+        right_cutpoint = dict(clip.get('cutpoint_proof') or {})
+        legacy_mergeable = verify_edges(previous) and verify_edges(clip)
+        cutpoint_mergeable = (verify_cutpoint_proof(previous) and verify_cutpoint_proof(clip)
+                              and left_cutpoint.get('contract') == right_cutpoint.get('contract'))
+        proofs_mergeable = legacy_mergeable or cutpoint_mergeable
         if not proofs_mergeable:
             merged.append(clip)
             continue
@@ -192,6 +197,30 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
         ))
         audit["transcript"] = str(audit.get("transcript") or "") + str(other.get("transcript") or "")
         audit["alignment_transcript"] = str(audit.get("alignment_transcript") or "") + str(other.get("alignment_transcript") or "")
+        if cutpoint_mergeable:
+            left_cutpoint['source_end_frame'] = previous['source_end_frame']
+            left_cutpoint['chosen_end_time'] = right_cutpoint['chosen_end_time']
+            left_cutpoint['ending'] = right_cutpoint['ending']
+            previous['cutpoint_proof'] = left_cutpoint
+            pending = []
+            if left_cutpoint['opening'].get('manual_review_required'):
+                pending.append('opening')
+            if right_cutpoint['ending'].get('manual_review_required'):
+                pending.append('ending')
+            previous['cutpoint_review'] = {
+                'status': 'WAITING_FOR_MANUAL_EDGE_REVIEW' if pending else 'ASR_NEARBY_EDGES_SELECTED',
+                'authority': 'codex_selected_semantic_boundaries',
+                'pending_edges': pending,
+            }
+            audit['boundary'] = left_cutpoint
+            previous['audio_end_frame'] = previous['source_end_frame']
+            previous['source_subtitle_text'] = (str(previous.get('source_subtitle_text')
+                                                or previous.get('transcript') or '')
+                                                + str(clip.get('source_subtitle_text')
+                                                or clip.get('transcript') or ''))
+            previous['transcript'] = previous['source_subtitle_text']
+            merge_count += 1
+            continue
         right_proof = clip['sentence_edges']
         left_first = previous['words'][left_proof['first_word_index']]
         right_last = clip['words'][right_proof['last_word_index']]
@@ -207,14 +236,18 @@ def normalize_physical_clips(clips: list[dict], tolerance_frames: int = 2) -> tu
             if (float(word['start']), float(word['end']), str(word['text'])) == right_key)
         for key in ('last_word_end', 'next_word_start', 'last_text', 'source_end_frame'):
             proof[key] = right_proof[key]
-        proof['word_context_digest'] = digest(previous['words'])
+        proof['word_context_digest'] = hashlib.sha256(json.dumps(
+            previous['words'], ensure_ascii=False, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
         if right_proof.get('alignment_status') == 'FRAME_ROUNDED_ESTIMATE':
             proof['alignment_status'] = 'FRAME_ROUNDED_ESTIMATE'
         previous['sentence_edges'] = proof
         previous['audio_end_frame'] = previous['source_end_frame']
         previous['audio_boundary_verified'] = previous.get('audio_boundary_verified') is True and clip.get('audio_boundary_verified') is True
-        previous['source_subtitle_text'] = (str(previous.get('source_subtitle_text') or '')
-                                            + str(clip.get('source_subtitle_text') or ''))
+        previous['source_subtitle_text'] = (str(previous.get('source_subtitle_text')
+                                            or previous.get('transcript') or '')
+                                            + str(clip.get('source_subtitle_text')
+                                            or clip.get('transcript') or ''))
         previous['transcript'] = previous['source_subtitle_text']
         merge_count += 1
     return merged, merge_count

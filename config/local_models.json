@@ -1,9 +1,11 @@
 {
   "vision": {
+    "protocol": "apple-initial-codex-gate-then-apple-refinement-codex-v4-parallel-sheets",
+    "frame_cache_protocol": "person-presence-closeup-strata-v13-parallel-codex-sheets",
     "primary": "apple_vision",
-    "secondary": "qwen3-vl:8b",
-    "secondary_for": ["NO_PERSON", "CLOTHING_CLOSEUP"],
-    "policy": "Use the local qwen3-vl:8b model to second-check Apple Vision no-person and clothing-only samples; keep all inference local and record model identity and per-sample result."
+    "secondary": "codex",
+    "secondary_for": ["NO_PERSON"],
+    "policy": "Run Apple Vision on all initial frames. Send only Apple NO_PERSON frames to Codex in contact sheets of at most four, with at most four independent sheets in flight. Refine only strata that Codex still labels NO_PERSON, then run Apple on every refinement frame and send only refinement NO_PERSON frames to Codex. Never load or call Qwen."
   },
   "asr": {
     "policy": "Windowed local ASR/VAD generates execution-time cut-coordinate suggestions only; it is not a semantic or final-quality audit layer. No full-media retranscription by default."

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import tempfile
 from datetime import datetime
@@ -53,6 +54,7 @@ def verify_confirmation(row: dict) -> bool:
 
 
 SEMANTIC_AUTHORITY = "user_directed_semantic_inference"
+NEIGHBOR_INFERRED_BOUNDARY_MODE = "neighbor_inferred_search_envelope"
 
 
 def verify_semantic_inference(row: dict) -> bool:
@@ -65,6 +67,10 @@ def verify_semantic_inference(row: dict) -> bool:
     if type(decision.get("product_index")) is not int or not isinstance(decision.get("authorization"), str):
         return False
     if not decision["authorization"].strip() or not isinstance(decision.get("title_anchors"), list) or not decision["title_anchors"]:
+        return False
+    if (decision.get('boundary_mode') not in (None, NEIGHBOR_INFERRED_BOUNDARY_MODE)
+            or decision.get('boundary_mode') == NEIGHBOR_INFERRED_BOUNDARY_MODE
+            and not isinstance(decision.get('candidate_windows'), list)):
         return False
     for side in ("start", "end"):
         point = decision.get(side)
@@ -108,6 +114,33 @@ def _validate_anchor(anchor, index, allowed_global, title_terms=None):
         raise RangeOverrideError("semantic_title_anchor_does_not_match_current_title")
 
 
+def validate_semantic_product_windows_nonoverlap(products, sources):
+    """Check authorized candidate windows, not inferred outer envelopes, for overlap."""
+    intervals = []
+    for row in products:
+        proof = row.get('semantic_range_proof', {}).get('decision', {})
+        windows = proof.get('candidate_windows') or []
+        if proof.get('boundary_mode') == NEIGHBOR_INFERRED_BOUNDARY_MODE and windows:
+            for window in windows:
+                source = sources.get(window.get('source_stem'))
+                if not source:
+                    raise RangeOverrideError('semantic_candidate_window_source_unknown')
+                start = float(source['global_start']) + float(window['start'])
+                end = float(source['global_start']) + float(window['end'])
+                intervals.append((start, end, int(row['product_index'])))
+        else:
+            intervals.append((float(row['global_start']), float(row['global_end']),
+                              int(row['product_index'])))
+    intervals.sort(key=lambda item: (item[0], item[1], item[2]))
+    for index, left in enumerate(intervals):
+        for right in intervals[index + 1:]:
+            if right[0] >= left[1] - 1e-9:
+                break
+            if left[2] != right[2]:
+                raise RangeOverrideError(
+                    f'cross_product_search_window_overlap: product_index={left[2]},{right[2]}')
+
+
 def validate_semantic_inferred_document(document, titles, index, product_ids=None, *, project_key=None, batch_id=None):
     if document.get("range_authority") != SEMANTIC_AUTHORITY:
         raise RangeOverrideError("semantic_range_authority_missing")
@@ -137,14 +170,24 @@ def validate_semantic_inferred_document(document, titles, index, product_ids=Non
         bounds = (float(row["global_start"]), float(row["global_end"]))
         windows = proof.get("candidate_windows", [])
         if windows:
-            outer_row = {**row, "ranges": split_range(bounds[0], bounds[1], list(sources.values()))}
-            validate_range(outer_row, sources)
+            if proof.get('boundary_mode') != NEIGHBOR_INFERRED_BOUNDARY_MODE:
+                outer_row = {**row, "ranges": split_range(bounds[0], bounds[1], list(sources.values()))}
+                validate_range(outer_row, sources)
+            elif not (math.isfinite(bounds[0]) and math.isfinite(bounds[1])
+                      and bounds[0] < bounds[1]):
+                raise RangeOverrideError('semantic_search_envelope_bounds_invalid')
             expected_ranges = []
             for window in windows:
                 source = sources[window["source_stem"]]
-                expected_ranges.extend(split_range(float(source["global_start"]) + float(window["start"]),
-                                                   float(source["global_start"]) + float(window["end"]),
-                                                   list(sources.values())))
+                window_start = float(source["global_start"]) + float(window["start"])
+                window_end = float(source["global_start"]) + float(window["end"])
+                if proof.get('boundary_mode') == NEIGHBOR_INFERRED_BOUNDARY_MODE:
+                    if window_start < bounds[0] or window_end > bounds[1]:
+                        raise RangeOverrideError('semantic_candidate_window_outside_search_envelope')
+                    window_row = {'global_start': window_start, 'global_end': window_end,
+                                  'ranges': split_range(window_start, window_end, list(sources.values()))}
+                    validate_range(window_row, sources)
+                expected_ranges.extend(split_range(window_start, window_end, list(sources.values())))
             expected_ranges.sort(key=lambda part: (float(sources[part["media_stem"]]["global_start"]) + float(part["start"]),
                                                    float(sources[part["media_stem"]]["global_start"]) + float(part["end"])))
             actual_ranges = row.get("ranges", [])
@@ -177,7 +220,7 @@ def validate_semantic_inferred_document(document, titles, index, product_ids=Non
                 if anchor.get("source_stem") != window["source_stem"]:
                     raise RangeOverrideError("semantic_candidate_window_anchor_source_mismatch")
                 _validate_anchor(anchor, index, bounds)
-    validate_global_ranges(rows)
+    validate_semantic_product_windows_nonoverlap(rows, sources)
     ordered = sorted(rows, key=lambda r: r["product_index"])
     if any(a["global_start"] > b["global_start"] for a, b in zip(ordered, ordered[1:])):
         raise RangeOverrideError("semantic_product_order_conflict")
@@ -210,6 +253,10 @@ def build_semantic_inferred_ranges(manifest, index, titles_doc, product_ids, *, 
                     "end_anchor": source_decision["end_anchor"]}
         if "candidate_windows" in source_decision:
             decision["candidate_windows"] = source_decision["candidate_windows"]
+        if "boundary_mode" in source_decision:
+            decision["boundary_mode"] = source_decision["boundary_mode"]
+        if "boundary_notes" in source_decision:
+            decision["boundary_notes"] = source_decision["boundary_notes"]
         start, end = global_time(decision["start"], sources), global_time(decision["end"], sources)
         start_source = decision["start"]["source_stem"]
         end_source = decision["end"]["source_stem"]
@@ -233,6 +280,9 @@ def build_semantic_inferred_ranges(manifest, index, titles_doc, product_ids, *, 
                "boundary_provenance": {"start": {"kind": SEMANTIC_AUTHORITY, "source_stem": start_source},
                                        "end": {"kind": SEMANTIC_AUTHORITY, "source_stem": end_source}},
                "semantic_range_proof": proof}
+        if decision.get('boundary_mode'):
+            row['boundary_mode'] = decision['boundary_mode']
+            row['boundary_notes'] = decision.get('boundary_notes', [])
         rows.append(row)
     result = {"schema_version": 1, "range_authority": SEMANTIC_AUTHORITY,
               "products": sorted(rows, key=lambda r: r["product_index"]),
@@ -272,7 +322,7 @@ def validate_confirmed_document(document: dict, titles: list[dict], index: dict,
     if semantic_rows:
         validate_semantic_inferred_document({"range_authority": SEMANTIC_AUTHORITY, "products": semantic_rows},
                                             titles, index, {r["product_index"] for r in semantic_rows})
-    validate_global_ranges(rows)
+        validate_semantic_product_windows_nonoverlap(rows, sources)
 
 
 def build_confirmed_ranges(manifest: dict,index: dict,titles_doc: dict,product_ids=None) -> dict:

@@ -9,6 +9,7 @@ For every new Codex window or new task in this project:
 3. Read `PROJECT_STATE.template.json` for the schema. Treat root `PROJECT_STATE.json` as a legacy record only; never use it to select the active project, media, batch, or Resolve timeline.
 4. Before media analysis or Resolve action, read the live stable Resolve project ID and use its one bound project workspace under `.cache/projects/<project_key>/` (`PROJECT_STATE.json` and `PROJECT_CONFIG.json`). The live Resolve project ID is the sole project authenticator; folder paths, file availability, project display names, and timeline bindings are configuration or safety checks, not project identity. New batch workspaces contain only `PROJECT_REF.json`, `BATCH_STATE.json`, and batch artifacts; media/title paths and dependencies load from the bound project workspace through `RuntimePaths.load_state()`. Never seed a new batch from an old workspace or root legacy state.
    For future cutpoint work, read that project's `MANUAL_CUTPOINT_LESSONS.json` when present; treat it as observations from user edits, not a universal frame offset or an ASR PASS certificate.
+   If that project has `PROJECT_TASKS.json`, read its `PROJECT.md`, `ACCEPTANCE.md`, `PLAN.md`, `STATUS.md`, and `DECISIONS.md`. Run `project_task.py refresh` to regenerate the handoff from actual records. User holds and task budgets are enforced by the scheduler; changing Markdown or switching batches never lifts a hold. `STATUS.md` is a derived view, never a source of approval. New long tasks are enrolled with `project_task.py init`, which authenticates the fresh live stable project ID.
 5. Run `python3 scripts/project_doctor.py --root . --workspace <workspace>` before destructive or Resolve-writing actions. Running the doctor without `--workspace` is structural-only and does not validate an active project.
 6. Before Resolve writing, run `python3 scripts/resolve_connection_doctor.py --root . --workspace <workspace>` outside the sandbox and confirm the live stable Resolve project ID matches that workspace. Validate configured timeline IDs separately as write-target safety checks.
 7. Do not analyze media, call MiMo, or write Resolve until the applicable state and identity checks above have passed.
@@ -27,6 +28,7 @@ If a current user instruction conflicts with a persistent rule, obey the current
 - Prefer local scripts/models whenever they can complete a task reliably.
 - Codex owns all semantic understanding, candidate selection, and semantic review for editing tasks. Do not call MiMo for editing semantics; only change this persistent rule after the user explicitly asks to revise it.
 - Local hard rules have final veto power before Resolve write.
+- Routine technical failures must use the configured bounded recovery queue before any code change: retry only failed evidence jobs, preserve successful/previously written variants, and distinguish WAITING_EVIDENCE from confirmed quality failures requiring semantic reselection. Do not reset budgets, rerun entire products, or replay Resolve writes to bypass a blocked job.
 - Resolve source timeline is read-only. Only the explicitly configured target timeline may be written.
 
 ## 2. Raw subtitle access policy
@@ -62,7 +64,7 @@ Treat phrases such as “这次 / 这一批 / 先” as batch-only:
 
 ## 6. Hard stop conditions
 
-Do not write Resolve if any final variant fails:
+Never write a failing variant. Independently passing variants must be approved and delivered without waiting for other variants of the same product; retain explicit pending-variant records and do not mark the whole product complete. Apply all gates below to each delivered variant and the delivered set:
 - final duration rule
 - semantic closure
 - banned-content filter

@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from sentence_boundaries import anchored_words, bounded_edges, locate_subtitle_edge, verify_edges
+from sentence_boundaries import (anchored_words, bounded_edges, locate_subtitle_edge, verify_edges,
+                                 nearest_asr_boundary, verify_cutpoint_proof, CUTPOINT_CONTRACT)
 from refine_plans_v2 import refine_words, audit_audio_start, normalize_physical_clips
 
 
@@ -78,7 +79,28 @@ class SentenceBoundaryTests(unittest.TestCase):
         self.assertEqual((first, last), (1, 7))
         lo, _, proof = bounded_edges(words, first, last, 25)
         self.assertLessEqual(abs(lo / 25 - words[first]['start']), .5 / 25 + 1e-8)
-        self.assertEqual(proof['alignment_status'], 'FRAME_ROUNDED_ESTIMATE')
+
+    def test_nearby_asr_boundary_uses_token_edges_without_subtitle_text(self):
+        opening = nearest_asr_boundary(self.words, 2.25, 'opening')
+        ending = nearest_asr_boundary(self.words, 3.4, 'ending')
+        self.assertEqual(opening['time'], 2.3)
+        self.assertEqual(ending['time'], 3.5)
+        self.assertEqual(nearest_asr_boundary(self.words, 20., 'opening'), None)
+
+    def test_codex_fallback_boundary_is_valid_without_asr_alignment(self):
+        fps, lo, hi = 30., 54, 105
+        clip = {'fps':fps,'source_start_frame':lo,'source_end_frame':hi,
+                'audio_start_frame':lo,'audio_end_frame':hi,
+                'cutpoint_review':{'status':'WAITING_FOR_MANUAL_EDGE_REVIEW',
+                                   'pending_edges':['opening','ending']},
+                'cutpoint_proof':{'contract':CUTPOINT_CONTRACT,'fps':fps,
+                    'source_start_frame':lo,'source_end_frame':hi,
+                    'chosen_start_time':lo/fps,'chosen_end_time':hi/fps,
+                    'opening':{'requested_time':1.8,'status':'CODEX_FALLBACK',
+                               'manual_review_required':True},
+                    'ending':{'requested_time':3.5,'status':'ASR_UNAVAILABLE_FALLBACK',
+                              'manual_review_required':True}}}
+        self.assertTrue(verify_cutpoint_proof(clip))
 
     def test_contiguous_merge_preserves_word_edge_proof_and_record_length(self):
         words = [dict(start=.08, end=1.04, text='完整句子甲'),

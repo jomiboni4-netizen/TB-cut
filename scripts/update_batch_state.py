@@ -16,7 +16,11 @@ def reconcile(paths):
         rows = resume(paths)
         batch = state['batch']
         batch['completed_product_ids'] = sorted(pid for pid, row in rows.items()
-                                               if row['status'] in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED'))
+                                               if row['status'] in ('FINAL_PASS', 'WRITTEN', 'EXPORT_VERIFIED')
+                                               and row.get('product_complete', True))
+        batch['pending_variant_ids'] = {
+            str(pid): [v['variant_id'] for v in row.get('delivery_scope', {}).get('pending_variants', [])]
+            for pid, row in rows.items() if not row.get('product_complete', True)}
         batch['failed_product_ids'] = sorted(pid for pid, row in rows.items() if row['status'] == 'BLOCKED')
         batch['checkpoint_status_counts'] = {status: sum(r['status'] == status for r in rows.values())
                                              for status in sorted({r['status'] for r in rows.values()})}

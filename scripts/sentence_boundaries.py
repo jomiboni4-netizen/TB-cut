@@ -6,7 +6,8 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from project_registry import digest
 
-CONTRACT = 'sentence-owned-edges-v7-range-bounded-time-nearest-asr-execution'
+CONTRACT = 'sentence-owned-edges-v8-text-anchored-no-vad-asr-execution'
+CUTPOINT_CONTRACT = 'codex-boundary-asr-nearby-execution-v2-selected-range-identity'
 SELECTION_RULE = (
     '每个连续片段必须是完整原声句群。尤其每版第一段，必须查看原素材前文，'
     '确认不是上一句残尾、依赖回答或省略主语的承接句；字幕分行、标点和静音均不是独立句首证明。'
@@ -17,6 +18,75 @@ SELECTION_RULE = (
 
 def normalized(text):
     return re.sub(r'[^\w\u4e00-\u9fff]', '', text).lower()
+
+
+def nearest_asr_boundary(words, requested_time, edge, *, search_seconds=2.5):
+    """Snap a Codex boundary to the nearest ASR token edge without text matching."""
+    field = 'start' if edge == 'opening' else 'end' if edge == 'ending' else None
+    if field is None or not math.isfinite(float(requested_time)) or search_seconds < 0:
+        raise ValueError('asr_boundary_input_invalid')
+    candidates = []
+    for index, word in enumerate(words or []):
+        try:
+            value = float(word[field])
+            start, end = float(word['start']), float(word['end'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(value) and math.isfinite(start) and math.isfinite(end) and start < end):
+            continue
+        distance = abs(value - float(requested_time))
+        if distance <= search_seconds + 1e-9:
+            candidates.append((distance, value, index))
+    if not candidates:
+        return None
+    distance, value, index = min(candidates, key=lambda row: (row[0], row[1], row[2]))
+    return {'time': value, 'word_index': index, 'distance_seconds': distance}
+
+
+def verify_cutpoint_proof(clip):
+    """Validate frame coordinates and provenance without requiring ASR success."""
+    proof = clip.get('cutpoint_proof') or {}
+    if proof.get('contract') != CUTPOINT_CONTRACT:
+        return False
+    try:
+        fps = float(clip['fps'])
+        lo, hi = int(clip['source_start_frame']), int(clip['source_end_frame'])
+        if (not math.isfinite(fps) or fps <= 0 or lo < 0 or hi <= lo
+                or (clip.get('audio_start_frame'), clip.get('audio_end_frame')) != (lo, hi)):
+            return False
+        if (proof.get('source_start_frame'), proof.get('source_end_frame'), float(proof['fps'])) != (lo, hi, fps):
+            return False
+        for edge_name, frame, time_key in (
+                ('opening', lo, 'chosen_start_time'), ('ending', hi, 'chosen_end_time')):
+            edge = proof.get(edge_name) or {}
+            requested = float(edge['requested_time'])
+            chosen = float(proof[time_key])
+            status = edge.get('status')
+            if not (math.isfinite(requested) and math.isfinite(chosen)):
+                return False
+            if abs(chosen - frame / fps) > .5 / fps + 1e-8:
+                return False
+            if status == 'ASR_NEARBY':
+                distance = float(edge['distance_seconds'])
+                if (not math.isfinite(distance) or distance < 0
+                        or distance > float(edge['search_seconds']) + 1e-9
+                        or edge.get('manual_review_required') is not False
+                        or abs(abs(chosen - requested) - distance) > .5 / fps + 1e-8):
+                    return False
+            elif status in ('CODEX_FALLBACK', 'ASR_UNAVAILABLE_FALLBACK'):
+                if (edge.get('manual_review_required') is not True
+                        or abs(chosen - requested) > .5 / fps + 1e-8):
+                    return False
+            else:
+                return False
+        expected_pending = [name for name in ('opening', 'ending')
+                            if (proof.get(name) or {}).get('manual_review_required') is True]
+        review = clip.get('cutpoint_review') or {}
+        if review.get('pending_edges') != expected_pending:
+            return False
+        return True
+    except (KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return False
 
 
 @lru_cache(maxsize=4096)

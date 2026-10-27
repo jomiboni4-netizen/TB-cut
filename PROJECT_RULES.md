@@ -2,6 +2,11 @@
 
 ## Dual project schedulers
 
+- 人物技术异常自动补证：超时、断连、返回格式错误只重做失败图片任务，复用通过身份与封存校验的原图/Apple结果/成功判定，不重跑语义、ASR或整个商品。固定策略来自 `config/vision_recovery.json`：初始请求60秒，恢复请求最多45秒；失败批次自动拆为两图、再单图，恢复请求在同商品内串行；每帧最多两次恢复，单商品/同任务最多6次恢复请求及180秒恢复用时，以先到上限为准。调用前持久预占，异常中断不退还未结算占用，跨窗口不重置；不增加run次数或语义返修额度。逐批成功立即封存，原图及Apple证据持久保存并校验摘要/封存，禁止更换内容伪造通过。
+- 人物错误分流：完整证据确认无人/近景比例超限才向Codex传入失败版本和精确源区间，进入既有有界语义重组并锁住其他版本；检测错误/证据缺失不得当作“无人”触发语义重选。技术补证耗尽或真实不确定标为 `WAITING_EVIDENCE`，保留补证队列、来源与已耗预算，继续授权队列内其他可执行商品；不自动换商品扩大任务范围。通过版本照常交付，其余版本保留明确恢复路径；身份冲突、缓存封存破坏或写后回读失败冻结受影响操作，不自动重放Resolve追加/恢复。已写入证据过期时不得自动重选或重复追加。
+
+- 默认逐版本批准与交付：同商品任一版本完成语义、切点、人物、时长、禁用内容、来源范围和跨版本重叠等全部适用门禁后，就经匹配调度器写入指定目标并回读；其他版本失败、检测错误、等待或返修不得连带阻止已通过版本。保留原完整方案、原审核与失败原因，为通过版本创建只删整版且不改素材/顺序/切点的交付子集，绑定原证据并重新校验子集；不得把失败版本改成 PASS。检查点明确记录已批准/已写入版本及待处理版本，存在待处理版本时不得标记整商品完成。已写入版本不得因后续返修被覆盖或重复追加。此部分交付不是候选池耗尽后的降版，不要求先耗尽其他版本返修预算。
+
 - Use `scripts/taobao_scheduler.py` for uniquely matched 淘宝 projects and `scripts/dudu_scheduler.py` for uniquely matched 都督 projects. Codex first runs `plan`, then only the matching scheduler's `run`; the scheduler dispatches existing focused stage modules and records stage outcome for fault localization.
 - Keep outer workflow control in Python and project/batch parameters and evidence references in JSON. Do not implement flow control as a prompt-only checklist or a chain of manually selected scripts.
 - 商品级 Codex 语义终审和本地最终硬门禁通过后，项目层不得重复发起 Codex 语义终审，也不得用字符串相似度代替跨商品语义判断。项目层只核对交付商品清单及跨商品物理素材重叠；Resolve 项目/时间线身份、写前门禁、写后回读仍须通过。
@@ -32,6 +37,13 @@
 - A name containing `都督` uses `dudu_marked_range`: the user's product start/end markers define approximate source bounds, not frame-accurate cuts. Choose and semantically shape one video targeting approximately 60 seconds, with a valid duration strictly greater than 45 and less than 60 seconds; semantic completeness takes priority over approaching the target. `PERSON_CLOSEUP` may use at most 40% of total duration.
 - A name containing `淘宝` uses `taobao_legacy`: retain the established 45–less than 60 second range, target three distinct variants when the full candidate pool supports them (allow fewer only after exhaustion), and cap `PERSON_CLOSEUP` at 30%.
 - Both modes retain shared semantic closure, banned-content, synchronization, source-bound, person-presence, and Resolve validation rules. If the project name matches both keywords or neither keyword, stop before selection or write and report the routing reason; never guess or use the other mode as fallback.
+
+## 专用 Chrome CDP 故障恢复
+
+- 专用自动化浏览器必须由 `com.codex.chrome-cdp` LaunchAgent 经 `start-chrome-cdp.zsh` 启动；正常 Google Chrome 与 Chrome for Testing 是两个独立应用，不得为恢复 9222 端口关闭普通 Chrome。
+- Playwright 返回 `ECONNREFUSED 127.0.0.1:9222` 表示本地 CDP 服务没有监听，不代表目标网站故障。按序检查 LaunchAgent 状态、Chrome for Testing 主进程参数、9222 监听及 `http://127.0.0.1:9222/json/version`。应确认专用进程带有 `--remote-debugging-port=9222` 和 `$HOME/.codex/chrome-automation-profile`；仅看到 Chrome 进程不代表 CDP 就绪。
+- 若 Chrome for Testing 已运行但缺少 CDP/profile 参数，macOS `open -a` 可能复用现有实例并忽略新参数，LaunchAgent 正常退出也不能证明端口已起。先对专用 Chrome for Testing 执行正常退出，等待该进程结束，再运行 `scripts/ensure-chrome-cdp.sh`；必须同时确认 `/json/version` 可读并成功重连 Playwright 后才继续网页操作。
+- 恢复时不得直接启动第二个浏览器实例、使用 `open -n`、强制杀进程或改用其他浏览器绕过托管流程。托管恢复仍失败时，记录脚本原始错误并停止网页操作。
 
 - Keep every Codex change to public repository files in the Git working tree and reviewable with `git diff` or `git diff --cached`. Do not restore or overwrite changes merely to erase their diff.
 - Develop on a task branch, not directly on the default branch. Use pull requests as the GPT review entry point when a GitHub remote is configured.
@@ -68,12 +80,14 @@
 - 默认启用 `batch_overrides.skip_blank_titles=true` 和 `batch_overrides.preserve_blank_row_indices=true`，两项均纳入输入身份指纹。占位不进入剪辑商品列表。旧压缩编号成果按编码 ID 对照原行号，禁止直接用旧编号匹配；旧编号派生方案须标记过期后重新核验。
 - `encoding_id` 保持字符串语义。文本编码原样保留，前导零不得丢失；拒绝编码前后空白。数字编码仅接受可无损表示的非负整数（少于 16 位），允许 General、文本格式或纯零填充格式；按零填充宽度保留前导零。精度、格式或类型不明确时拒绝生成，不猜测业务 ID。
 - 为避免隐式取值，当前生成器拒绝合并单元格、公式及隐藏行列，不自动展开或忽略这些结构。
-- 标题工作簿顺序定义商品编号，但不定义直播中的商品时间边界；范围定位仍以真实链接锚点和时间轴规则为准。
+- 标题工作簿顺序定义商品编号，但不定义直播中的商品时间边界。范围定位以当前商品标题语义和卖点证据建立搜索窗口；真实链接、前后商品起止线索和时间轴只用于辅助判断，不要求先找到整商品精确起止点。
 - 分段视频与字幕按文件名中的数字区间排序后建立全局时间；不得沿用注册路径顺序或目录遍历顺序，以免字幕索引与 Resolve 素材时间线错位。
 
 ## 项目输入登记
 
 - 素材文件夹、字幕来源、标题工作簿和 Resolve 项目/时间线按整个项目登记一次。后续窗口和商品批次继承经身份核验的项目配置，仅对缺失、改变或身份不匹配的输入补充确认；不得仅凭项目名称匹配，也不得把旧状态自动认证为新登记。切换项目使用独立工作区。
+- 淘宝调度器允许用户为本批显式指定任意现有目标时间线名称：先用 `taobao_scheduler.py plan --target-timeline "名称"`，再用相同参数运行 `run`。调度器按当前 Resolve 项目中的唯一精确名称解析，并在写入前绑定稳定时间线 ID；来源时间线始终受保护。未指定时使用项目登记的正式目标时间线。目标选择只作用于本批，不改写项目身份登记。
+- 商品范围匹配默认严格限定当前批次的 `product_ids`，只为本批发布范围证据；不得因本批缺少范围文件而自动启动全商品目录匹配。需要盲测时用 `--blind-fresh`，忽略项目级旧游标，并把新选段游标写入本批目录。
 
 ## Final deliverables
 
@@ -95,8 +109,9 @@
 - For text analysis, first scan continuous subtitles for product attributes and create one or more broad semantic windows. Exact product start/end seconds are not required for this rough locator, and no rough window is a `product_ranges.json` certification.
 - Excel product number and encoding identify the catalog item; they do not identify its live position. Link numbers are auxiliary mentions only and have zero boundary/ranking authority. Use category, fabric, cut, color, structure and surrounding speech to locate formal explanations, teasers, outfit mentions and later supplements.
 - Compare title, spoken claims and current product evidence. If similar products, stale links, multi-SKU pages, or outfit references conflict, retain candidate products and mark `PRODUCT_UNCERTAIN`; do not auto-admit those sentences to a product pool. A range for physical editing remains a separately validated artifact.
-- A user may authorize semantic range inference for a batch. Use ordered subtitle context, title semantics and available read-only product details to infer source-local start/end points; explicit link-number mentions are supporting evidence only. Preserve exact subtitle anchors and title-feature anchors with the inferred range, and label provenance `user_directed_semantic_inference`, never as human-confirmed.
-- Accepted ranges cover exactly the current batch's `batch.product_ids`. Require title identity, current indexed subtitle anchors, chronological product order, valid source/time coverage and no physical overlap before publishing. If product identity is ambiguous, anchors do not support the title, an endpoint cannot be grounded, or ranges conflict, block that product for review; do not force a range. Other title rows are outside the batch and do not block it.
+- A user may authorize semantic range inference for a batch. Treat the result as a candidate search envelope, not a claim about the whole product's exact start/end. Use title semantics and direct selling-point cues; when an edge is uncertain, compare the previous product's best-supported end and the next product's best-supported start to infer a search bound. Exact whole-product endpoints are not prerequisites for selecting three clips. Keep exact indexed cue evidence for the inferred search windows and label provenance `user_directed_semantic_inference`, never as human-confirmed.
+- Accepted search windows cover exactly the current batch's `batch.product_ids`. Require authenticated title identity, current indexed title/feature evidence, valid source/time intervals and no cross-product overlap among authorized candidate windows. Block only when product identity is materially ambiguous, no current-product semantic evidence exists, or the candidate windows conflict; a missing exact whole-product start/end alone is not a blocker. Other title rows are outside the batch and do not block it.
+- Resolve each selected clip's own semantic cutpoints separately. ASR only snaps near those cutpoints; if alignment is uncertain, retain the Codex boundary and write the clip with a clear red manual-repair marker after the remaining hard audits pass.
 - Keep the original continuous subtitle wording through semantic selection. Mark banned clauses with exact source references instead of deleting neighboring clauses before understanding; selection must avoid those clauses, and the local final gate still rejects any banned text that reaches a cut.
 - The first selection receipt must include a concise selling-point map with exact candidate IDs and verbatim subtitle evidence. Persist that map through repair attempts, bind it to the selected plan, and give the same map to the independent final reviewer. Rebuild it only when the candidate fingerprint changes.
 - Candidate pool is wide-in; final output is strict-out. For `dudu_marked_range`, subtitles crossing an approximate marker may provide context, while their context-only text cannot be selected outside the recorded source range.
@@ -145,21 +160,31 @@ For variants of the same product:
 - No source segment may be reused in another variant.
 - Even with different source time, identical or highly similar speech/content is a hard duplicate and must be removed.
 - Prefer different selling-point emphasis across variants.
+- Initial selection and semantic review must also check source-time overlap between every pair of clips, including clips within one variant. If the physical plan introduces overlap after ASR boundary snapping, report both variant/clip identities, source file, and exact intersecting seconds, then return to semantic understanding and reselection with that interval hard-excluded. Do not pass the plan or retry the same ranges unchanged.
 
 ## Visual/person rule
 
 - The subject-presence rule is independent of facing direction, identity, full-body visibility, and the person's pixel share of the frame. Any reliable Apple Vision person rectangle, face rectangle, or body-pose signal meeting the presence confidence settings in `config/vision_rules.json` counts as a person. Small or partial people are accepted; clothing-only/product-only footage and empty frames do not count.
 - `PERSON_CLOSEUP` is a separate shot category, identified by a large face rectangle or a human rectangle near frame height. Enforce the project-mode cap: at most 40% for `都督`, at most 30% for `淘宝`. Small people in the frame are not automatically close-ups. `PERSON_VISIBLE` covers other confirmed person footage; `HOST_VISIBLE` remains a legacy alias and does not mean a registered or identity-verified host.
-- Allow at most 10% estimated no-person duration in each final variant. Sample 10 equal time strata on the rendered variant, independent of its physical clip count. If a stratum midpoint is classified as no-person or clothing-only, refine that stratum with 10 evenly spaced samples. Its estimated no-person share is the fraction of refined samples without a person multiplied by that stratum's 10% weight. Sum across all flagged strata; multiple individually acceptable gaps can exceed the total 10% cap.
+- Allow at most 10% estimated no-person duration in each final variant. Sample 10 equal time strata on the rendered variant, independent of its physical clip count. Only an initial midpoint that Apple marks `NO_PERSON` and Codex still confirms as `NO_PERSON` may trigger 10 evenly spaced refinement samples. Clothing-only, uncertain, detector-error, and any person result never trigger refinement. Its estimated no-person share is the fraction of refined samples without a person multiplied by that stratum's 10% weight. Sum across all flagged strata; multiple individually acceptable gaps can exceed the total 10% cap.
 - A refinement stratum is `min(6 seconds, 10% of the rendered variant duration)`, centered on the initial sample and clipped to the variant bounds. Final variants are under 60 seconds, so this equals one 10% stratum and never exceeds 6 seconds. All ten initial person samples mean 0% *sampled* no-person time. Exactly 10% estimated no-person time is allowed; a larger estimate is repairable.
-- Unresolved positive signals are `UNCERTAIN`; detector execution errors are `BLOCKED`, never no-person evidence. Never require face registration, person tracking, or host identity matching. For Apple Vision samples classified as `NO_PERSON` or `CLOTHING_CLOSEUP`, run the bound local `qwen3-vl:8b` model as a second opinion on whether a person is actually present. Keep the frame local; record the model digest and result with the sample. A Qwen person finding upgrades the sample to person-present; an uncertain result stays `UNCERTAIN`. Independently enforce the close-up cap selected by the project mode.
+- Unresolved positive signals are `UNCERTAIN`; detector execution errors are `BLOCKED`, never no-person evidence. Never require face registration, person tracking, or host identity matching. Run Apple Vision over all initial samples, send only Apple `NO_PERSON` initials to Codex in numbered 2x2 contact sheets of at most four frames, and create refinement frames only for strata Codex still confirms as no-person. Independent contact sheets may be reviewed concurrently with at most four in flight while panel mapping and result order remain deterministic. Then run Apple Vision over all created refinement frames and send only refinement `NO_PERSON` frames to Codex before calculating ratios. If Codex overturns an initial absence, stop that stratum immediately. Do not send `CLOTHING_CLOSEUP`, `UNCERTAIN`, detector-error, or person frames to Codex. Do not load or call Qwen for person review. A Codex execution error is blocked, never no-person evidence. Keep frames local and record both tier results. Independently enforce the close-up cap and aggregate no-person limit selected by the project mode.
 - This is a deterministic engineering sample audit, not framewise certification: it cannot prove that no unsampled frame is personless. Report `strict_framewise_certified=false`; do not describe sampled PASS as a mathematical guarantee over every frame.
 - Classifier protocol, geometry configuration, detector binary, media identity, and exact final plan are part of the evidence identity. A change to cut points or the classifier invalidates the prior audit. Old classifier results cannot be reused as current evidence.
 - Long close-up/no-person sections should be removed when they are not required for semantic continuity.
 
+## Vision optimization backlog (experiments require labeled-frame validation)
+
+- Before tuning Apple Vision, build a representative human-labeled frame set covering visible people (including small, partial, and occluded people), clothing-only close-ups, product-only scenes, and truly empty scenes. Record Apple labels and raw observation confidences; report confusion matrix, recall, precision, false-negative rate, and escalation volume. Model disagreement alone is not an accuracy metric.
+- Validate frame orientation, decoded dimensions, and crop integrity first. Compare full-frame detection with an additional `regionOfInterest` pass only for validated small-person cases; retain the full-frame result and enable ROI only if labeled-frame recall improves without unacceptable false positives or runtime cost.
+- Measure consecutive-frame similarity and Apple-label runs. Explore reusing a neighboring confirmed-person result or deduplicating near-identical `NO_PERSON` reviews only within the same continuous source interval, with explicit source/frame provenance. Do not propagate a no-person verdict across frames. Keep the current rule that only Apple `NO_PERSON` frames may reach Codex; any deduplication must retain the no-person count and be validated against labeled samples.
+- Calibrate confidence thresholds separately by validated frame type (small person, occlusion, clothing close-up, product-only, empty). Threshold changes require a labeled holdout comparison and must report both false negatives and Codex escalation volume; never optimize escalation volume alone.
+- The current Apple probe already runs person rectangles, face rectangles, and body pose in one invocation. First measure which failure cases remain after that pass. Add a targeted second local detector/request only for a demonstrated low-confidence failure stratum, and keep it opt-in until its accuracy and latency are measured. Do not add a detector solely to duplicate an existing signal.
+- These items are experiments, not active classification behavior. Keep current thresholds, sampling, and `NO_PERSON`-only Codex routing unchanged until a labeled comparison supports a specific change.
+
 Local visual classifier:
 1. Use Apple Vision person, face and pose observations to classify any reliable person presence, separately marking close-ups.
-2. On `NO_PERSON` and `CLOTHING_CLOSEUP` samples, use only the local bound `qwen3-vl:8b` model to distinguish an actually empty/product-only frame from a person wearing or modeling the garment. This is a visual-presence second opinion, not identity recognition or semantic review. Keep inference on-device; model unavailability blocks the sample instead of silently treating it as a confirmed absence.
+2. After Apple Vision has finished the current phase (initial or refinement), batch only confirmed `NO_PERSON` samples into numbered 2x2 sheets for Codex visual review. Initial Codex-confirmed absence is the sole trigger for that stratum's refinement phase. Do not send clothing close-ups, uncertain samples, detector errors, or person frames to Codex. This is a visual-presence second opinion, not identity recognition or semantic review. If Codex or its review execution is unavailable for a `NO_PERSON` sample, block that sample instead of treating it as confirmed absence.
 
 Apple Vision person detection must run outside the Codex filesystem sandbox on this Mac. An ANE model-load failure or CoreVideo `-6662` / `CVPixelBuffer` allocation failure is an execution-environment error, not a no-person result; stop the audit and rerun outside the sandbox. Rebuild the cached probe whenever its Swift source is newer, and fail closed with the underlying Vision error instead of recording zero-person samples.
 
@@ -174,11 +199,10 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 ## Audio/cut-point rule
 
-- Codex first freezes the complete semantic combination from the current subtitle index and source context. Local ASR must not rescan full selected clips or broad candidate ranges after that decision.
-- 剪映导出的字幕文字可作为语义与切点文字锚点，字幕时间未经校准，只是邻近搜索提示，不是精确词界。局部 ASR 先在每个首尾切点约前后 2.5 秒内检索字幕边缘文字；错别字、英文品牌拼写或相近发音不要求逐字相同，可借相邻口播确认同一句，但必须定位到完整 ASR 词，不把不相干句子当成同音匹配。只对找不到或歧义的切点扩到约前后 6 秒，并记录扩窗原因。若仍有歧义，保留语义 PASS、原选段和已算 ASR，登记可恢复的局部切点问题，不重新选择整条商品。
-- ASR is an execution aid for generating and placing cut coordinates from local speech timing. It is not a semantic, transcript-accuracy, or final-quality audit layer; ASR confidence, text mismatch, or an unresolved word alignment cannot independently reject a product or change its selected meaning. Keep Codex semantic review and local audio/cut quality review separate.
-- Use subtitle cue timing, ASR-generated edge estimates, pauses/energy, and source frame boundaries to place clean starts and ends. Check the local waveform envelope (20 ms RMS, peak and sample range) and rank legal cut frames. Prefer quiet/low-energy locations that preserve the selected sentence; if continuous speech or ambiguous alignment leaves the exact edge uncertain, use the configured fallback sequence and mark the cut for local human preview. Never describe ASR timing as phoneme certification or force a cut through a word.
-- A failed ASR alignment preserves semantic selection and does not trigger semantic reselection. Record the affected edge, fallback evidence, `rollback_to=audio_boundary_refinement`, and preserved inputs. Unresolved audio risk remains a cut-quality issue for repair or manual preview; it is not an ASR verdict.
+- In the registered Taobao pipeline, Codex first freezes the complete semantic combination and its source-time boundaries from the current subtitle index and source context. ASR runs only after the Codex semantic review and required person pre-screen; do not prewarm or invoke ASR while an earlier gate remains unresolved. ASR must not rescan full selected clips or broad candidate ranges.
+- Local ASR uses each Codex-provided start/end time as the search center and, within the nearby window (default ±2.5 seconds), selects the closest complete ASR word onset/offset. It never matches subtitle text, aligns a transcript, or changes Codex's semantic selection. Record the requested edge, chosen edge, distance and cache/window metrics.
+- ASR is an execution aid, never a semantic, transcript-accuracy, or final-quality gate. If local ASR is unavailable or no nearby complete word edge is found, preserve the exact Codex boundary, keep running independent hard audits, and deliver any otherwise passing product to the requested timeline. Add a red timeline marker at each fallback edge with a clear manual-cutpoint-review label so the user can repair it there; do not divert the product to a subtitle-only preview or downgrade its semantic PASS.
+- Never describe ASR timing as phoneme certification or force a cut through a word. Independent hard gates still validate duration, semantic closure, banned content, person ratios, source bounds, cross-variant overlap, and Resolve identity/readback.
 - Never hard-cut a half word or half sentence.
 - Do not transcribe the body of a selected clip solely to obtain word alignment. If an edge check finds a likely swallowed word, repair or move that edge and recheck only the affected neighborhood.
 - Semantic timecodes are rough bounds. If a natural sentence ending lies after the rough end, extend to the sentence boundary first; if this would exceed 60 seconds, remove or replace another low-value complete segment. Never meet duration by cutting a sentence tail.
@@ -186,8 +210,9 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 ## Repair and exhaustion
 
-- 成片检查提速默认顺序：Codex先用派生字幕索引和原源上下文完成单商品组合，并立刻对组合做一次 Codex 语义终审；终审 PASS 后由本地 ASR 生成首尾切点执行建议，再对最终物理方案做人物复核并独立检查音频切点质量。不得把 ASR 当语义或最终审核层，也不得因 ASR 文字匹配失败而重选商品组合。只有实际切点改变字幕归属或语义范围时，才回退到组合并重做语义终审。明显将被替换的片段不提前做昂贵检测。失败后只重新计算受影响切点附近或人物超限的版本，最终所有硬审核仍须通过。
+- 淘宝注册流水线提速顺序：Codex 先用派生字幕索引和原源上下文完成单商品组合，并立刻对组合做一次 Codex 语义终审；随后执行 Apple 人物预筛，按既定 NO_PERSON 路由只把仍未确认的人物帧送 Codex，并只细化仍被判无人的分层；前序审核通过后才运行一次本地 ASR 近邻切点执行，再构建最终物理方案并运行一次完整人物比例审核。不得把 ASR 当语义或最终审核层，也不得因 ASR 未命中而重选组合或阻断通过商品。人物返修锁定未修改 variant，只重选、语义复核并视觉检查受影响 variant；相同源帧证据按身份复用。最终所有独立硬审核仍须通过。
 - 局部 ASR 只合并相邻或重叠的切点窗口，每批仅使用一个按需加载的模型实例；缓存齐全时不加载模型，不通过降低识别质量提速。窗口总量和扩窗原因纳入运行记录。
+- 本地模型按需启动。相关剪辑任务结束、失败或中断后，先确认没有其他活动任务正在使用该模型，再通过模型服务支持的卸载接口释放模型资源；不得因结束单个任务而关闭仍被其他任务使用的共享服务。收尾记录模型已卸载或仍在使用的原因。
 - 人物检测可复用 `scripts/review_compute_cache.py` 的物理范围缓存，键必须包含素材身份、大小/修改时间、精确检测范围及检测器内容指纹。说明、语义角色和时间线位置变化不要求重复计算相同源画面，但必须重算当前方案审核与完整方案摘要；缓存检测数据不代表写入授权。旧无指纹缓存不可直接提升为新缓存。
 - 每轮记录新计算量、缓存命中量和阶段耗时；只报告实测整轮提速，不将减少窗口数量当作实际耗时降幅。
 
@@ -270,6 +295,7 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 
 - 测试剪辑默认复用本项目已登记稳定ID的“测试”时间线，不按商品反复新建时间线。每次替换前全部门禁通过、保存旧测试线快照并验证项目备份，然后仅清空该测试线的片段和标记再写入。
 - 素材、正式成片及其他历史/人工时间线始终只读。测试线名称与稳定ID必须同时匹配当前项目登记，丢失、重名或误指向源/正式目标时停止，不猜测清空对象。新工作区继承同一项目的明确测试线绑定；不继承一次性文本外发授权。
+- 测试线允许沿用其已设置的帧率；方案、片段时长换算和标记时长必须与实时测试线帧率一致，不能写死25fps，也不能自动改动既有测试线设置。
 
 ## 组合语义前移与项目帧率固定（2026-10-19）
 
@@ -277,3 +303,47 @@ FFmpeg/ffprobe handle sampling, timing, segment extraction and ratio aggregation
 - 每个项目首次读取时通过统一Resolve连接器读取项目、全部时间线及素材帧率，登记项目稳定ID、时间线ID、输入摘要和素材身份。后续商品/窗口继承显式同项目登记，只核对身份，不重复探测或设置帧率。素材容器标称/平均帧率均记录；变帧率素材按本规则使用平均帧率近似映射并标明近似状态。
 - 写入前只读核对项目/时间线帧率是否与登记一致；外部变化、真实源/目标帧率不兼容即在清空前停止，不自动改帧率或转换。新建时间线继承项目帧率并验证；既有时间线不调用帧率设置。源起止帧的精确双证据回读继续保留，不能把接口取整误差说成帧率不一致。
 - 新契约仅用于未来自动执行；旧成品、人工修改和旧审核证据原样保留，不用新门禁给旧成品重新盖章。
+
+## 项目级范围与人物前置筛查流程（2026-10-23）
+
+- 指定 Resolve 项目后，以其稳定 ID 建立或复用唯一项目工作区；同一 Resolve 进程会话内首次确认项目身份后缓存确认结果，后续批次只校验目标时间线等写入安全条件。Resolve 进程重启后重新认证。
+- 首次处理前，调度器自动让 Codex 按商品匹配全量标题目录的范围锚点，校验完整清单后写入项目工作区，批次之间共用。每批最多处理三个商品。证据不足的商品必须报告为阻塞，不得从旧批次或未认证状态猜测边界，也不要求用户手工编辑 JSON。
+- 处理顺序固定为：商品候选与字幕语义重组 → Codex 语义终审 → 对选段源画面做人物筛查 → 本机 ASR 生成切点坐标 → 最终物理方案人物复核 → 硬门禁及交付。人物筛查失败时，将失败商品的精确源时间段作为硬排除项交给语义重组选段；重复选择失败区间直接拒绝，避免循环。
+- 人物筛查先完成 Apple Vision 全部样本，只将明确判为 `NO_PERSON` 的帧组成最多四帧的编号拼图送给 Codex 复核；服装特写、不确定和检测错误均不送 Codex，分别保留原标签或阻断。不调用 Qwen。Codex 确认有人可覆盖 Vision 的“无人”，Codex 是最终无人判断；检测错误不得算无人。最终方案仍需人物比例复核。
+- ASR 只依据局部 ASR 词时间戳定位首尾切点；ASR 坐标生成后不再运行本地音频波形切点复查，也不因缺少该复查而触发返工。语义重组、语义终审、ASR 坐标生成和人物检测各自保留其职责。
+- 切点查找先将已选字幕边缘文字与本机 ASR 词文本对齐，再使用匹配词界的本地时间戳；禁止只按未校准字幕时间挑最近词界。约 5 秒的局部切点窗口关闭 faster-whisper VAD，避免短窗口压缩/拼接静音造成词时间偏移。
+- 此规则覆盖此前“本地声音修边/音频边界复查为最终切点门禁”的冲突要求。旧切点审核请求在调度器恢复时清除，相关物理方案按新契约重新生成。
+- 批内最多并行准备两个不同商品；单一商品租约防止同商品并改，ASR worker 和 Resolve 写入均保持单实例串行。同一目标时间线不得并写。可用内存低于安全阈值时自动退回单商品。每阶段记录耗时、缓存命中、抽帧数、Codex 拼图/帧数与返修次数。
+
+## 单项目长任务档案
+
+- 长任务目标、验收、计划、进度和决定只存放在实时 Resolve 稳定 ID 对应的唯一 `.cache/projects/<project_key>/`，分别为 `PROJECT.md`、`ACCEPTANCE.md`、`PLAN.md`、`STATUS.md`、`DECISIONS.md`。不存放实际档案到仓库根目录或短期批次目录，不复制到另一个 Resolve 项目。
+- `PROJECT_TASKS.json` 仅保存任务范围、运行/返修预算、暂停与解除决定、执行记录；不复制商品完成状态。商品检查点和交付事务继续作为原始证据。`STATUS.md` 自动生成；命令 PASS、WRITTEN 和单批 PASS 都不自动等同项目验收完成。
+- 使用 `scripts/project_task.py` 初始化和维护档案。其 CLI 必须通过共享 connection doctor 重新读取实时稳定项目 ID；无连接不猜旧项目，不从仓库根部旧状态选项目。已有未登记长任务的项目兼容原流程，登记后缺少/损坏控制文件或文档须阻断。
+- 用户暂停必须写入结构化 holds 并追加决定；只有当前用户明确要求解除时才调用 release。跨批次、跨窗口和新计划均不解除暂停。调度器在启动和阶段边界检查；直接交付入口也检查写入限制。
+- 每项执行任务声明验收编号、批次/商品范围、允许操作、最多运行次数及单次返修上限。运行前原子预占预算；失败和中断仍占次数。未关闭运行需先诊断并显式关闭记录，关闭不重放交付，也不返还预算。
+- 目标、验收、计划、决定或控制配置变化使旧调度计划失效；刷新 STATUS 或追加运行统计不使计划失效。暂停、未验证事务或证据冲突不能被 Markdown 中的完成勾选覆盖。
+- 本层不自动封存新语义/质量证据，不恢复失败事务，不提升商品检查点，也不宣布整项目完成。最终完成仍须按既有证据验证链进行完整范围验收；状态页在未验收时明确显示 NOT_EVALUATED。
+
+
+## 阶段证据复用与历史交付（2026-10-27）
+
+- 商品检查点使用 `stage-dependencies-v1`：按阶段绑定直接执行代码，并通过已封存父依赖传播失效。共享生产模块仍按整文件保守绑定；规则、输入、范围、选段及相关执行逻辑变化不能复用相应阶段和下游。无关阶段代码不进入摘要。旧统一 `store_version` 证据不自动升级、重封或修改身份；只在既有授权和预算内重算未交付结果，不迁移真实运行数据。
+- 阶段证据的解析和递归校验只在单次只读操作内复用；命中检查文件摘要与当前上下文，返回前复核所有已访问证据、范围/方案指针及检查点文件。不得跨操作保存验证结果。最终语义/人物封存核验及写入边界检查保持独立，不能以读取缓存代替写前检查或写后回读。
+- ASR 只细化局部切点，不决定语义，也不要求方案必须带 ASR 依赖。能确认权重变化时，未交付批准失效并由既有流程使用当前身份重做 ASR 执行和依赖的物理证据；保留仍有效的上游语义与人物预筛。模型不可用本身没有质量否决权，新 ASR 执行按原规则记录精确 Codex 边界回退。读取已写入/已导出证据不与当前权重比较；历史模型身份、证据摘要、语义及独立硬门禁仍检查。其他原因导致历史证据过期时，保留交付事实和原引用，阻断自动重选或重复写入，不把旧交付变成新执行许可。
+- 状态职责保持分离：检查点记录证据及逐版批准/交付事实；游标记录可复用阶段引用和返修位置；任务记录控制授权、暂停和预算；人物恢复记录控制逐帧补证及已耗预算。游标和派生 Markdown 不拥有批准权，也不能覆盖暂停或预算。待恢复版本不能阻止同商品已经通过全部门禁的版本先交付。
+
+
+## 首次选段与语义终审输入冻结（2026-10-27）
+
+- Codex 首次把片段语义组成成片后，立即进入该组合的独立语义终审；人物预筛、ASR 和物理执行不得插在选段与该次终审之间。后续最终门禁只验证这份终审证据，不另换字幕重复发起语义终审。
+- 新粗选记录使用 `selection-subtitle-snapshot-v1`，从实际选段任务中冻结选段范围、原样字幕、必要前后文、卖点依据及被选中候选的完整原字幕上下文。语义终审任务绑定该快照、选段任务及粗选摘要。跨窗口或中断后仍复现同一份审核输入，不能从后来ASR、重生成字幕或另一候选版本重新拼装终审文本；不得只保留短片段而丢失首次选段所见的相关候选上下文。
+- 终审导入和最终门禁须核对审核任务与冻结快照一致。输入、规则或选段本身变化时，按相关依赖使未交付方案失效，重新选段后紧接新的终审；不把旧输入的PASS移植到新内容。缺少快照的旧记录不自动补盖当前证据，也不因失效而自动重选、改写或重复追加已交付版本。
+
+## 调度正确性与请求资源边界（2026-10-27）
+
+- 人物采样槽和物理帧任务分开标识：每个采样槽以版本、采样类型、分层、源文件及帧位置取回自己的分类；相同物理帧身份在同批内只生产一次，再分发给各采样槽。保持原采样数量、覆盖率、无人/近景阈值与技术补证预算，错误及超时保持缺证据，不用最后一帧结果覆盖整层。
+- 项目汇总的目标数、已写入数、已导出验证数必须统计同一明确商品集合；交付子集完成不等于所有版本完成。已通过检查点的缓存返回必须携带 product_complete 和待处理版本，不能隐藏仍需单独调度的恢复工作。
+- 项目内图片复核请求共享最多4个执行槽，跨商品/进程均受限；排队与执行共用原请求期限，恢复时计入原有预占及用时，不领取新次数或时间。成功任务不因排队重复执行，排队超时属于技术缺证据。
+- 长阶段每10秒向独立心跳记录报告监督进程仍存活；心跳不授予质量通过、任务授权或交付完成。主分析子进程使用显式计算期限（默认7200秒，可由 runtime.stage_timeout_seconds 配置），不增加内部既有请求或恢复额度。写入进程不套用计算阶段的终止/重试策略；中断或结果未知仍先核对事务及回读。
+- 父证据关系和下游失效集合统一由 stage_graph 定义，ASR仍须在语义终审及人物预筛通过后执行。单次只读验证可共享输入/代码身份快照，返回前使用全新快照重新计算内容摘要并核对所有已访问证据和指针；下一次操作及写入边界重新开始，禁止仅靠文件大小/时间戳判断未变。

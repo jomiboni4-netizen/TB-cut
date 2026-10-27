@@ -29,10 +29,11 @@ def _policy():
     return dict(data)
 
 
-CONTRACT = 'person-presence-two-stage-record-v7'
+CONTRACT = 'person-presence-two-stage-record-v8-codex-gated-refinement'
 POLICY = _policy()
 PERSON_LABELS = {'HOST_VISIBLE', 'PERSON_VISIBLE', 'PERSON_CLOSEUP', 'OTHER_PERSON'}
 ABSENT_LABELS = {'NO_PERSON', 'CLOTHING_CLOSEUP'}
+REFINEMENT_TRIGGER_LABELS = {'NO_PERSON'}
 
 
 def variant_duration(clips):
@@ -122,6 +123,7 @@ def estimate(clips, samples, *, closeup_ratio_max=None):
     initial = {}
     uncertain = errors = False
     no_person_initial = []
+    refinement_initial = []
     for i in range(n):
         sample = strata[('initial', i)][0]
         label = validate_classification(sample['classification'])['label']
@@ -130,11 +132,13 @@ def estimate(clips, samples, *, closeup_ratio_max=None):
         errors |= label == 'DETECTOR_ERROR'
         if label in ABSENT_LABELS:
             no_person_initial.append(i)
+        if label in REFINEMENT_TRIGGER_LABELS:
+            refinement_initial.append(i)
 
-    missing_refinements = [i for i in no_person_initial
+    missing_refinements = [i for i in refinement_initial
                            if len(strata.get(('refinement', i), [])) != refinements_per]
     unexpected_refinements = [i for kind, i in strata
-                              if kind == 'refinement' and i not in no_person_initial]
+                              if kind == 'refinement' and i not in refinement_initial]
     if missing_refinements or unexpected_refinements:
         return {'status': 'BLOCKED' if unexpected_refinements else 'UNCERTAIN',
                 'full_plan_coverage': False, 'evidence_level': 'ENGINEERING_SAMPLED',
@@ -143,7 +147,7 @@ def estimate(clips, samples, *, closeup_ratio_max=None):
     no_person_ratio = closeup_ratio = Fraction()
     for i in range(n):
         width = Fraction(1, n)
-        if i in no_person_initial:
+        if i in refinement_initial:
             labels = [validate_classification(s['classification'])['label']
                       for s in strata[('refinement', i)]]
             uncertain |= 'UNCERTAIN' in labels
@@ -166,8 +170,8 @@ def estimate(clips, samples, *, closeup_ratio_max=None):
             'no_person_ratio_estimate': no_person_value,
             'no_person_ratio_max_inclusive': float(no_person_limit),
             'no_person_sample_count': sum(initial[i] in ABSENT_LABELS for i in range(n)),
-            'no_person_refinement_count': len(no_person_initial)*refinements_per,
-            'no_person_refinement_strata': no_person_initial,
+            'no_person_refinement_count': len(refinement_initial)*refinements_per,
+            'no_person_refinement_strata': refinement_initial,
             'closeup_duration_ratio_estimate': closeup_value,
             'closeup_duration_ratio_max_inclusive': float(closeup_limit),
             'closeup_sample_count': sum(s['classification']['label'] == 'PERSON_CLOSEUP' for s in samples),
@@ -178,4 +182,4 @@ def estimate(clips, samples, *, closeup_ratio_max=None):
             'status': status,
             'evidence_level': 'ENGINEERING_SAMPLED',
             'strict_framewise_certified': False,
-            'statistical_claim': '10 equal final-record strata; flagged strata refined by 10 samples; no framewise guarantee'}
+            'statistical_claim': '10 equal final-record strata; Codex-confirmed no-person strata refined by 10 samples; no framewise guarantee'}

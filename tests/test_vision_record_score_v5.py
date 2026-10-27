@@ -109,9 +109,11 @@ class TwoStagePersonScoreTests(unittest.TestCase):
                 samples[0]['classification'] = {'label': label, 'subject_evidence': False}
                 self.assertEqual(vision.estimate(clips, samples)['status'], expected)
 
-    def test_contract_upgrades_without_changing_frame_classification_cache(self):
-        self.assertEqual(vision.CONTRACT, 'person-presence-two-stage-record-v7')
-        self.assertEqual(vision.FRAME_CACHE_PROTOCOL, 'person-presence-closeup-strata-v5')
+    def test_contract_and_parallel_review_cache_versions(self):
+        self.assertEqual(vision.CONTRACT,
+                         'person-presence-two-stage-record-v8-codex-gated-refinement')
+        self.assertEqual(vision.FRAME_CACHE_PROTOCOL,
+                         'person-presence-closeup-strata-v13-parallel-codex-sheets')
 
 
 if __name__ == '__main__':

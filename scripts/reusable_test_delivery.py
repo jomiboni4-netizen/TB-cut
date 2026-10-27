@@ -6,6 +6,7 @@ It is not a finished-delivery writer and always labels results pending review.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -56,8 +57,13 @@ def assert_authorized_target_clear(snapshot_body, plan, override, state):
             and auth.get("target_timeline_id") == snapshot_body["id"]
             and auth.get("project_id") == state["project_identity"]["resolve_project_id"],
             "current_target_replacement_authorization_missing")
-    require(snapshot_body["name"] == state["resolve"]["target_timeline"],
-            "clear_target_is_not_registered_delivery_timeline")
+    binding = state.get("runtime", {}).get("test_timeline_binding", {})
+    require(binding.get("project_id") == state["project_identity"]["resolve_project_id"]
+            and snapshot_body["id"] == binding.get("timeline_id")
+            and snapshot_body["id"] not in {state["resolve"].get("source_timeline_id"),
+                                             state["resolve"].get("target_timeline_id")}
+            and snapshot_body["name"] == binding.get("name"),
+            "clear_target_is_not_registered_test_timeline")
 
 
 def verified_backup(path):
@@ -73,13 +79,23 @@ def connect_project(paths, state, override):
     require(resolve is not None, "resolve_not_connected")
     manager = resolve.GetProjectManager()
     project = manager.GetCurrentProject()
-    require(project is not None and stable_id(project) == state["project_identity"]["resolve_project_id"]
+    require(project is not None, "resolve_project_identity_mismatch")
+    from resolve_session_identity import confirm_project
+    confirmed, _ = confirm_project(paths, project)
+    require(confirmed == state["project_identity"]["resolve_project_id"]
             and project.GetName() == state["resolve"]["project_name"], "resolve_project_identity_mismatch")
     timelines = [project.GetTimelineByIndex(i) for i in range(1, project.GetTimelineCount() + 1)]
     source_matches = [t for t in timelines if t.GetName() == state["resolve"]["source_timeline"]]
-    target_matches = [t for t in timelines if t.GetName() == state["resolve"]["target_timeline"]]
-    require(len(source_matches) == len(target_matches) == 1, "resolve_timeline_name_missing_or_ambiguous")
-    source, target = source_matches[0], target_matches[0]
+    binding = state.get("runtime", {}).get("test_timeline_binding", {})
+    test_matches = [t for t in timelines if stable_id(t) == binding.get("timeline_id")
+                    and t.GetName() == binding.get("name")]
+    require(len(source_matches) == len(test_matches) == 1
+            and binding.get("project_id") == state["project_identity"]["resolve_project_id"],
+            "resolve_timeline_name_missing_or_ambiguous")
+    source, target = source_matches[0], test_matches[0]
+    require(stable_id(target) not in {stable_id(source), state["resolve"].get("target_timeline_id")}
+            and target.GetName() not in {state["resolve"]["source_timeline"], state["resolve"]["target_timeline"]},
+            "test_timeline_is_protected_source_or_final")
     require(stable_id(source) == override["resolve_write_authorization"]["source_timeline_id"],
             "resolve_source_identity_mismatch")
     require(stable_id(target) == override["resolve_write_authorization"]["target_timeline_id"],
@@ -88,7 +104,170 @@ def connect_project(paths, state, override):
     return resolve, manager, project, timelines, source, target
 
 
-def verify_source_media(paths, state, run, plan, *, full_hash):
+def prepare_registered_test_timeline(paths, target_name, target_id):
+    """Back up and clear only the stable-ID registered reusable test timeline."""
+    state = paths.load_state()
+    project_id = state["project_identity"]["resolve_project_id"]
+    binding = state.get("runtime", {}).get("test_timeline_binding", {})
+    require(binding.get("project_id") == project_id
+            and binding.get("timeline_id") == target_id
+            and binding.get("name") == target_name,
+            "selected_target_is_not_registered_test_timeline")
+    require(target_id not in {state["resolve"].get("source_timeline_id"),
+                              state["resolve"].get("target_timeline_id")}
+            and target_name not in {state["resolve"].get("source_timeline"),
+                                    state["resolve"].get("target_timeline")},
+            "test_timeline_is_protected_source_or_final")
+    from resolve_connection import connect
+    resolve = connect(status_path=paths.workspace_root / "resolve_connection_status.json")
+    require(resolve is not None, "resolve_not_connected")
+    manager = resolve.GetProjectManager()
+    project = manager.GetCurrentProject() if manager else None
+    require(project is not None, "resolve_project_identity_mismatch")
+    from resolve_session_identity import confirm_project
+    confirmed, _ = confirm_project(paths, project)
+    require(confirmed == project_id, "resolve_project_identity_mismatch")
+    timelines = [project.GetTimelineByIndex(index)
+                 for index in range(1, project.GetTimelineCount() + 1)]
+    matches = [timeline for timeline in timelines
+               if timeline.GetName() == target_name and stable_id(timeline) == target_id]
+    require(len(matches) == 1, "registered_test_timeline_missing_or_ambiguous")
+    target = matches[0]
+    transaction = (paths.cache_dir / "resolve_delivery" /
+                   str(state["batch"]["batch_id"]) / "reusable_test_prepare_transaction.json")
+    transaction.parent.mkdir(parents=True, exist_ok=True)
+    current = snapshot(target)
+    if transaction.is_file():
+        prior = read(transaction)
+        require(prior.get("status") in ("READBACK_VERIFIED", "ALREADY_EMPTY_VERIFIED")
+                and prior.get("project_id") == project_id
+                and prior.get("target_timeline_id") == target_id,
+                "reusable_test_prepare_transaction_pending_diagnose_first")
+        expected = prior.get("after") or prior.get("empty_snapshot")
+        require(expected == current and not current["rows"] and not current["markers"],
+                "reusable_test_timeline_changed_after_prepare")
+        return {"status": prior["status"], "reused_transaction": True,
+                "target_timeline": target_name, "target_timeline_id": target_id}
+    if not current["rows"] and not current["markers"]:
+        receipt = {"status": "ALREADY_EMPTY_VERIFIED", "project_id": project_id,
+                   "target_timeline_id": target_id, "target_timeline": target_name,
+                   "mutation_performed": False, "before": current, "after": current,
+                   "removed_item_count": 0, "removed_marker_count": 0}
+        atomic_json(transaction, receipt)
+        return {"status": receipt["status"], "reused_transaction": False,
+                "target_timeline": target_name, "target_timeline_id": target_id,
+                "removed_item_count": 0, "removed_marker_count": 0,
+                "mutation_performed": False}
+    before = {stable_id(timeline): snapshot(timeline) for timeline in timelines}
+    backup = (paths.cache_dir / "backups" /
+              f"{project.GetName()}_before_reusable_test_{datetime.now():%Y%m%d_%H%M%S}.drp")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    require(manager.SaveProject() and manager.ExportProject(project.GetName(), str(backup), False),
+            "reusable_test_backup_failed")
+    backup_sha = verified_backup(backup)
+    atomic_json(transaction, {"status": "CLEAR_IN_PROGRESS", "project_id": project_id,
+                              "target_timeline_id": target_id, "target_timeline": target_name,
+                              "backup": str(backup), "backup_sha256": backup_sha,
+                              "before": before[target_id]})
+    with project_lock(paths, project_id):
+        require(project.SetCurrentTimeline(target), "reusable_test_target_activation_failed")
+        require({stable_id(timeline): snapshot(timeline) for timeline in timelines} == before,
+                "resolve_timeline_changed_before_reusable_test_clear")
+        rows = item_rows(target)
+        if rows:
+            require(target.DeleteClips(rows, False), "reusable_test_clip_clear_failed")
+        if target.GetMarkers():
+            require(target.DeleteMarkersByColor("All"), "reusable_test_marker_clear_failed")
+        require(manager.SaveProject(), "reusable_test_save_after_clear_failed")
+    after = {stable_id(timeline): snapshot(timeline) for timeline in timelines}
+    require(not after[target_id]["rows"] and not after[target_id]["markers"],
+            "reusable_test_clear_readback_failed")
+    require(all(before[timeline_id] == body for timeline_id, body in after.items()
+                if timeline_id != target_id), "protected_timeline_changed_during_test_clear")
+    body = read(transaction)
+    body.update(status="READBACK_VERIFIED", after=after[target_id],
+                removed_item_count=len(rows),
+                removed_marker_count=len(before[target_id]["markers"]))
+    atomic_json(transaction, body)
+    return {"status": "READBACK_VERIFIED", "reused_transaction": False,
+            "target_timeline": target_name, "target_timeline_id": target_id,
+            "removed_item_count": len(rows),
+            "removed_marker_count": len(before[target_id]["markers"])}
+
+
+def verify_interrupted_clear_no_mutation(paths, transaction_relative_path):
+    """Record a no-mutation disposition only after live stable-ID readback."""
+    project_directory = paths.project_directory.resolve()
+    raw_transaction = Path(transaction_relative_path)
+    require(not raw_transaction.is_absolute(), "no_mutation_transaction_path_invalid")
+    transaction = (project_directory / raw_transaction).resolve()
+    require(transaction.is_relative_to(project_directory) and transaction.is_file()
+            and not (project_directory / raw_transaction).is_symlink(),
+            "no_mutation_transaction_path_invalid")
+    body = read(transaction)
+    state = paths.load_state()
+    project_id = state["project_identity"]["resolve_project_id"]
+    binding = state.get("runtime", {}).get("test_timeline_binding", {})
+    target_id, target_name = body.get("target_timeline_id"), body.get("target_timeline")
+    require(body.get("status") == "CLEAR_IN_PROGRESS"
+            and body.get("project_id") == project_id
+            and binding.get("project_id") == project_id
+            and binding.get("timeline_id") == target_id
+            and binding.get("name") == target_name,
+            "no_mutation_transaction_not_registered_clear")
+    backup = Path(body.get("backup", ""))
+    require(backup.is_file() and not backup.is_symlink()
+            and backup.resolve().is_relative_to(project_directory),
+            "no_mutation_backup_invalid")
+    backup_sha = verified_backup(backup)
+    require(backup_sha == body.get("backup_sha256"), "no_mutation_backup_digest_mismatch")
+
+    from resolve_connection import connect
+    resolve = connect(status_path=paths.workspace_root / "resolve_connection_status.json")
+    require(resolve is not None, "resolve_not_connected")
+    manager = resolve.GetProjectManager()
+    project = manager.GetCurrentProject() if manager else None
+    require(project is not None, "resolve_project_identity_mismatch")
+    from resolve_session_identity import confirm_project
+    confirmed, _ = confirm_project(paths, project)
+    require(confirmed == project_id, "resolve_project_identity_mismatch")
+    timelines = [project.GetTimelineByIndex(index)
+                 for index in range(1, project.GetTimelineCount() + 1)]
+    matches = [timeline for timeline in timelines
+               if stable_id(timeline) == target_id and timeline.GetName() == target_name]
+    require(len(matches) == 1, "registered_test_timeline_missing_or_ambiguous")
+    live = snapshot(matches[0])
+    before = body.get("before")
+    require(isinstance(before, dict) and before == live
+            and not live.get("rows") and not live.get("markers"),
+            "no_mutation_live_snapshot_mismatch")
+
+    relative = str(transaction.relative_to(project_directory))
+    transaction_sha = _sha256(transaction)
+    proof_path = transaction.with_name("reusable_test_prepare_no_mutation_verification.json")
+    proof = {"schema_version": 1, "status": "NO_MUTATION_VERIFIED",
+             "transaction_path": relative, "transaction_sha256": transaction_sha,
+             "original_status": body["status"], "project_id": project_id,
+             "target_timeline_id": target_id, "target_timeline": target_name,
+             "before": before, "live_snapshot": live,
+             "before_sha256": digest(before), "live_snapshot_sha256": digest(live),
+             "backup_sha256": backup_sha, "backup_verified": True,
+             "verified_at": datetime.now().astimezone().isoformat()}
+    if proof_path.exists():
+        existing = read(proof_path)
+        require(all(existing.get(key) == value for key, value in proof.items()
+                    if key != "verified_at"), "no_mutation_proof_conflict")
+    else:
+        atomic_json(proof_path, proof)
+    from project_task import record_no_mutation_disposition
+    disposition = record_no_mutation_disposition(paths, proof_path)
+    return {"status": "NO_MUTATION_VERIFIED", "transaction_status_preserved": body["status"],
+            "target_timeline_id": target_id, "target_timeline": target_name,
+            "item_count": len(live["rows"]), "marker_count": len(live["markers"]),
+            "backup_verified": True, "disposition": disposition}
+
+
+def verify_source_media(paths, state, run, plan, *, full_hash, target_fps):
     clips = [clip for product in plan["products"] for clip in product["clips"]]
     if full_hash:
         verify_source_fingerprints(run, state, clips)
@@ -105,7 +284,7 @@ def verify_source_media(paths, state, run, plan, *, full_hash):
         path = Path(sources[clip["source_file"]])
         require(path.is_file(), "test_source_missing")
         require(clip["width"] == 1080 and clip["height"] == 1920, "test_source_aspect_not_verified")
-        require(clip["timeline_fps"] == 25.0, "test_timeline_rate_mismatch")
+        require(float(clip["timeline_fps"]) == float(target_fps), "test_timeline_rate_mismatch")
         require(clip["source_end_seconds"] <= clip["audio_duration_seconds"],
                 "selected_audio_time_outside_source_audio_stream")
     return sources
@@ -177,7 +356,7 @@ def validate_readback(target, expected, product_id, plan_digest, *, require_mark
                 "test_readback_video_source_start_mismatch")
         require(v["source_end_raw"] in (exp["source_end_exclusive"], exp["source_end_exclusive"] - 1),
                 "test_readback_video_source_end_mismatch")
-    require(float(actual["settings"]["timelineFrameRate"]) == 25.0
+    require(float(actual["settings"]["timelineFrameRate"]) == float(target.GetSetting("timelineFrameRate"))
             and actual["settings"]["timelineResolutionWidth"] == "1080"
             and actual["settings"]["timelineResolutionHeight"] == "1920", "test_target_settings_changed")
     markers = [m for m in actual["markers"].values() if m.get("customData", "").startswith(
@@ -203,9 +382,10 @@ def add_product_markers(target, product_id, plan_sha, product, expected, start_f
     begin = expected[0]["record_start"]
     end = expected[-1]["record_end"]
     duration = end - begin
-    require(0 < duration / 25 < 60, "test_readback_product_duration_not_under_60")
+    timeline_fps = float(target.GetSetting("timelineFrameRate"))
+    require(0 < duration / timeline_fps < 60, "test_readback_product_duration_not_under_60")
     require(target.AddMarker(begin - start_frame, "Blue", f"Codex测试｜商品{product_id}｜待审核",
-                             f"字幕选段；音频首尾/音画同步人工复核待完成；时长约{duration/25:.2f}秒",
+                             f"字幕选段；音频首尾/音画同步人工复核待完成；时长约{duration/timeline_fps:.2f}秒",
                              duration, f"CODEX_TEST:{plan_sha}:{product_id}:start"),
             "test_product_marker_add_failed_no_replay")
     for n, row in enumerate(expected[1:], 1):
@@ -244,13 +424,31 @@ def append_product_sequential(target, pool, media_by_name, product_id, product, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("clear", "append", "repair", "recover", "readback"))
+    parser.add_argument("operation", choices=("prepare", "verify-no-mutation", "clear", "append", "repair", "recover", "readback"))
     parser.add_argument("--root", default=".")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--product", type=int)
+    parser.add_argument("--target-timeline")
+    parser.add_argument("--target-timeline-id")
+    parser.add_argument("--transaction")
     parser.add_argument("--plan", default="delivery/CODEX_TEST_PLAN.json")
     args = parser.parse_args()
     paths = resolve_runtime_paths(Path(args.root).resolve(), args.workspace)
+    from project_task import guard
+    guard(paths, "write")
+    if args.operation in ("recover", "repair"):
+        guard(paths, "recover")
+    if args.operation == "prepare":
+        require(bool(args.target_timeline and args.target_timeline_id),
+                "reusable_test_prepare_target_identity_required")
+        print(json.dumps(prepare_registered_test_timeline(
+            paths, args.target_timeline, args.target_timeline_id), ensure_ascii=False))
+        return
+    if args.operation == "verify-no-mutation":
+        require(bool(args.transaction), "no_mutation_transaction_path_required")
+        print(json.dumps(verify_interrupted_clear_no_mutation(
+            paths, args.transaction), ensure_ascii=False))
+        return
     state = paths.load_state(); run = read(paths.workspace_root / "RUN.json")
     plan_path = paths.runtime_argument(args.plan); plan = read(plan_path)
     override = read(paths.workspace_root / "delivery" / "USER_OVERRIDE.json")
@@ -269,13 +467,15 @@ def main():
             "authorized_target_changed")
     for clip in [c for p in plan["products"] for c in p["clips"]]:
         require(clip["source_file"] in {Path(p).name for p in state["video_paths"]}, "test_source_outside_registration")
-    sources = verify_source_media(paths, state, run, plan, full_hash=args.operation == "clear")
+    timeline_fps = float(target.GetSetting("timelineFrameRate"))
+    sources = verify_source_media(paths, state, run, plan, full_hash=args.operation == "clear",
+                                  target_fps=timeline_fps)
     pool = project.GetMediaPool(); available = media_items(pool.GetRootFolder())
     media_by_name = {name: available.get(str(Path(path).resolve())) for name, path in sources.items()}
     require(all(media_by_name[c["source_file"]] is not None for p in plan["products"] for c in p["clips"]),
             "test_source_missing_from_resolve_pool")
     with project_lock(paths, stable_id(project)):
-        require(float(target.GetSetting("timelineFrameRate")) == 25.0
+        require(float(target.GetSetting("timelineFrameRate")) == timeline_fps
                 and target.GetSetting("timelineResolutionWidth") == "1080"
                 and target.GetSetting("timelineResolutionHeight") == "1920", "resolve_target_format_mismatch")
         if args.operation == "clear":
@@ -344,7 +544,7 @@ def main():
             tx["last_product"] = args.product
             atomic_json(journal, tx)
             print(json.dumps({"status": tx["status"], "product_id": args.product,
-                              "source_clips": len(expected), "duration_seconds_approx": sum(r["duration"] for r in expected)/25,
+                              "source_clips": len(expected), "duration_seconds_approx": sum(r["duration"] for r in expected)/timeline_fps,
                               "record_start": expected[0]["record_start"], "record_end": expected[-1]["record_end"]}))
             return
 
@@ -420,7 +620,7 @@ def main():
             atomic_json(journal, tx)
             print(json.dumps({"status": tx["status"], "product_id": product_id, "repair_round": 1,
                               "backup_sha256": repair_backup_sha,
-                              "duration_seconds_approx": sum(r["duration"] for r in expected)/25,
+                              "duration_seconds_approx": sum(r["duration"] for r in expected)/timeline_fps,
                               "seam_frame": expected[1]["record_start"] if len(expected) > 1 else None}))
             return
 
@@ -446,7 +646,7 @@ def main():
             atomic_json(journal, tx)
             print(json.dumps({"status": tx["status"], "product_id": args.product,
                               "recovered_existing_append": True,
-                              "duration_seconds_approx": sum(r["duration"] for r in expected)/25}))
+                              "duration_seconds_approx": sum(r["duration"] for r in expected)/timeline_fps}))
             return
 
         require(args.product in wanted and tx["status"] == f"APPENDED_{args.product}_PENDING_READBACK",
@@ -464,7 +664,7 @@ def main():
         print(json.dumps({"status": "PASS", "product_id": args.product,
                           "timeline_start": expected[0]["record_start"],
                           "timeline_end": expected[-1]["record_end"],
-                          "duration_seconds_approx": sum(x["duration"] for x in expected)/25,
+                          "duration_seconds_approx": sum(x["duration"] for x in expected)/timeline_fps,
                           "readback_snapshot_sha256": digest(actual)}))
 
 

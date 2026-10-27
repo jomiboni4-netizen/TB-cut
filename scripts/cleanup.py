@@ -19,7 +19,8 @@ REPORTS = ["reports"]
 
 PROTECTED_NAMES = {
     "AGENTS.md", "PROJECT_RULES.md", "PROJECT_STATE.json", "PROJECT_STATE.template.json", "CHANGELOG.md",
-    "PROJECT_CONFIG.json", "RUN.json",
+    "PROJECT_CONFIG.json", "RUN.json", "PROJECT_TASKS.json",
+    "PROJECT.md", "ACCEPTANCE.md", "PLAN.md", "STATUS.md", "DECISIONS.md",
 }
 
 BUILD_DIRS = {'swift-module-cache', 'swift_module_cache', 'swift_modules',
@@ -63,6 +64,9 @@ def rebuildable_targets(workspace: Path):
 def load_protected_paths(root: Path, workspace: Path | None = None):
     protected = {root / x for x in PROTECTED_NAMES}
     states = {root / 'PROJECT_STATE.json', (workspace or root) / 'PROJECT_STATE.json'}
+    project_catalog = root / '.cache' / 'projects'
+    for name in ('PROJECT_TASKS.json', 'PROJECT.md', 'ACCEPTANCE.md', 'PLAN.md', 'STATUS.md', 'DECISIONS.md'):
+        protected.update(project_catalog.glob('*/' + name))
     cache = (workspace or root) / '.cache'
     if cache.is_dir():
         states.update(cache.rglob('PROJECT_STATE.json'))
